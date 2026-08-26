@@ -20,6 +20,7 @@ pub const event = @import("core/event.zig");
 pub const diff = @import("core/diff.zig");
 pub const git = @import("core/git.zig");
 pub const hunk = @import("core/hunk.zig");
+pub const source = @import("core/source.zig");
 
 test {
     _ = fs;
@@ -32,4 +33,5 @@ test {
     _ = diff;
     _ = git;
     _ = hunk;
+    _ = source;
 }

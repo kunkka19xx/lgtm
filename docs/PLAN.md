@@ -88,17 +88,29 @@ corrupting a fixture expectation and confirming the failure.
 - [x] Change-id assignment and inheritance: exact hash match, then greedy maximum overlap of new-file ranges; merge keeps the lower id and records an alias so "fix #4" still resolves; split leaves the id on the larger fragment (SPEC.md §6.5, PERFORMANCE.md §4)
 - [x] Files over `large_file_lines` defer their render, and `materialise()` parses the deferred section on demand from the retained byte range. **Deferring is not discarding**: an earlier version dropped the content outright, which would have made oversized files unreviewable rather than merely slower to open
 - [x] Blob hashes captured from git's `index a..b` line, ready to key the cache on
-- [ ] **HEAD-side content in a `Buffer`, hunks as annotations into the HEAD and worktree Buffers (ARCHITECTURE.md §11.1).** NOT DONE. `DiffLines.text` currently borrows from git's diff output, which is what §11.1 says not to render from. It works and is well tested, but the buffer-backed model is what keeps editing additive later, so this is a real gap rather than a detail
-- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Deferred until phase 3, when the watcher starts producing repeated re-diffs and `--profile` can say whether parsing is worth caching
+- [x] **HEAD and worktree content in `Buffer`s, with the diff as an overlay (ARCHITECTURE.md §11.1).** `core/source.zig` loads HEAD blobs through a single `git cat-file --batch` and worktree files directly, then `attach()` repoints every line's text into the buffers. Rendering now reads from buffers, not from git's diff output
+- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Deferred to phase 3, when the watcher starts producing repeated re-diffs and `--profile` can say whether parsing is worth caching. Blob hashes are already captured
 
-**Gate: partially met.** Recorded real `git diff` output (`tests/fixtures/diffs/mixed.diff`,
+**Gate: met.** Recorded real `git diff` output (`tests/fixtures/diffs/mixed.diff`,
 covering add, rename, modify, binary, delete and a git-merged multi-change hunk)
 parses with `git diff --numstat` as the oracle, and change-id stability tests
 cover merge, split, drift and fresh ids. 57 tests pass.
 
-Not met: the buffer-backed model above. Decide before phase 5 whether to do it
-now or accept rendering from diff text in v0.1 and pay for it when editing
-arrives.
+Three things fell out of the buffer model that were not the stated goal:
+
+- **`attach()` verifies as it goes.** Every line must match the buffer it should
+  have come from, so a mismatch means the file changed between git running and
+  the read: the torn-read hazard of watching a tree an agent is writing to
+  (SPEC.md §9). It is reported rather than rendered as a blend of two states,
+  and the caller can re-diff.
+- **It is a parser cross-check.** All files in this repo and the scratch repo
+  attach cleanly, which means the parser's text agrees with the file contents
+  byte for byte across add, delete, rename, binary and modify.
+- **Expanding context is now possible at all.** Git emits three lines either
+  side; the buffers hold the whole file.
+
+`io/proc.zig` gained `runWithInput` for the batched `cat-file`, which is also
+what any future batched git call will need.
 
 `zig build diff -- [repo]` dumps the parsed diff of any repository, which is how
 the untracked-file gap surfaced.
