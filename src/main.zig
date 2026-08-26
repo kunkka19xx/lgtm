@@ -3,15 +3,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const fs = @import("io/fs.zig");
-pub const proc = @import("io/proc.zig");
+pub const lib = @import("lib.zig");
 pub const tty = @import("io/tty.zig");
-pub const metrics = @import("io/metrics.zig");
-pub const buffer = @import("text/buffer.zig");
-pub const edit = @import("text/edit.zig");
-pub const event = @import("core/event.zig");
-pub const anchor = @import("core/anchor.zig");
 pub const smoke = @import("ui/smoke.zig");
+const metrics = lib.metrics;
 
 const usage =
     \\lgtm - read what your agent wrote
@@ -74,13 +69,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 test {
-    _ = fs;
-    _ = proc;
+    _ = lib;
     _ = tty;
-    _ = metrics;
-    _ = buffer;
-    _ = edit;
-    _ = event;
-    _ = anchor;
     _ = smoke;
 }

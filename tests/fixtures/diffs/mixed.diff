@@ -1,0 +1,54 @@
+diff --git a/src/added.txt b/src/added.txt
+new file mode 100644
+index 0000000..7635aca
+--- /dev/null
++++ b/src/added.txt
+@@ -0,0 +1 @@
++new file here
+diff --git a/src/before.txt b/src/after.txt
+similarity index 100%
+rename from src/before.txt
+rename to src/after.txt
+diff --git a/src/auth.rs b/src/auth.rs
+index 50ff5fe..96fa47c 100644
+--- a/src/auth.rs
++++ b/src/auth.rs
+@@ -1,6 +1,7 @@
+ fn validate(t: &str) -> bool {
+     let c = decode(t);
+-    if c.exp < now() {
++    if c.exp <= now() {
++        metrics::expired();
+         return false;
+     }
+     true
+diff --git a/src/blob.bin b/src/blob.bin
+index c94be36..dcd4c63 100644
+Binary files a/src/blob.bin and b/src/blob.bin differ
+diff --git a/src/gone.txt b/src/gone.txt
+deleted file mode 100644
+index 0f34967..0000000
+--- a/src/gone.txt
++++ /dev/null
+@@ -1,2 +0,0 @@
+-delete me
+-second line
+diff --git a/src/list.txt b/src/list.txt
+index e031777..2378286 100644
+--- a/src/list.txt
++++ b/src/list.txt
+@@ -1,12 +1,12 @@
+ one
+ two
+-three
++THREE
+ four
+ five
+ six
+ seven
+ eight
+ nine
+-ten
++TEN
+ eleven
+ twelve

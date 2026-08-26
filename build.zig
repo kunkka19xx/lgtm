@@ -22,6 +22,8 @@ pub fn build(b: *std.Build) void {
     });
     root.addOptions("build_options", build_options);
     root.addImport("vaxis", vaxis);
+    // Recorded git output, embedded so core/ tests stay free of file I/O.
+    root.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const exe = b.addExecutable(.{
         .name = "lgtm",
@@ -42,6 +44,7 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addOptions("build_options", build_options);
     test_module.addImport("vaxis", vaxis);
+    test_module.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
@@ -54,23 +57,22 @@ pub fn build(b: *std.Build) void {
 
     // Anchor harness: the phase 1 go/no-go gate. Exits non-zero below the
     // required hit rate, so it can gate CI.
-    const anchor_mod = b.createModule(.{
-        .root_source_file = b.path("src/core/anchor.zig"),
+    // One module for every harness: rooted at src/ so modules spanning core/
+    // and io/ resolve, and so no file lands in two modules at once.
+    const lgtm_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib.zig"),
         .target = target,
         .optimize = optimize,
     });
-    const fs_mod = b.createModule(.{
-        .root_source_file = b.path("src/io/fs.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    lgtm_mod.addOptions("build_options", build_options);
+    lgtm_mod.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
+
     const harness_mod = b.createModule(.{
         .root_source_file = b.path("src/harness/anchor_harness.zig"),
         .target = target,
         .optimize = optimize,
     });
-    harness_mod.addImport("anchor", anchor_mod);
-    harness_mod.addImport("fs", fs_mod);
+    harness_mod.addImport("lgtm", lgtm_mod);
 
     const harness = b.addExecutable(.{
         .name = "anchor-harness",
@@ -80,6 +82,21 @@ pub fn build(b: *std.Build) void {
     run_harness.setCwd(b.path("."));
     if (b.args) |a| run_harness.addArgs(a);
     b.step("anchor", "Run the anchor re-anchoring harness").dependOn(&run_harness.step);
+
+    // Points the real git pipeline at a repository and prints what the parser
+    // made of it. `zig build diff -- [repo]`.
+    const dump_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/diff_dump.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    dump_mod.addImport("lgtm", lgtm_mod);
+
+    const dump = b.addExecutable(.{ .name = "diff-dump", .root_module = dump_mod });
+    const run_dump = b.addRunArtifact(dump);
+    run_dump.setCwd(b.path("."));
+    if (b.args) |a| run_dump.addArgs(a);
+    b.step("diff", "Dump the parsed diff of a repository").dependOn(&run_dump.step);
 
     // Licence header check. Runs as its own step and as part of `zig build check`.
     const spdx = b.addExecutable(.{

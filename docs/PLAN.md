@@ -47,45 +47,61 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 - [x] Window hashing: k=5 lines of interned ids, never single lines (PERFORMANCE.md §2.2)
 - [x] In-process line diff over interned ids with common prefix/suffix trimming (PERFORMANCE.md §1.2, §1.3). Implemented as **patience**: anchor on lines unique to both sides, take the longest increasing subsequence, recurse between anchors. Chosen over histogram because it anchors on distinctive lines, which is what places a note correctly when a line has been duplicated
 - [x] Primary re-anchor path: table lookup through the line map, O(1) per note (PERFORMANCE.md §3.1)
-- [ ] Fallback tiers 1-5: exact window hash ±50 lines; whole-file window-hash multimap index; whitespace-normalised hash; token-multiset similarity; `hunk_hash`. Tier 6 = `stale` (PERFORMANCE.md §3.2). No edit distance, ever (§3.3)
+- [x] Fallback tiers 1, 2, 3 and 6: exact window hash within ±50 lines, exact window hash anywhere via a sorted index, whitespace-normalised hash, then `stale`. Indexes are built **lazily**, only when the line map misses, so a re-diff where every note maps costs nothing extra (PERFORMANCE.md §0). No edit distance, ever (§3.3)
+- [ ] Tier 5 (`hunk_hash` fallback) deferred: it needs the hunk model from phase 2. Wire it in once `core/hunk.zig` exists
+- [ ] Tier 4 (token-multiset similarity) not built. Nothing in the fixture set reaches it: tiers 1-3 resolve everything that is resolvable, and the remaining case is genuinely gone. Build it when a fixture demands it, not before
 - [x] Harness (`zig build anchor`, `src/harness/anchor_harness.zig`): replays fixtures, reports hit rate and timing, exits non-zero below the gate so CI can use it. Validates on load that every expected line matches the v0 anchor content ignoring leading whitespace, and rejects weak anchors
 - [x] Fixture format defined and seven mechanical fixtures written (`tests/fixtures/README.md`): whole-file `vN.txt` snapshots plus a `notes.txt` of expected lines per version. Snapshots rather than stored diffs, because the primary path (PERFORMANCE.md §3.1) needs both worktree states to build the line map
 - [x] One recorded real agent session: `tests/fixtures/real-session-1`, 6 versions and 3 notes, captured with `tools/record-session.sh` from Claude Code editing a copy of `src/text/buffer.zig`. More sessions from other agents and larger files are still welcome, but the gate is no longer blocked on one
 
-**Gate: PASSED.** Measured with the primary path alone, no fallback tiers:
+**Gate: PASSED.** ReleaseFast, all eight fixtures:
 
 | Metric | Gate | Measured |
 |---|---|---|
-| Hit rate | >= ~90% | **95.8%** (23/24 across 8 fixtures) |
-| Re-anchor, 50 notes | <= 5 ms | **0.002 ms** (42 ns per note, ReleaseFast) |
+| Hit rate | >= ~90% | **100%** (24/24) |
+| Re-anchor, 50 notes | <= 5 ms | **0.117 ms**, including lazy index construction |
 
-The single miss is `formatter-indent`, which is designed to defeat exact
-matching and is precisely what tier 3 (whitespace-normalised hash) exists for.
-Everything else, including `real-session-1`'s duplicated guard clause, resolves
-on the line map alone.
+Resolved by: `mapped` 22, `normalised_hash` 1, `stale` 1. The harness prints
+this breakdown every run, which is what keeps the unbuilt tiers honest: tier 4
+stays unwritten because nothing has reached it.
 
-Two caveats worth keeping in view. The sample is small (24 expectations), so
-95.8% means "no reason to redesign", not "solved"; the number should be
-rechecked as fixtures accumulate. And the timing has roughly three orders of
-magnitude of headroom, which says the fallback tiers can afford to be thorough
-rather than clever.
+Only 4 hash indexes were built across the entire run, because 22 of the 24
+notes never left the primary path. The 0.117 ms figure includes that
+construction; an earlier 0.003 ms measurement excluded it and was misleading.
 
-**Remaining in this phase:** the fallback tiers, now scoped by evidence rather
-than speculation. Build tier 3 and tier 6 first, since those are the two the
-fixtures actually exercise.
+Two caveats. The sample is small (24 expectations), so 100% means "nothing here
+is broken", not "solved"; recheck as fixtures accumulate, and expect the number
+to fall when harder sessions arrive. And `real-session-1` is one agent on one
+Zig file, so the drift patterns are narrower than production will be.
 
-## Phase 2: Diff domain model
+`zig build anchor` exits non-zero below the gate, so it can gate CI. Verified by
+corrupting a fixture expectation and confirming the failure.
 
-`core/diff.zig` + `core/hunk.zig`, still headless.
+## Phase 2: Diff domain model - PARTIAL
 
-- [ ] One batched `git diff -- <paths>` subprocess, never per-file (PERFORMANCE.md §8.1); parse unified output
-- [ ] HEAD-side content loaded into a `Buffer` (git cat-file/show); hunks stored as annotations pointing into the HEAD and worktree Buffers, never as diff text (ARCHITECTURE.md §11.1)
-- [ ] `DiffLines` struct-of-arrays: `kind`, `old_no`, `new_no`, `text` (PERFORMANCE.md §7.3)
-- [ ] `hunk_hash`; change-id assignment and inheritance: exact hash match first, then greedy max line-range overlap under the Phase 1 line map; merge keeps the lower id plus alias; split follows the fragment with most matching lines (SPEC.md §6.5, PERFORMANCE.md §4)
-- [ ] `diff_cache` LRU keyed on content hashes, not paths (PERFORMANCE.md §7.2)
-- [ ] Files with >5,000 changed lines: summary record, full parse deferred until opened
+`core/diff.zig` + `core/hunk.zig` + `core/git.zig`, still headless.
 
-**Gate:** recorded `git diff` fixtures parse byte-exact; change-id stability tests pass for merge, split, and drift cases.
+- [x] One batched `git diff HEAD -- <paths>` subprocess, never per-file (PERFORMANCE.md §8.1); parse unified output. `--no-color --no-ext-diff` so user config cannot change what we parse
+- [x] **Untracked files are synthesised as all-addition diffs, always in full.** `git diff HEAD` does not see them, and a new file is one of the most common things an agent produces, so without this they were silently absent from the review. Found by pointing `zig build diff` at this repo and noticing six new files missing. New files are never summarised at any size (SPEC.md open question 2, now answered)
+- [x] `DiffLines` struct-of-arrays: `kind`, `old_no`, `new_no`, `text` (PERFORMANCE.md §7.3)
+- [x] `hunk_hash` over added and removed lines only, never context: including context would churn a hunk's identity whenever unrelated neighbouring code moved
+- [x] Change-id assignment and inheritance: exact hash match, then greedy maximum overlap of new-file ranges; merge keeps the lower id and records an alias so "fix #4" still resolves; split leaves the id on the larger fragment (SPEC.md §6.5, PERFORMANCE.md §4)
+- [x] Files over `large_file_lines` defer their render, and `materialise()` parses the deferred section on demand from the retained byte range. **Deferring is not discarding**: an earlier version dropped the content outright, which would have made oversized files unreviewable rather than merely slower to open
+- [x] Blob hashes captured from git's `index a..b` line, ready to key the cache on
+- [ ] **HEAD-side content in a `Buffer`, hunks as annotations into the HEAD and worktree Buffers (ARCHITECTURE.md §11.1).** NOT DONE. `DiffLines.text` currently borrows from git's diff output, which is what §11.1 says not to render from. It works and is well tested, but the buffer-backed model is what keeps editing additive later, so this is a real gap rather than a detail
+- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Deferred until phase 3, when the watcher starts producing repeated re-diffs and `--profile` can say whether parsing is worth caching
+
+**Gate: partially met.** Recorded real `git diff` output (`tests/fixtures/diffs/mixed.diff`,
+covering add, rename, modify, binary, delete and a git-merged multi-change hunk)
+parses with `git diff --numstat` as the oracle, and change-id stability tests
+cover merge, split, drift and fresh ids. 57 tests pass.
+
+Not met: the buffer-backed model above. Decide before phase 5 whether to do it
+now or accept rendering from diff text in v0.1 and pay for it when editing
+arrives.
+
+`zig build diff -- [repo]` dumps the parsed diff of any repository, which is how
+the untracked-file gap surfaced.
 
 ## Phase 3: File watching
 

@@ -6,8 +6,9 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const fs = @import("fs");
-const anchor = @import("anchor");
+const lgtm = @import("lgtm");
+const fs = lgtm.fs;
+const anchor = lgtm.anchor;
 
 const gate_hit_rate = 0.90;
 const budget_ns_per_50_notes = 5 * std.time.ns_per_ms;
@@ -45,6 +46,7 @@ pub fn main(init: std.process.Init) !u8 {
     var elapsed_ns: u64 = 0;
     var migrations: usize = 0;
     var failed_fixtures: usize = 0;
+    var tally: Tally = .{};
 
     try w.print("anchor harness: {s}\n\n", .{root});
     try w.print("{s: <22} {s: >7} {s: >7}  {s}\n", .{ "fixture", "hits", "total", "misses" });
@@ -62,7 +64,7 @@ pub fn main(init: std.process.Init) !u8 {
         };
         defer freeFixture(gpa, &fx);
 
-        const r = try run(gpa, io, &fx, w);
+        const r = try run(gpa, io, &fx, w, &tally);
         total += r.total;
         hits += r.hits;
         elapsed_ns += r.ns;
@@ -78,6 +80,9 @@ pub fn main(init: std.process.Init) !u8 {
 
     const rate = @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
     try w.print("\nhit rate      {d:.1}%  ({d}/{d})\n", .{ rate * 100, hits, total });
+    try tally.report(w);
+
+    try w.print("index builds  {d} (lazy: only built when the line map misses)\n", .{anchor.Version.index_builds});
 
     if (migrations > 0) {
         const per_note = @as(f64, @floatFromInt(elapsed_ns)) / @as(f64, @floatFromInt(migrations));
@@ -104,21 +109,26 @@ pub fn main(init: std.process.Init) !u8 {
 
 const Result = struct { total: usize, hits: usize, ns: u64, migrations: usize };
 
-fn run(gpa: Allocator, io: std.Io, fx: *Fixture, w: *std.Io.Writer) !Result {
-    var interner: anchor.Interner = .{};
-    defer interner.deinit(gpa);
+fn run(gpa: Allocator, io: std.Io, fx: *Fixture, w: *std.Io.Writer, tally: *Tally) !Result {
+    var exact_interner: anchor.Interner = .{};
+    defer exact_interner.deinit(gpa);
+    var norm_interner: anchor.Interner = .{};
+    defer norm_interner.deinit(gpa);
+    var norm_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer norm_arena.deinit();
 
-    // Intern every version up front; ids borrow from the version bytes.
-    const ids = try gpa.alloc([]u32, fx.versions.len);
+    const versions = try gpa.alloc(anchor.Version, fx.versions.len);
     defer {
-        for (ids) |s| gpa.free(s);
-        gpa.free(ids);
+        for (versions) |*v| v.deinit(gpa);
+        gpa.free(versions);
     }
-    for (fx.versions, 0..) |text, i| ids[i] = try interner.internLines(gpa, text);
+    for (fx.versions, 0..) |text, i| {
+        versions[i] = try anchor.Version.init(gpa, &exact_interner, &norm_interner, norm_arena.allocator(), text);
+    }
 
     var anchors = try gpa.alloc(anchor.Anchor, fx.expects.len);
     defer gpa.free(anchors);
-    for (fx.expects, 0..) |e, i| anchors[i] = .init(ids[0], e.lines[0].?);
+    for (fx.expects, 0..) |e, i| anchors[i] = .init(versions[0], e.lines[0].?);
 
     var res: Result = .{ .total = 0, .hits = 0, .ns = 0, .migrations = 0 };
     var miss_buf: std.ArrayList(u8) = .empty;
@@ -126,12 +136,13 @@ fn run(gpa: Allocator, io: std.Io, fx: *Fixture, w: *std.Io.Writer) !Result {
 
     var v: usize = 1;
     while (v < fx.versions.len) : (v += 1) {
-        var map = try anchor.lineMap(gpa, ids[v - 1], ids[v]);
+        var map = try anchor.lineMap(gpa, versions[v - 1].ids, versions[v].ids);
         defer map.deinit(gpa);
 
         const start = std.Io.Timestamp.now(io, .awake);
         for (anchors) |*a| {
-            if (!a.migrate(map)) a.stale = true;
+            const outcome = try a.reanchor(gpa, map, &versions[v]);
+            tally.count(outcome);
         }
         const end = std.Io.Timestamp.now(io, .awake);
         res.ns += @intCast(@max(0, start.durationTo(end).nanoseconds));
@@ -161,6 +172,24 @@ fn run(gpa: Allocator, io: std.Io, fx: *Fixture, w: *std.Io.Writer) !Result {
     if (miss_buf.items.len > 0) try w.writeAll(miss_buf.items);
     return res;
 }
+
+/// Which tier placed each note. Recorded so the unbuilt tiers stay scoped by
+/// evidence rather than speculation.
+const Tally = struct {
+    counts: [@typeInfo(anchor.Outcome).@"enum".fields.len]usize = @splat(0),
+
+    fn count(self: *Tally, o: anchor.Outcome) void {
+        self.counts[@intFromEnum(o)] += 1;
+    }
+
+    fn report(self: Tally, w: *std.Io.Writer) !void {
+        try w.writeAll("\nresolved by\n");
+        inline for (@typeInfo(anchor.Outcome).@"enum".fields) |f| {
+            const n = self.counts[f.value];
+            if (n > 0) try w.print("  {s: <18} {d}\n", .{ f.name, n });
+        }
+    }
+};
 
 fn loadFixture(io: std.Io, gpa: Allocator, root: []const u8, name: []const u8) !Fixture {
     const dir = try std.fs.path.join(gpa, &.{ root, name });

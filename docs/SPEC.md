@@ -306,7 +306,7 @@ Side-by-side with responsive layout. Stage/unstage hunks (`s` / `u`), revert a s
 ## 10. Open questions
 
 1. Support jujutsu (jj) alongside git, or defer?
-2. Brand-new files created by the agent - show full contents or a summary?
+2. ~~Brand-new files created by the agent - show full contents or a summary?~~ **Answered: full contents, always, whatever the size.** A new file is entirely new code; summarising it removes the only thing there is to review. More generally, summarising is a rendering decision and never a discard: an oversized file defers its render but keeps its content reachable (SPEC 6.1 "loads lazily on open").
 3. Multi-repo / worktrees: skip in v1?
 4. Should "hunks I have already reviewed" persist across runs? Useful in long sessions. (Probably folds into the note anchoring machinery - it is the same problem.)
 5. After submission, if a `sent` note's anchor changes, should it be auto-marked `addressed`? Wrong guesses mislead; right guesses make second-pass review much faster.
