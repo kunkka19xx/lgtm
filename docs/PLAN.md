@@ -141,19 +141,50 @@ edit to one of them.
 prints batches as they arrive, which is how the thread path is exercised without
 a timing-dependent test in CI.
 
-## Phase 4: Lexer
+## Phase 4: Lexer - DONE
 
-`syntax/`, pure function from bytes to token runs (docs estimate 200-400 lines engine, ~60 per language).
+`syntax/`, pure function from bytes to token runs.
 
-- [ ] `LangDef` comptime struct; generic engine: line/block comments, strings with escapes, keywords, `fn_decl` markers
-- [ ] Token runs `{start: u32, len: u16, kind: u8}`, never per-character styles (PERFORMANCE.md §6.4)
-- [ ] Brace-depth scan for the enclosing function name (feeds hunk headers)
-- [ ] Checkpoints every 64 lines `{brace_depth, lex_state}`; lex any region from the nearest checkpoint; invalidate from first changed line (PERFORMANCE.md §6.2)
-- [ ] `lang/rust.zig` first; then `go.zig`, `python.zig`; everything else renders plain without crashing
-- [ ] `Highlighter` union `{lexer, tree_sitter, plain}` with `tree_sitter` unimplemented (ARCHITECTURE.md §5)
-- [ ] Guard rails: >500 KB or >10k lines falls to plain; lex visible range plus margin; LRU token-run cache by content hash, ~32 files
+- [x] `LangDef` comptime struct; generic engine: line comments, block comments (nested where the language nests them), strings with escapes, raw strings with a `#` count, line-scoped strings for Zig's `\\`, keywords, type names, `fn_decl` markers
+- [x] Token runs `{start: u32, len: u16, kind: u8}`, never per-character styles (PERFORMANCE.md 6.4). Two invariants the renderer leans on, asserted by most tests rather than once: runs **tile** the scanned span with no gaps or overlaps, and a run holds at most one `\n`, only as its final byte. Phase 5 therefore groups runs into rows by walking forward, with nothing to reconcile and no fallback to the raw bytes
+- [x] Brace-depth scan for the enclosing function name (feeds hunk headers). Spans nest, and a sibling declaration closes the previous one, so a bodyless `fn foo(&self);` in a trait does not adopt every method after it
+- [x] Checkpoints every 64 lines `{brace_depth, lex_state}`; lex any region from the nearest checkpoint. The property test is the one that matters: lexing from **every** checkpoint reproduces the tail of the whole-file run list exactly, so a stored state that was subtly wrong cannot pass
+- [x] `lang/zig.zig` first, then `rust.zig`, `go.zig`, `python.zig`; everything else renders plain without crashing
+- [x] `Highlighter` union `{lexer, tree_sitter, plain}` with `tree_sitter` unimplemented (ARCHITECTURE.md 5). `.plain` emits one `.text` run per line rather than nothing, so callers have no special case
+- [x] Guard rails: over 500 KB or 10k lines falls to plain; LRU cache of ~32 files keyed by content hash
+- [ ] Checkpoint invalidation from the first changed line: **not built, with evidence.** The whole-file pass costs 0.5 ms over a 6.4k-line corpus against a 100 ms re-diff budget, so a partial rebuild would save half a millisecond and cost a second code path that can disagree with the first. PERFORMANCE.md 6.2 makes the *data structure* T0 and that is what shipped; the incremental rebuild waits for a profile that wants it
+- [ ] "Lex the visible range plus a margin": the API takes `(from, to, state)` and the benchmark measures it at 4.5 us per 50-line screen, but nothing calls it that way until the renderer exists. Phase 5 owes the caller, not phase 4
 
-**Gate:** fragment tests pass (unbalanced braces, truncated functions, half-written files); enclosing-function names correct on fixtures.
+**Zig first rather than Rust.** The plan said Rust first. Every fixture, every recorded session and every file in this repository is Zig, so a Rust-first order would have meant testing the first language against no real code. Rust, Go and Python all landed in the same phase anyway, and all four are exercised against real files through `zig build lex`.
+
+**Gate: PASSED.** Fragment tests cover unbalanced braces, truncated functions, unterminated strings and unclosed block comments; enclosing-function names are correct on Zig, Rust, Go and Python fixtures and on real files from four repositories. 34 tests in `syntax/`, 105 in total.
+
+Two harnesses, matching the pattern of earlier phases:
+
+- `zig build lex -- <file> [line]` prints the colourised token stream, the function spans and the timings for one file. This is how a language definition is found to be wrong about real code rather than only about its fixtures.
+- `zig build bench -- [dir] [ext]` is the phase's instrument. It measures four things separately because they have different budgets: the whole-file structure pass (per changed file per re-diff), the full lex (the pathological render), one 50-line screen from the nearest checkpoint (what a frame actually draws), and a cache hit.
+
+### Measured, and what the measurement changed
+
+ReleaseFast, 27 Zig files under `src/`, 6453 lines, 227 KB.
+
+| | first working version | after the optimisation pass |
+|---|---|---|
+| Structure pass | 148 ns/line | **77 ns/line** (0.50 ms for the corpus) |
+| Full lex | 208 MB/s | **378 MB/s** (0.57 ms for the corpus) |
+| One 50-line screen | 7.0 us | **4.5 us** |
+| Cache hit | 5149 ns | **20 ns** |
+
+Nothing here was optimised on a hunch; the benchmark was written first and each change was kept only because it moved a number.
+
+- **The cache hit was the worst result and the easiest fix.** Hashing the file on every lookup made a hit cost 5.1 us, the same order as the 0.9 ms miss it existed to avoid. The key is now supplied by the caller, which is what the blob hashes captured in phase 2 were for.
+- **A comptime byte table in front of the opener ladder** was the largest scanning win. Every byte used to be tested against every comment and string opener in the language; now one table lookup answers "could anything start here" and ordinary identifiers and operators skip the ladder entirely.
+- **Vectorised inner scans** (PERFORMANCE.md 6.3): `indexOfScalarPos` to the end of a line comment, `indexOfAnyPos` to the next byte that could matter inside a block comment or a string literal. Comment-heavy source spends real time in exactly those loops.
+- **Keyword lookup was 20% of total scan time**, measured by deleting it: 0.542 ms fell to 0.435 ms. That is the evidence PERFORMANCE.md 6.1's T1 item was waiting for. A two-mask comptime prefilter on (first byte, length) and (last byte, length) recovered about half of it. A hand-rolled perfect hash could take the rest and is still not worth the code: the remainder is 12% of half a millisecond.
+
+**ARCHITECTURE.md open question 5 is answered: the enclosing-function scan runs over the whole file, eagerly, per changed file.** The docs deferred this until a 5k-line file had been measured. Measured: 0.5 ms for 6.4k lines, against a 100 ms re-diff budget and an 8 ms frame budget. There is no case for restricting the scan to the visible range, and doing so would cost the correct brace depth that the scan exists to produce.
+
+One caveat. Every number above is Zig source measured on Zig-heavy input. Rust, Go and Python are correct on real files but were not the corpus, and Python in particular does more work per line, since indentation is inspected at every line start. Re-run `zig build bench -- <dir> <ext>` before trusting the figures for another language.
 
 ## Phase 5: TUI
 
@@ -249,6 +280,6 @@ Raise these when the phase touches them; do not silently pick an answer.
 | --- | --- |
 | New files: full contents or summary (SPEC OQ2) | Phase 2 |
 | jj support (SPEC OQ1), multi-repo/worktrees (OQ3) | Phase 2 |
-| Where the enclosing-function scan runs (ARCH OQ5) | Phase 4/5, decide after measuring a 5k-line file |
+| ~~Where the enclosing-function scan runs (ARCH OQ5)~~ | **Answered in phase 4:** whole file, eagerly, per changed file. 0.5 ms for 6.4k lines |
 | Reviewed-hunks persistence (SPEC OQ4), auto-`addressed` (OQ5), note categories (OQ6) | v0.2 notes |
 | Windows target (ARCH OQ4) | Pre-1.0 |

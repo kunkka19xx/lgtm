@@ -111,6 +111,33 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_watch.addArgs(a);
     b.step("watch", "Watch a repository and print coalesced change events").dependOn(&run_watch.step);
 
+    // Points the lexer at a file and prints what it made of it, with timings.
+    // `zig build lex -- <file> [line]`.
+    const lex_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/lex_dump.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    lex_mod.addImport("lgtm", lgtm_mod);
+    const lex_exe = b.addExecutable(.{ .name = "lex-dump", .root_module = lex_mod });
+    const run_lex = b.addRunArtifact(lex_exe);
+    run_lex.setCwd(b.path("."));
+    if (b.args) |a| run_lex.addArgs(a);
+    b.step("lex", "Lex a file and print its tokens, spans and timings").dependOn(&run_lex.step);
+
+    // Lexer benchmark. `zig build bench -Doptimize=ReleaseFast -- [dir] [ext]`.
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/lex_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("lgtm", lgtm_mod);
+    const bench_exe = b.addExecutable(.{ .name = "lex-bench", .root_module = bench_mod });
+    const run_bench = b.addRunArtifact(bench_exe);
+    run_bench.setCwd(b.path("."));
+    if (b.args) |a| run_bench.addArgs(a);
+    b.step("bench", "Benchmark the lexer against a source tree").dependOn(&run_bench.step);
+
     // Licence header check. Runs as its own step and as part of `zig build check`.
     const spdx = b.addExecutable(.{
         .name = "check-spdx",

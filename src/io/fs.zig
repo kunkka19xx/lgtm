@@ -42,6 +42,41 @@ pub fn listDir(io: Io, gpa: Allocator, path: []const u8) ![][]u8 {
     return out;
 }
 
+/// Every file under `root` whose extension is in `exts`, recursively, sorted.
+/// Paths are relative to `root` prefixed with it, so they are usable as-is.
+/// Caller owns the slice and each path.
+pub fn walkExt(io: Io, gpa: Allocator, root: []const u8, exts: []const []const u8) ![][]u8 {
+    var dir = try Dir.cwd().openDir(io, root, .{ .iterate = true });
+    defer dir.close(io);
+
+    var paths: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (paths.items) |p| gpa.free(p);
+        paths.deinit(gpa);
+    }
+
+    var walker = try dir.walk(gpa);
+    defer walker.deinit();
+    while (try walker.next(io)) |entry| {
+        if (entry.kind != .file) continue;
+        const dot = std.mem.lastIndexOfScalar(u8, entry.basename, '.') orelse continue;
+        const ext = entry.basename[dot + 1 ..];
+        for (exts) |want| {
+            if (!std.mem.eql(u8, ext, want)) continue;
+            try paths.append(gpa, try std.mem.concat(gpa, u8, &.{ root, "/", entry.path }));
+            break;
+        }
+    }
+
+    const out = try paths.toOwnedSlice(gpa);
+    std.mem.sort([]u8, out, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return out;
+}
+
 pub fn freeNames(gpa: Allocator, names: [][]u8) void {
     for (names) |n| gpa.free(n);
     gpa.free(names);
