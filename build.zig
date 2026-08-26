@@ -52,6 +52,35 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
 
+    // Anchor harness: the phase 1 go/no-go gate. Exits non-zero below the
+    // required hit rate, so it can gate CI.
+    const anchor_mod = b.createModule(.{
+        .root_source_file = b.path("src/core/anchor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const fs_mod = b.createModule(.{
+        .root_source_file = b.path("src/io/fs.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const harness_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/anchor_harness.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    harness_mod.addImport("anchor", anchor_mod);
+    harness_mod.addImport("fs", fs_mod);
+
+    const harness = b.addExecutable(.{
+        .name = "anchor-harness",
+        .root_module = harness_mod,
+    });
+    const run_harness = b.addRunArtifact(harness);
+    run_harness.setCwd(b.path("."));
+    if (b.args) |a| run_harness.addArgs(a);
+    b.step("anchor", "Run the anchor re-anchoring harness").dependOn(&run_harness.step);
+
     // Licence header check. Runs as its own step and as part of `zig build check`.
     const spdx = b.addExecutable(.{
         .name = "check-spdx",

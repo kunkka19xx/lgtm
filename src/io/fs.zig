@@ -18,6 +18,35 @@ pub fn readFile(io: Io, gpa: Allocator, path: []const u8, max_bytes: usize) Read
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_bytes));
 }
 
+/// Entry names of a directory, sorted. Caller owns the slice and each name.
+pub fn listDir(io: Io, gpa: Allocator, path: []const u8) ![][]u8 {
+    var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+
+    var names: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (names.items) |n| gpa.free(n);
+        names.deinit(gpa);
+    }
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        try names.append(gpa, try gpa.dupe(u8, entry.name));
+    }
+    const out = try names.toOwnedSlice(gpa);
+    std.mem.sort([]u8, out, {}, struct {
+        fn lessThan(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    return out;
+}
+
+pub fn freeNames(gpa: Allocator, names: [][]u8) void {
+    for (names) |n| gpa.free(n);
+    gpa.free(names);
+}
+
 pub fn fileExists(io: Io, path: []const u8) bool {
     const file = Dir.cwd().openFile(io, path, .{}) catch return false;
     file.close(io);

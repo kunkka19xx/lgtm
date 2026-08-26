@@ -10,6 +10,7 @@ pub const metrics = @import("io/metrics.zig");
 pub const buffer = @import("text/buffer.zig");
 pub const edit = @import("text/edit.zig");
 pub const event = @import("core/event.zig");
+pub const anchor = @import("core/anchor.zig");
 pub const smoke = @import("ui/smoke.zig");
 
 const usage =
@@ -80,5 +81,6 @@ test {
     _ = buffer;
     _ = edit;
     _ = event;
+    _ = anchor;
     _ = smoke;
 }

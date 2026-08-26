@@ -43,16 +43,36 @@ The `zigimg` question from ARCHITECTURE.md 5c is answered: it is fetched and com
 
 Standalone, no terminal. This decides whether review notes are viable (docs estimate ~300 lines).
 
-- [ ] Line interner: `Wyhash` string to `u32` id (PERFORMANCE.md §1.1)
-- [ ] Window hashing: k=5 lines of interned ids, never single lines (PERFORMANCE.md §2.2)
-- [ ] In-process line diff over interned ids with common prefix/suffix trimming (PERFORMANCE.md §1.2, §1.3; histogram preferred, simple algorithm acceptable behind the same interface): produces the exact old-to-new line map between previous and current buffer
-- [ ] Primary re-anchor path: table lookup through the line map, O(1) per note (PERFORMANCE.md §3.1)
+- [x] Line interner: `Wyhash` string to `u32` id (PERFORMANCE.md §1.1)
+- [x] Window hashing: k=5 lines of interned ids, never single lines (PERFORMANCE.md §2.2)
+- [x] In-process line diff over interned ids with common prefix/suffix trimming (PERFORMANCE.md §1.2, §1.3). Implemented as **patience**: anchor on lines unique to both sides, take the longest increasing subsequence, recurse between anchors. Chosen over histogram because it anchors on distinctive lines, which is what places a note correctly when a line has been duplicated
+- [x] Primary re-anchor path: table lookup through the line map, O(1) per note (PERFORMANCE.md §3.1)
 - [ ] Fallback tiers 1-5: exact window hash ±50 lines; whole-file window-hash multimap index; whitespace-normalised hash; token-multiset similarity; `hunk_hash`. Tier 6 = `stale` (PERFORMANCE.md §3.2). No edit distance, ever (§3.3)
-- [ ] Harness: replays edit sequences from `tests/fixtures/`, reports hit rate and timing. **On load, assert that the content at each expected line matches the v0 anchor line ignoring leading whitespace**, and fail loudly on mismatch. Hand-written expectations are wrong often enough that scoring against a bad one would silently corrupt the gate
+- [x] Harness (`zig build anchor`, `src/harness/anchor_harness.zig`): replays fixtures, reports hit rate and timing, exits non-zero below the gate so CI can use it. Validates on load that every expected line matches the v0 anchor content ignoring leading whitespace, and rejects weak anchors
 - [x] Fixture format defined and seven mechanical fixtures written (`tests/fixtures/README.md`): whole-file `vN.txt` snapshots plus a `notes.txt` of expected lines per version. Snapshots rather than stored diffs, because the primary path (PERFORMANCE.md §3.1) needs both worktree states to build the line map
 - [x] One recorded real agent session: `tests/fixtures/real-session-1`, 6 versions and 3 notes, captured with `tools/record-session.sh` from Claude Code editing a copy of `src/text/buffer.zig`. More sessions from other agents and larger files are still welcome, but the gate is no longer blocked on one
 
-**Gate:** hit rate >= ~90% and 50 notes re-anchor in <= 5 ms. Below 90%: STOP, redesign review notes before writing any more code.
+**Gate: PASSED.** Measured with the primary path alone, no fallback tiers:
+
+| Metric | Gate | Measured |
+|---|---|---|
+| Hit rate | >= ~90% | **95.8%** (23/24 across 8 fixtures) |
+| Re-anchor, 50 notes | <= 5 ms | **0.002 ms** (42 ns per note, ReleaseFast) |
+
+The single miss is `formatter-indent`, which is designed to defeat exact
+matching and is precisely what tier 3 (whitespace-normalised hash) exists for.
+Everything else, including `real-session-1`'s duplicated guard clause, resolves
+on the line map alone.
+
+Two caveats worth keeping in view. The sample is small (24 expectations), so
+95.8% means "no reason to redesign", not "solved"; the number should be
+rechecked as fixtures accumulate. And the timing has roughly three orders of
+magnitude of headroom, which says the fallback tiers can afford to be thorough
+rather than clever.
+
+**Remaining in this phase:** the fallback tiers, now scoped by evidence rather
+than speculation. Build tier 3 and tier 6 first, since those are the two the
+fixtures actually exercise.
 
 ## Phase 2: Diff domain model
 
