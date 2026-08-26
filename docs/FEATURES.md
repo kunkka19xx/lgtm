@@ -1,4 +1,4 @@
-# `lgtm` — Features & Customisation
+# `lgtm` - Features & Customisation
 
 **Companion docs:** SPEC.md, ARCHITECTURE.md, PERFORMANCE.md
 **Status:** draft v0.1
@@ -9,7 +9,7 @@
 
 **Reviewing an agent's code is a different problem from reviewing a person's code.**
 
-Higher volume, faster arrival, and — the part that matters — **you have no prior about where the risk is**. Reviewing a colleague's PR, you know their habits, you know which part they rushed. With an agent you know nothing, and it produces confident-looking code uniformly across every file it touches.
+Higher volume, faster arrival, and - the part that matters - **you have no prior about where the risk is**. Reviewing a colleague's PR, you know their habits, you know which part they rushed. With an agent you know nothing, and it produces confident-looking code uniformly across every file it touches.
 
 Every existing diff tool is built for the human case, and they all assume you will read the whole thing. With an agent, that assumption is false. You will not read 800 lines carefully at 11pm.
 
@@ -17,7 +17,7 @@ So the job is not "display a diff nicely." It is **decide where the user's next 
 
 ---
 
-## 1. Tier A — the differentiators
+## 1. Tier A - the differentiators
 
 These are the reasons someone installs the tool rather than living with `git diff`.
 
@@ -35,7 +35,7 @@ Path-alphabetical ordering is an artifact of human code review. Replace it: **mo
 | Test file | medium | See 1.2 |
 | Pure formatting / whitespace | negative | Sink it |
 
-Patterns come from config (§4.6) so teams can add their own. Sort order is a toggle (`s`), not a lock-in — sometimes you do want file order.
+Patterns come from config (§4.6) so teams can add their own. Sort order is a toggle (`s`), not a lock-in - sometimes you do want file order.
 
 ### 1.2 Weakened-test detection
 
@@ -43,17 +43,17 @@ Agents do this constantly, and it is the failure mode with the worst consequence
 
 - deleting a test that fails
 - adding `skip` / `t.Skip` / `@pytest.mark.skip` / `.only` / `xit`
-- loosening an assertion — `assertEqual` → `assertTrue`, exact → `contains`, removing a case from a table test
+- loosening an assertion - `assertEqual` → `assertTrue`, exact → `contains`, removing a case from a table test
 - wrapping a failing call in a catch that swallows the error
 - changing an expected value to match the (wrong) actual output
 
-All of it is detectable with lexer-level pattern matching, and all of it hides in test files — exactly where people skim.
+All of it is detectable with lexer-level pattern matching, and all of it hides in test files - exactly where people skim.
 
 A banner at the top of the session: **`⚠ 2 tests removed · 1 assertion weakened · 1 skip added`**, clickable through to the hunks.
 
 This is concrete, verifiable, and instantly recognisable to anyone who has used an agent for a week. It is the screenshot that goes in the README.
 
-### 1.3 Turn checkpoints — "since I last looked"
+### 1.3 Turn checkpoints - "since I last looked"
 
 In a 40-turn session the accumulated diff becomes meaningless. `lgtm` needs a concept of *the last time you looked*.
 
@@ -68,11 +68,11 @@ Mechanically this is the anchoring machinery you already have, pointed at a diff
 
 You send notes, the agent revises, and now you must re-review. Today you re-read *everything*, unable to distinguish the parts that answer your feedback from the parts the agent changed on its own initiative.
 
-Highlight the second-order change distinctly. Combined with `sent` notes, this also answers "was my note actually addressed?" — a note whose anchored region changed after submission is a strong signal, and it feeds Open Question 5 in SPEC.md.
+Highlight the second-order change distinctly. Combined with `sent` notes, this also answers "was my note actually addressed?" - a note whose anchored region changed after submission is a strong signal, and it feeds Open Question 5 in SPEC.md.
 
 ---
 
-## 2. Tier B — small, high-frequency
+## 2. Tier B - small, high-frequency
 
 ### 2.1 Ask presets
 
@@ -80,20 +80,20 @@ One keystroke, common intent, reuses the existing bridge:
 
 | Key | Sends |
 |---|---|
-| `a` | `#3 src/auth.rs:47 — why this approach?` |
-| `!` | `#3 src/auth.rs:47 — revert this, keep the rest` |
-| `t` | `#3 src/auth.rs:47 — add a test covering this` |
-| `x` | `#3 src/auth.rs:47 — explain what this does` |
+| `a` | `#3 src/auth.rs:47 - why this approach?` |
+| `!` | `#3 src/auth.rs:47 - revert this, keep the rest` |
+| `t` | `#3 src/auth.rs:47 - add a test covering this` |
+| `x` | `#3 src/auth.rs:47 - explain what this does` |
 
 All templates are config (§4.5). Users will invent better ones than these.
 
 ### 2.2 Blame-lite on the current line
 
-`gb` shows the last commit that touched this line — one `git blame -L`, cached. Answers "was this mine or the agent's?" without leaving the pane.
+`gb` shows the last commit that touched this line - one `git blame -L`, cached. Answers "was this mine or the agent's?" without leaving the pane.
 
 ### 2.3 Copy-as
 
-`y` copies a reference, but *which format* varies by target. `gy` opens a small menu: plain `path:line`, GitHub permalink, markdown link, or the raw line content. See §4.5 — the same template system.
+`y` copies a reference, but *which format* varies by target. `gy` opens a small menu: plain `path:line`, GitHub permalink, markdown link, or the raw line content. See §4.5 - the same template system.
 
 ---
 
@@ -105,7 +105,7 @@ All templates are config (§4.5). Users will invent better ones than these.
 git config --global core.pager lgtm
 ```
 
-Now every git user can use it — including people who have never touched an agent CLI. That audience is enormously larger than "agent users who live in tmux," and it is the on-ramp: they come for a nicer `git diff`, they discover the agent half later.
+Now every git user can use it - including people who have never touched an agent CLI. That audience is enormously larger than "agent users who live in tmux," and it is the on-ramp: they come for a nicer `git diff`, they discover the agent half later.
 
 Cost is low, because the rendering, lexing, and navigation already exist. What is needed is a stdin mode that parses a diff stream instead of invoking git, with agent features simply absent. Worth doing before v1.0 purely as a growth channel.
 
@@ -113,34 +113,34 @@ Cost is low, because the rendering, lexing, and navigation already exist. What i
 
 ## 4. Customisation
 
-Delight is real value, and for a keyboard tool it is also *retention*. But it is also the classic way a side project dies — so the rule here is: **customisation that costs a config file and no architecture is cheap; anything requiring a plugin runtime is not.**
+Delight is real value, and for a keyboard tool it is also *retention*. But it is also the classic way a side project dies - so the rule here is: **customisation that costs a config file and no architecture is cheap; anything requiring a plugin runtime is not.**
 
 ### 4.1 Themes
 
-Share `look`'s themes so the two tools look like siblings — Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa.
+Share `look`'s themes so the two tools look like siblings - Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa.
 
 Beyond that:
 - **Custom themes in TOML.** Every semantic slot nameable: `added`, `removed`, `context`, `hunk_header`, `note_marker`, `risk_high`, `stale`, `line_number`, `cursor_line`.
-- **Live reload.** Watching files is already core infrastructure — point it at the theme file too. Editing a theme and watching it apply instantly is genuinely fun, and costs almost nothing given the watcher exists.
+- **Live reload.** Watching files is already core infrastructure - point it at the theme file too. Editing a theme and watching it apply instantly is genuinely fun, and costs almost nothing given the watcher exists.
 - **`lgtm --theme-preview`** renders a sample diff in every bundled theme so people can choose without restarting.
-- **Terminal-native mode** — use only the 16 ANSI colours, inheriting the user's terminal palette. A surprising number of people want exactly this.
+- **Terminal-native mode** - use only the 16 ANSI colours, inheriting the user's terminal palette. A surprising number of people want exactly this.
 
-### 4.2 Fonts — an honest correction
+### 4.2 Fonts - an honest correction
 
 **A TUI cannot set the font.** That is the terminal emulator's job, and `lgtm` should not pretend otherwise. What it *can* control:
 
-- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) — file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph.
-- **Text attributes** — which semantic slots use bold, italic, underline, or dim. Some people want italic comments; some terminals render italics badly. Make it a choice.
-- **Box drawing style** — `ascii | light | heavy | rounded` for borders and separators.
-- **Sign column characters** — the `+`/`-`/`●` glyphs are configurable strings, not hardcoded.
+- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph.
+- **Text attributes** - which semantic slots use bold, italic, underline, or dim. Some people want italic comments; some terminals render italics badly. Make it a choice.
+- **Box drawing style** - `ascii | light | heavy | rounded` for borders and separators.
+- **Sign column characters** - the `+`/`-`/`●` glyphs are configurable strings, not hardcoded.
 
-### 4.3 Keymaps — fully remappable
+### 4.3 Keymaps - fully remappable
 
 Every action is a named command; the keymap is a table from key sequence to command name. No hardcoded keys anywhere in the dispatch path (this is why `Mode` is an enum, ARCHITECTURE.md §11.4).
 
 Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individual bindings without redefining the whole map.
 
-### 4.4 The `?` popup — and a keybinding conflict to resolve
+### 4.4 The `?` popup - and a keybinding conflict to resolve
 
 `?` opens a **context-aware** help overlay: only the keys valid in the current mode, grouped, with the user's *actual* bindings rather than the defaults. Fuzzy-searchable within the popup.
 
@@ -156,7 +156,7 @@ This is the highest-value discoverability feature in any TUI. Every key the user
 
 `F1` and `g?` alias to the same popup.
 
-### 4.5 Template strings — the sleeper feature
+### 4.5 Template strings - the sleeper feature
 
 Different agents like different reference formats, and users have strong opinions. Make every outgoing string a template:
 
@@ -164,8 +164,8 @@ Different agents like different reference formats, and users have strong opinion
 [templates]
 ref_single = "#{change_id} {path}:{line}"
 ref_range  = "#{change_id} {path}:{start}-{end}"
-ask_why    = "{ref} — why this approach?"
-review_header = "# Review {n} — {date}"
+ask_why    = "{ref} - why this approach?"
+review_header = "# Review {n} - {date}"
 review_item   = "## {ref}\n```{lang}\n{snippet}\n```\n{body}"
 submit_msg    = "Please address the review notes in {file} "
 ```
@@ -187,7 +187,7 @@ pattern = "content:TODO|FIXME|XXX"
 weight = 10
 ```
 
-Teams add their own sensitive paths. This is also how the feature stays honest — the heuristic is visible and editable rather than a black box.
+Teams add their own sensitive paths. This is also how the feature stays honest - the heuristic is visible and editable rather than a black box.
 
 ### 4.7 Layout
 

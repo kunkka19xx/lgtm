@@ -1,4 +1,4 @@
-# `lgtm` — Performance
+# `lgtm` - Performance
 
 **Companion docs:** SPEC.md, ARCHITECTURE.md
 **Status:** draft v0.1
@@ -7,14 +7,14 @@
 
 ## 0. The framing
 
-The largest speed wins in this program are not algorithmic. They come from **not doing the work at all** — content-hash caching, incremental narrowing, damage tracking. A cache hit beats any O(n log n).
+The largest speed wins in this program are not algorithmic. They come from **not doing the work at all** - content-hash caching, incremental narrowing, damage tracking. A cache hit beats any O(n log n).
 
 So this document is ordered by expected payoff, not by how interesting the algorithm is. Tiers:
 
-- **T0** — build it this way from the start. Cheap now, expensive to retrofit.
-- **T1** — build when the subsystem is built. Clearly worth it.
-- **T2** — only after a measurement says so.
-- **T3** — probably never, documented so it stops being tempting.
+- **T0** - build it this way from the start. Cheap now, expensive to retrofit.
+- **T1** - build when the subsystem is built. Clearly worth it.
+- **T2** - only after a measurement says so.
+- **T3** - probably never, documented so it stops being tempting.
 
 ### Budget
 
@@ -31,7 +31,7 @@ Everything below exists to protect these numbers.
 ### Instrumentation first (T0)
 
 ```zig
-// io/metrics.zig — compiled out in ReleaseFast unless -Dprofile
+// io/metrics.zig - compiled out in ReleaseFast unless -Dprofile
 pub inline fn span(comptime name: []const u8) Span { ... }
 ```
 
@@ -47,7 +47,7 @@ Before any diff algorithm runs, map each distinct line to a `u32` id via a hash 
 
 Effects: comparisons become integer compares; the working set shrinks by ~8×; equality is exact with no memcmp. Every serious diff implementation does this first, and it is the single highest-leverage decision in the whole diff path.
 
-Hash: `std.hash.Wyhash` (≈GB/s). Never a cryptographic hash — see §2.
+Hash: `std.hash.Wyhash` (≈GB/s). Never a cryptographic hash - see §2.
 
 ### 1.2 Common prefix/suffix trimming (T0)
 
@@ -57,16 +57,16 @@ Do it *after* interning, so it is an integer scan.
 
 ### 1.3 Choice of algorithm (T1, only if replacing `git`)
 
-v0.1 shells out to `git diff`. If profiling shows subprocess overhead dominating (likely — see §8), these are the candidates:
+v0.1 shells out to `git diff`. If profiling shows subprocess overhead dominating (likely - see §8), these are the candidates:
 
 | Algorithm | Complexity | Notes |
 |---|---|---|
-| **Histogram** | ~O(n log n) typical | git's `--histogram`. Fast in practice and produces better hunk boundaries than Myers — fewer spurious splits, which directly improves change-id stability (§3). **Recommended.** |
+| **Histogram** | ~O(n log n) typical | git's `--histogram`. Fast in practice and produces better hunk boundaries than Myers - fewer spurious splits, which directly improves change-id stability (§3). **Recommended.** |
 | Myers O(ND) | O((N+D)·D) | The classic. Degrades badly when D is large. |
 | Patience | O(n log n) + recursion | Anchors on unique lines. Nice output, slower than histogram. |
 | Hunt–Szymanski | O((r + n) log n) | Good when matches are sparse. Rarely worth the complexity here. |
 
-Histogram is the right pick specifically because hunk-boundary quality is not cosmetic for `lgtm` — it feeds change-id inheritance.
+Histogram is the right pick specifically because hunk-boundary quality is not cosmetic for `lgtm` - it feeds change-id inheritance.
 
 **Bounded search:** cap the edit-graph exploration (git's `MAX_COST` heuristic) and fall back to a coarse "replace this whole region" result. A pathological file must degrade, never hang.
 
@@ -84,11 +84,11 @@ Guard: files under ~200 lines are not worth a task. Batch them.
 
 `std.hash.Wyhash` for everything internal: line interning, content hashes, cache keys, anchor hashes.
 
-Not SHA/BLAKE — an order of magnitude slower for zero benefit. There is no adversary here. Collision risk at 64 bits over a few thousand lines is negligible; if a collision ever mattered, a re-anchor would land wrong by one line, not corrupt anything.
+Not SHA/BLAKE - an order of magnitude slower for zero benefit. There is no adversary here. Collision risk at 64 bits over a few thousand lines is negligible; if a collision ever mattered, a re-anchor would land wrong by one line, not corrupt anything.
 
 ### 2.2 Window hashing for anchors (T0)
 
-**Do not hash single lines.** Real source is full of duplicates — `}`, blank lines, `    return nil`. A single-line hash collides constantly and re-anchoring lands in the wrong place.
+**Do not hash single lines.** Real source is full of duplicates - `}`, blank lines, `    return nil`. A single-line hash collides constantly and re-anchoring lands in the wrong place.
 
 Hash a **window of k lines** (k = 5, centred on the anchor) as one unit. Duplicate windows are rare; duplicate lines are the norm. This one choice probably does more for re-anchor accuracy than any search strategy.
 
@@ -100,7 +100,7 @@ Rabin–Karp or buzhash makes "find this window anywhere in the file" O(n) inste
 
 ---
 
-## 3. Re-anchoring — the hot algorithm
+## 3. Re-anchoring - the hot algorithm
 
 This is the one that decides whether the review-notes feature works at all. It deserves the most thought.
 
@@ -108,14 +108,14 @@ This is the one that decides whether the review-notes feature works at all. It d
 
 The naive design searches for each note's anchor in the new file. That is backwards. **You are re-diffing anyway, and a diff is precisely a line correspondence.**
 
-Diff *previous working tree* against *new working tree* — not just against HEAD — and you get an exact `old_line → new_line` map. Every note migrates by table lookup, O(1) each, with no searching and no heuristics.
+Diff *previous working tree* against *new working tree* - not just against HEAD - and you get an exact `old_line → new_line` map. Every note migrates by table lookup, O(1) each, with no searching and no heuristics.
 
 ```
 prev_worktree ──diff──> new_worktree   ⇒  line map
 notes.range = map[notes.range]              O(1) per note
 ```
 
-Cost: keep the previous working-tree content in memory (the buffers from §11 of ARCHITECTURE.md, which you have anyway). Search-based anchoring becomes a *fallback* for the cases where the chain breaks — first run, external edits, `git checkout`, a formatter pass, a file you were not watching.
+Cost: keep the previous working-tree content in memory (the buffers from §11 of ARCHITECTURE.md, which you have anyway). Search-based anchoring becomes a *fallback* for the cases where the chain breaks - first run, external edits, `git checkout`, a formatter pass, a file you were not watching.
 
 This turns re-anchoring from a fuzzy-matching problem into a bookkeeping problem for the common case. It is the most important idea in this document.
 
@@ -130,7 +130,7 @@ When the chain is broken, degrade through progressively looser and more expensiv
 | 3 | Whitespace/indent-normalised window hash | O(1) |
 | 4 | Token-multiset similarity vs candidates sharing ≥1 line hash | O(candidates) |
 | 5 | `hunk_hash` → anchor to the hunk | O(1) |
-| 6 | `stale` | — |
+| 6 | `stale` | - |
 
 **Tier 2 needs a prebuilt index:** one pass over the new file building `window_hash → line[]` (a multimap). Built once per re-diff, O(n), then every note lookup is O(1). Building it once for 50 notes beats 50 linear scans by a wide margin.
 
@@ -144,7 +144,7 @@ Levenshtein/Damerau on line content is O(n·m) per comparison and buys almost no
 
 ## 4. Change-id inheritance
 
-Matching old hunks to new hunks is a bipartite assignment problem, but a tiny one — usually under 20 hunks per file.
+Matching old hunks to new hunks is a bipartite assignment problem, but a tiny one - usually under 20 hunks per file.
 
 **Greedy by hash, then by overlap (T1).** Exact `hunk_hash` matches first. Remaining hunks match by maximum line-range overlap under the §3.1 line map, greedily, highest overlap first. Hungarian algorithm would be optimal and is unnecessary at n < 50; greedy is correct in essentially every real case.
 
@@ -156,9 +156,9 @@ Merge and split resolution (SPEC.md §6.5) falls out of the overlap scores direc
 
 The one place where a genuinely large n exists: the `look` index may hold hundreds of thousands of paths.
 
-### 5.1 Bitmask prefilter (T1) — the big one
+### 5.1 Bitmask prefilter (T1) - the big one
 
-For each candidate, precompute a 256-bit ASCII presence mask (4× `u64`, cached in the index). A query's mask is computed once per keystroke. Any candidate whose mask lacks a query bit cannot match — reject with four `AND` operations.
+For each candidate, precompute a 256-bit ASCII presence mask (4× `u64`, cached in the index). A query's mask is computed once per keystroke. Any candidate whose mask lacks a query bit cannot match - reject with four `AND` operations.
 
 This typically eliminates 90–99% of candidates before any scoring runs, and it vectorises trivially with `@Vector(4, u64)`.
 
@@ -176,7 +176,7 @@ Two-phase like fzf: a cheap greedy forward scan to reject non-matches, full DP o
 
 ### 5.4 Parallel scoring (T1)
 
-Chunk the candidate slice across a thread pool, merge top-k per thread with a bounded heap. Never sort the full result set — a `k`-sized max-heap (k = visible rows + margin) is O(n log k).
+Chunk the candidate slice across a thread pool, merge top-k per thread with a bounded heap. Never sort the full result set - a `k`-sized max-heap (k = visible rows + margin) is O(n log k).
 
 ### 5.5 SIMD (T2)
 
@@ -195,19 +195,19 @@ Revisit only if a `--profile` run shows finder scoring above 10 ms post-prefilte
 
 ### 6.1 Comptime perfect hashing for keywords (T1)
 
-Zig can build a keyword lookup at compile time from the `LangDef` list. Bucket by length first, then a comptime-generated perfect hash — no runtime HashMap, no string comparison chains, no allocation.
+Zig can build a keyword lookup at compile time from the `LangDef` list. Bucket by length first, then a comptime-generated perfect hash - no runtime HashMap, no string comparison chains, no allocation.
 
 ### 6.2 Checkpointed incremental lexing (T0 for the data structure)
 
 The enclosing-function scan needs the whole file for brace depth, which conflicts with lexing only the visible range.
 
-Resolution: store a **checkpoint every 64 lines** — `{brace_depth, lex_state}` where `lex_state` is "outside string/comment" or the specific state. Lexing any visible region restarts from the nearest preceding checkpoint, so cost is bounded at 64 lines regardless of file size.
+Resolution: store a **checkpoint every 64 lines** - `{brace_depth, lex_state}` where `lex_state` is "outside string/comment" or the specific state. Lexing any visible region restarts from the nearest preceding checkpoint, so cost is bounded at 64 lines regardless of file size.
 
 Checkpoints invalidate from the first changed line onward; everything above survives an edit. Store them in the per-file cache alongside token runs.
 
 ### 6.3 Delimiter skipping (T2)
 
-Most source is uninteresting runs between quotes, slashes, and newlines. `std.mem.indexOfAny` is already vectorised in Zig's std — use it to jump between interesting bytes rather than stepping character by character. Free performance from the standard library.
+Most source is uninteresting runs between quotes, slashes, and newlines. `std.mem.indexOfAny` is already vectorised in Zig's std - use it to jump between interesting bytes rather than stepping character by character. Free performance from the standard library.
 
 ### 6.4 Token run encoding (T1)
 
@@ -264,10 +264,10 @@ Compute wrapping and column layout only for visible rows plus a small margin. Ne
 
 Options, in order of preference:
 
-1. **Batch** — one `git diff` for all changed paths, never one per file. (T0 — do this from the start.)
-2. **`git status --porcelain=v2` for change detection** in the polling watcher — one subprocess instead of N `stat` calls.
+1. **Batch** - one `git diff` for all changed paths, never one per file. (T0 - do this from the start.)
+2. **`git status --porcelain=v2` for change detection** in the polling watcher - one subprocess instead of N `stat` calls.
 3. **Read blobs directly.** `.git/index` plus loose/packed objects are a documented format. Reading them yourself removes the subprocess entirely but means implementing pack index lookup and zlib inflation. A real project, but a bounded and well-specified one.
-4. libgit2 — a middle path, at the cost of the C dependency you just removed.
+4. libgit2 - a middle path, at the cost of the C dependency you just removed.
 
 Option 3 is where "willing to rewrite" pays off most, and it pairs naturally with §1.3: own the object reading *and* the diff algorithm, and the whole path becomes in-process and cacheable.
 
@@ -317,7 +317,7 @@ Keep it boring. One render thread, one watcher thread, one thread pool for paral
 ## 11. Suggested order
 
 1. `metrics.zig` and the `--profile` flag. Everything else is guesswork without it.
-2. T0 structural choices — line interning, window hashing, SoA diff lines, content-hash caches, damage tracking, one write per frame, incremental narrowing, checkpointed lex state.
+2. T0 structural choices - line interning, window hashing, SoA diff lines, content-hash caches, damage tracking, one write per frame, incremental narrowing, checkpointed lex state.
 3. Measure. Publish the numbers in the README; it is good marketing for a tool whose pitch is speed.
 4. T1 items in whatever order the profile ranks them.
-5. Revisit §8.1 option 3 only when the profile makes the case for it — but expect it to.
+5. Revisit §8.1 option 3 only when the profile makes the case for it - but expect it to.

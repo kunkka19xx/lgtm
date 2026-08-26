@@ -1,4 +1,4 @@
-# `lgtm` — Architecture
+# `lgtm` - Architecture
 
 **Language:** Zig 0.16.0 (pinned)
 **Companion doc:** SPEC.md
@@ -8,7 +8,7 @@
 
 ## 1. Shape of the thing
 
-`lgtm` is a single-binary TUI with no daemon, no server, and no background service. It reads three things it does not own — the git working tree, the `look` index, and the terminal — and writes to exactly two places: its own `.lgtm/` directory and the agent's input via the multiplexer.
+`lgtm` is a single-binary TUI with no daemon, no server, and no background service. It reads three things it does not own - the git working tree, the `look` index, and the terminal - and writes to exactly two places: its own `.lgtm/` directory and the agent's input via the multiplexer.
 
 ```mermaid
 graph LR
@@ -46,8 +46,8 @@ graph TD
     main["main.zig<br/>args, config, event loop"]
 
     subgraph ui["ui/"]
-        app["app.zig — state machine"]
-        motion["motion.zig — vim motions"]
+        app["app.zig - state machine"]
+        motion["motion.zig - vim motions"]
         vdiff["view/diff.zig"]
         vfiles["view/filelist.zig"]
         vnotes["view/notes.zig"]
@@ -55,27 +55,27 @@ graph TD
     end
 
     subgraph core["core/"]
-        diff["diff.zig — parse git output"]
-        hunk["hunk.zig — model, change ids"]
-        anchor["anchor.zig — re-anchoring"]
-        notes["notes.zig — jsonl store"]
-        review["review.zig — render review-N.md"]
+        diff["diff.zig - parse git output"]
+        hunk["hunk.zig - model, change ids"]
+        anchor["anchor.zig - re-anchoring"]
+        notes["notes.zig - jsonl store"]
+        review["review.zig - render review-N.md"]
     end
 
     subgraph io["io/"]
-        watch["watch.zig — poll → native"]
-        proc["proc.zig — subprocess"]
-        fs["fs.zig — std.Io isolation"]
+        watch["watch.zig - poll → native"]
+        proc["proc.zig - subprocess"]
+        fs["fs.zig - std.Io isolation"]
     end
 
     subgraph search["search/"]
-        fuzzy["fuzzy.zig — fzf-style scoring"]
-        scope["scope.zig — changed/project/machine"]
-        lookdb["lookdb.zig — SQLite reader"]
+        fuzzy["fuzzy.zig - fzf-style scoring"]
+        scope["scope.zig - changed/project/machine"]
+        lookdb["lookdb.zig - SQLite reader"]
     end
 
     subgraph bridge["bridge/"]
-        biface["bridge.zig — tagged union"]
+        biface["bridge.zig - tagged union"]
         tmux["tmux.zig"]
         wez["wezterm.zig"]
         kitty["kitty.zig"]
@@ -83,9 +83,9 @@ graph TD
     end
 
     subgraph syntax["syntax/"]
-        hl["highlight.zig — union"]
-        lex["lexer.zig — generic engine"]
-        langs["lang/*.zig — LangDef"]
+        hl["highlight.zig - union"]
+        lex["lexer.zig - generic engine"]
+        langs["lang/*.zig - LangDef"]
         theme["theme.zig"]
     end
 
@@ -171,10 +171,10 @@ The catch: **notes must not hold pointers into the diff arena.** Notes outlive d
 
 `lgtm` needs two things from a language, and neither one needs a parse tree:
 
-1. **Token colouring** — a lexer is sufficient.
-2. **Enclosing function name for a hunk header** — a lexer plus brace-depth tracking is sufficient.
+1. **Token colouring** - a lexer is sufficient.
+2. **Enclosing function name for a hunk header** - a lexer plus brace-depth tracking is sufficient.
 
-A lexer is also a *better* fit here than a parser. A hunk is by definition a fragment: unbalanced braces, functions cut off at both ends. Lexers handle fragments naturally; parsers fall into error recovery, which is their slowest path. tree-sitter's real strength — an accurate tree — is largely wasted on a diff viewer.
+A lexer is also a *better* fit here than a parser. A hunk is by definition a fragment: unbalanced braces, functions cut off at both ends. Lexers handle fragments naturally; parsers fall into error recovery, which is their slowest path. tree-sitter's real strength - an accurate tree - is largely wasted on a diff viewer.
 
 **One generic lexer, per-language definitions via comptime:**
 
@@ -200,11 +200,11 @@ pub const Highlighter = union(enum) {
 };
 ```
 
-Selected per language *and* per file size. A language with a lexer uses it; anything else falls back to tree-sitter if linked, otherwise `plain`. The user never sees an unhighlighted screen as a failure — it is just a fallback.
+Selected per language *and* per file size. A language with a lexer uses it; anything else falls back to tree-sitter if linked, otherwise `plain`. The user never sees an unhighlighted screen as a failure - it is just a fallback.
 
 **v0.1 ships three lexers: Rust, Go, Python.** Zero C dependencies for highlighting, ~50 KB of binary, nothing to profile.
 
-**When tree-sitter earns its place.** Its real value is not speed — it is that *other people maintain 100+ grammars*. What exhausts you writing lexers is not Rust or Go, it is JavaScript (`/` is division or a regex literal depending on context), nested string interpolation, raw strings with arbitrary `#` counts, heredocs. If demand for those languages materialises, link tree-sitter behind the `tree_sitter` variant and vendor only the grammars that need it. Note that tree-sitter has real costs of its own: TypeScript/TSX grammars alone add megabytes of parse tables, running `highlights.scm` over a whole file often costs more than the parse itself (bound it with `ts_query_cursor_set_byte_range`), and half-written files trigger error recovery — the slow path.
+**When tree-sitter earns its place.** Its real value is not speed - it is that *other people maintain 100+ grammars*. What exhausts you writing lexers is not Rust or Go, it is JavaScript (`/` is division or a regex literal depending on context), nested string interpolation, raw strings with arbitrary `#` counts, heredocs. If demand for those languages materialises, link tree-sitter behind the `tree_sitter` variant and vendor only the grammars that need it. Note that tree-sitter has real costs of its own: TypeScript/TSX grammars alone add megabytes of parse tables, running `highlights.scm` over a whole file often costs more than the parse itself (bound it with `ts_query_cursor_set_byte_range`), and half-written files trigger error recovery - the slow path.
 
 **Guard rails, applied to any highlighter:**
 
@@ -232,7 +232,7 @@ const c = @cImport({
 
 `libgit2` is deliberately absent. v0.1 shells out to `git`: less linkage, no version skew, and it inherits the user's git config and worktree handling for free. Revisit only if subprocess latency shows up in a profile.
 
-**The `look` index is read through its SQLite file, not through Rust FFI.** The file format is the interface. The cost is a schema coupling between two codebases in two languages — mitigated by reading a `schema_version` row at startup and degrading Machine scope with a clear message if it does not match a known version. Never fail to start because of it.
+**The `look` index is read through its SQLite file, not through Rust FFI.** The file format is the interface. The cost is a schema coupling between two codebases in two languages - mitigated by reading a `schema_version` row at startup and degrading Machine scope with a clear message if it does not match a known version. Never fail to start because of it.
 
 ---
 
@@ -255,7 +255,7 @@ pub const Bridge = union(enum) {
 pub fn detect(a: Allocator) Bridge { ... }  // env vars, falls back to .osc52
 ```
 
-`detect()` never returns an error — OSC 52 is always reachable, so there is always a working bridge. Backend failures degrade to OSC 52 at call time with a status-line notice, and never propagate as fatal.
+`detect()` never returns an error - OSC 52 is always reachable, so there is always a working bridge. Backend failures degrade to OSC 52 at call time with a status-line notice, and never propagate as fatal.
 
 Two invariants enforced in `bridge.zig` rather than in each backend, so no backend can get them wrong:
 
@@ -305,7 +305,7 @@ lgtm/
 ├── src/
 │   ├── main.zig
 │   ├── config.zig
-│   ├── text/              # buffer + TextEdit — see §11
+│   ├── text/              # buffer + TextEdit - see §11
 │   │   ├── buffer.zig
 │   │   └── edit.zig
 │   ├── core/              # pure logic, unit-tested
@@ -335,11 +335,11 @@ lgtm/
 
 The dependency graph suggests a different order than the roadmap does, and the graph wins.
 
-1. **`core/anchor.zig` first, standalone, before any TUI exists.** Write a harness that replays recorded edit sequences from `tests/fixtures/` and reports the re-anchor hit rate. If it lands below ~90%, the entire review-notes feature needs redesigning — and finding that out with 300 lines of code is far cheaper than finding it out with a finished TUI attached.
-2. `core/diff.zig` + `hunk.zig` — parse `git diff`, assign and inherit change ids. Also testable headless.
+1. **`core/anchor.zig` first, standalone, before any TUI exists.** Write a harness that replays recorded edit sequences from `tests/fixtures/` and reports the re-anchor hit rate. If it lands below ~90%, the entire review-notes feature needs redesigning - and finding that out with 300 lines of code is far cheaper than finding it out with a finished TUI attached.
+2. `core/diff.zig` + `hunk.zig` - parse `git diff`, assign and inherit change ids. Also testable headless.
 3. `io/watch.zig` polling version. Fifty lines. Native backends much later.
-4. `syntax/lexer.zig` + Rust — pure function from bytes to token spans. Headless-testable, and now cheap enough to belong in v0.1.
-5. `ui/` with libvaxis — unified diff only, at 80 columns.
+4. `syntax/lexer.zig` + Rust - pure function from bytes to token spans. Headless-testable, and now cheap enough to belong in v0.1.
+5. `ui/` with libvaxis - unified diff only, at 80 columns.
 6. `bridge/tmux.zig` + `osc52.zig`.
 
 Steps 1–4 are pure Zig with no terminal involved, which means they are the parts you can actually test. Do them while the design is still cheap to change.
@@ -354,7 +354,7 @@ Four decisions, all of which cost roughly a day at v0.1 and a rewrite if deferre
 
 ### 11.1 The buffer is the source of truth; the diff is an overlay
 
-The single decision that determines everything else. If `lgtm` treats `git diff` output as its primary data, adding editing later means a rewrite — editing needs a mutable buffer, and diff text is not mutable.
+The single decision that determines everything else. If `lgtm` treats `git diff` output as its primary data, adding editing later means a rewrite - editing needs a mutable buffer, and diff text is not mutable.
 
 ```zig
 // text/buffer.zig
@@ -366,7 +366,7 @@ pub const Buffer = struct {
 };
 ```
 
-The diff view renders from **two buffers** — the HEAD version and the working-tree version — with hunks as annotations pointing into them, rather than rendering a diff string. Cost at v0.1: mapping hunks to line ranges instead of printing git's output verbatim. In exchange, editing later is *additive* rather than surgical.
+The diff view renders from **two buffers** - the HEAD version and the working-tree version - with hunks as annotations pointing into them, rather than rendering a diff string. Cost at v0.1: mapping hunks to line ranges instead of printing git's output verbatim. In exchange, editing later is *additive* rather than surgical.
 
 ### 11.2 `TextEdit` is the only way text changes
 
@@ -390,7 +390,7 @@ pub const Mode = enum { normal, visual, note_input, finder, insert, command };
 
 v0.1 uses the first three. Declaring all six costs nothing; writing `if (in_visual_mode)` across the codebase makes adding insert mode a full dispatch refactor.
 
-Same argument for the event queue. It already exists for the watch thread — make it a general union rather than a `FilesChanged` channel:
+Same argument for the event queue. It already exists for the watch thread - make it a general union rather than a `FilesChanged` channel:
 
 ```zig
 pub const Event = union(enum) {
@@ -410,7 +410,7 @@ src/
 ├── text/              # new, v0.1
 │   ├── buffer.zig
 │   ├── edit.zig       # TextEdit, Range, Position
-│   └── rope.zig       # not in v0.1 — Buffer swaps in later if needed
+│   └── rope.zig       # not in v0.1 - Buffer swaps in later if needed
 ├── core/
 ├── io/
 └── lsp/               # empty until v0.3+, but the boundary is named
@@ -423,8 +423,8 @@ src/
 
 ## 12. Open architectural questions
 
-1. **Subprocess vs libgit2** — start with subprocess. Revisit only if a profile says so.
-2. **When does tree-sitter get linked?** Not on performance grounds — on language-coverage grounds. Trigger: users asking for JS/TS, or a lexer for a context-sensitive language taking more than a day. Until then the `tree_sitter` variant stays unimplemented.
-3. **Note storage format** — `jsonl` is append-friendly and greppable, but rewriting on delete is awkward. Acceptable at expected volume (tens of notes). Revisit only if it hurts.
-4. **Windows** — `ReadDirectoryChangesW` and the absence of tmux mean the bridge story there is OSC 52 only. Is Windows a v1.0 target at all, or a later port?
-5. **Where does the enclosing-function scan run?** The lexer needs the full file for brace depth, not just the visible range. Cache it per content hash alongside token runs, or compute it separately on the watch thread — decide after measuring on a 5k-line file.
+1. **Subprocess vs libgit2** - start with subprocess. Revisit only if a profile says so.
+2. **When does tree-sitter get linked?** Not on performance grounds - on language-coverage grounds. Trigger: users asking for JS/TS, or a lexer for a context-sensitive language taking more than a day. Until then the `tree_sitter` variant stays unimplemented.
+3. **Note storage format** - `jsonl` is append-friendly and greppable, but rewriting on delete is awkward. Acceptable at expected volume (tens of notes). Revisit only if it hurts.
+4. **Windows** - `ReadDirectoryChangesW` and the absence of tmux mean the bridge story there is OSC 52 only. Is Windows a v1.0 target at all, or a later port?
+5. **Where does the enclosing-function scan run?** The lexer needs the full file for brace depth, not just the visible range. Cache it per content hash alongside token runs, or compute it separately on the watch thread - decide after measuring on a 5k-line file.
