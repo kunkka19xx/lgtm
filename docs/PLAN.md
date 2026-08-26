@@ -50,7 +50,7 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 - [ ] Fallback tiers 1-5: exact window hash ±50 lines; whole-file window-hash multimap index; whitespace-normalised hash; token-multiset similarity; `hunk_hash`. Tier 6 = `stale` (PERFORMANCE.md §3.2). No edit distance, ever (§3.3)
 - [ ] Harness: replays edit sequences from `tests/fixtures/`, reports hit rate and timing. **On load, assert that the content at each expected line matches the v0 anchor line ignoring leading whitespace**, and fail loudly on mismatch. Hand-written expectations are wrong often enough that scoring against a bad one would silently corrupt the gate
 - [x] Fixture format defined and seven mechanical fixtures written (`tests/fixtures/README.md`): whole-file `vN.txt` snapshots plus a `notes.txt` of expected lines per version. Snapshots rather than stored diffs, because the primary path (PERFORMANCE.md §3.1) needs both worktree states to build the line map
-- [ ] One recorded real agent session, captured from an actual session. The seven mechanical fixtures cover known failure modes; a real one covers the rest
+- [x] One recorded real agent session: `tests/fixtures/real-session-1`, 6 versions and 3 notes, captured with `tools/record-session.sh` from Claude Code editing a copy of `src/text/buffer.zig`. More sessions from other agents and larger files are still welcome, but the gate is no longer blocked on one
 
 **Gate:** hit rate >= ~90% and 50 notes re-anchor in <= 5 ms. Below 90%: STOP, redesign review notes before writing any more code.
 

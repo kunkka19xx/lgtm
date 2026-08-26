@@ -1,0 +1,18 @@
+# Recorded from a real Claude Code session editing a copy of src/text/buffer.zig,
+# captured with tools/record-session.sh.
+#
+# The task was to add a lineStart() accessor with a test. Across six versions the
+# agent added the helper (v1), added an `assert` import (v2), added an assert
+# inside line() (v3), reverted that assert (v4), then added a test (v5).
+#
+# n1  a distinctive line carried through pure drift and the v3/v4 revert.
+# n2  the interesting one. The agent's new helper copied the guard clause
+#     verbatim, so `if (n >= self.lineCount()) return null;` now occurs twice.
+#     A single-line hash cannot tell the two apart, and the note belongs to the
+#     one in line(), not the copy in lineStart(). This is exactly the
+#     duplicate-line failure PERFORMANCE.md 2.2 predicts, produced by ordinary
+#     agent behaviour rather than by a contrived fixture.
+# n3  sits below every edit and moves only by the net offset.
+n1 57 63 64 65 64 64
+n2 54 60 61 61 61 61
+n3 65 71 72 73 72 72

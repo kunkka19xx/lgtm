@@ -61,8 +61,12 @@ pub fn build(b: *std.Build) void {
             .optimize = .Debug,
         }),
     });
+    // Resolved paths, not relative ones: the check must behave the same whether
+    // `zig build` is invoked from the repo root or a subdirectory.
     const run_spdx = b.addRunArtifact(spdx);
-    run_spdx.addArgs(&.{ "src", "tools", "build.zig" });
+    run_spdx.addDirectoryArg(b.path("src"));
+    run_spdx.addDirectoryArg(b.path("tools"));
+    run_spdx.addFileArg(b.path("build.zig"));
     const spdx_step = b.step("spdx", "Check SPDX headers");
     spdx_step.dependOn(&run_spdx.step);
 
