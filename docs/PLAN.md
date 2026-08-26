@@ -186,28 +186,105 @@ Nothing here was optimised on a hunch; the benchmark was written first and each 
 
 One caveat. Every number above is Zig source measured on Zig-heavy input. Rust, Go and Python are correct on real files but were not the corpus, and Python in particular does more work per line, since indentation is inspected at every line start. Re-run `zig build bench -- <dir> <ext>` before trusting the figures for another language.
 
-## Phase 5: TUI
+## Phase 5: TUI - PARTIAL (5a done)
 
-`ui/` with libvaxis. First phase that needs a terminal. Test at 80 columns from day one.
+`ui/` with libvaxis. First phase that needs a terminal. Test at 80 columns from
+day one.
 
-- [ ] Main loop: drain event queue, re-diff only changed paths, inherit change ids, re-anchor (order fixed by ARCHITECTURE.md §3), render. Diff arena resets per re-diff, frame arena per render (ARCHITECTURE.md §4)
-- [ ] Rendering via the libvaxis **low-level API only** (`Window.writeCell`, `child()` for sub-regions). Do not import `vxfw` (ARCHITECTURE.md §5c)
-- [ ] Output through the `io/tty.zig` buffered writer passed into `vx.render()`: one flush per frame (PERFORMANCE.md §7.4)
-- [ ] Per-frame regeneration must be cheap: `lex_cache` and `layout_cache` (PERFORMANCE.md §7.2) and lazy layout for visible rows plus margin (§7.5) are required, not optional. Vaxis's internal cell diff handles terminal output; app-side regeneration cost is ours
-- [ ] Start by over-drawing the visible region each frame and letting the vaxis diff absorb it. Vaxis does not clear its cell buffer between frames, so row-level dirty tracking is available as a later option - do not build it until `--profile` shows the caches are insufficient (ARCHITECTURE.md §5c)
-- [ ] Use `Window.gwidth()` for display width; never assume one byte or one codepoint equals one column
-- [ ] Generated row text (line numbers, gutters, expanded tabs) is allocated from the frame arena, and that arena resets **after** render and flush. Vaxis cells reference the text rather than copying it, so a slice that dies early renders as plausible garbage rather than crashing (ARCHITECTURE.md §5c)
-- [ ] File list on top (collapsible) + unified diff below; `Tab` toggles full-screen diff
-- [ ] Hunk headers: `@@ #<id> <enclosing fn> @@`
-- [ ] Every action is a named command; keymap maps key sequences to command names; zero hardcoded keys in dispatch (FEATURES.md §4.3)
-- [ ] Motions: `h j k l`, `Ctrl-d/u`, `gg G`, `{ }`, `]h [h`, `]f [f`, `V`, `zz`, `e` opens `$EDITOR`, `q` and `:q`; in-diff search `/ n N` (`?` belongs to help, FEATURES.md §4.4)
-- [ ] `?` context-aware help popup from the first keybinding; shows actual bindings; `F1` and `g?` alias
-- [ ] `theme.zig` + bundled themes (Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa)
-- [ ] `config.zig`: TOML; never fail to start; report file, line, key; fall back per key only (FEATURES.md §4.9). Minimal v0.1 keys only
-- [ ] SIGWINCH re-layout preserves cursor and scroll (unified only in v0.1)
-- [ ] Lazy init: cold start touches config, terminal setup, one git diff and nothing else (PERFORMANCE.md §8.4)
+Split into three because the checklist is the largest in the plan and all of
+the integration risk sits in the first slice: **5a** the loop and a rendered
+unified diff, **5b** the full motion set, **5c** chrome (file list on `F`, help,
+themes, config, SIGWINCH polish).
 
-**Gate:** flawless at 80 columns in a split tmux pane; `--profile` shows keystroke-to-frame <= 8 ms, cold start <= 50 ms, re-diff <= 100 ms.
+The layout is mockup **2a** from `lgtm TUI Mockups.dc.html`: no persistent file
+list, one status row, files reached with `]f`. Chosen over 1a because it gives
+the body 22 of 26 rows instead of 17, and because 1c (the side-by-side view)
+already uses the same chrome - so when split lands in v0.3 it swaps the body
+rather than re-laying out the screen. Sign column is 1o option B, classic
+`+`/`−`, which is what every other mockup in the doc already draws.
+
+### 5a - done
+
+- [x] Main loop: drain event queue, re-diff, inherit change ids, render. Order fixed by ARCHITECTURE.md 3
+- [x] Diff arena resets per re-diff, frame arena per render - and the frame arena resets **after** render and flush, never before (ARCHITECTURE.md 5c)
+- [x] Rendering via the libvaxis low-level API only; `vxfw` is not imported
+- [x] Output through the `io/tty.zig` buffered writer, one flush per frame
+- [x] **`vx.resize` only on an actual resize event.** Found by using it: `j`/`k` flickered. `resize` reallocates both screen buffers and discards `screen_last`, which *is* the damage-tracking baseline - vaxis's own source says "this has the effect of redrawing every cell" - so calling it per frame repainted all 2080 cells per keystroke. Measured with `tmux pipe-pane`: **3949 bytes per keypress before, 248 after**. The winsize ioctl is gone from the frame path too; `WinsizeNotifier` already delivered resizes as events
+- [x] `Window.gwidth()` for display width everywhere a field is right-aligned
+- [x] Hunk headers: `@@ #<id> ▏ <enclosing fn> ▏ <range> @@`, the name coming from phase 4's brace-depth scan
+- [x] Syntax highlighting per row, from whole-file runs cached on the blob hash
+- [x] Every action is a named command; the keymap maps sequences to command names; zero hardcoded keys in dispatch. The status-line hint strip is generated from the bindings, so it cannot advertise a key that does nothing
+- [x] Motions `j k`, `Ctrl-d/u`, `gg G`, `]h [h`, `]f [f`, `zz`, `q`
+- [x] `--once` renders a single frame and exits, which is what makes the render path testable without a human at a keyboard
+- [x] Walking skeleton `ui/smoke.zig` deleted, as its own header instructed
+- [ ] 5b: `V`, `/ n N`, `e $EDITOR`, `:q`, `Tab`
+- [ ] 5c: file list on `F`, `?` help, `theme.zig` + bundled themes, `config.zig`, SIGWINCH re-layout preserving cursor and scroll
+- [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
+- [ ] `diff_cache`: still unbuilt, and now measurable rather than hypothetical - see below
+
+**5a gate: PASSED.** ReleaseFast, `-Dprofile`, rendering this repository's own
+working tree in an 80x26 tmux pane.
+
+| Metric | Budget | Measured |
+|---|---|---|
+| Cold start | 50 ms | **under 10 ms** |
+| Frame (keystroke to flush) | 8 ms | **0.171 ms** (render alone 0.071 ms) |
+| Re-diff, whole tree | 100 ms | **3.13 ms** (git subprocess 2.24 ms of it) |
+| Peak RSS | 40 MB | **6.3 MB** |
+| Binary, stripped | under 1 MB | **957 KB - see below** |
+
+Three things the measurement settled:
+
+- **`diff_cache` is still not worth building.** The whole re-diff is 3.1 ms, and
+  2.2 ms of that is the `git` subprocess the cache would not avoid. There is
+  about 0.9 ms on the table. Deferred again, now with a number rather than a
+  hunch.
+- **The frame budget is not close to being a constraint.** 0.171 ms against 8 ms
+  means the over-draw strategy is fine and row-level dirty tracking stays
+  unbuilt, exactly as ARCHITECTURE.md 5c asks. Note what this measurement does
+  *not* cover: app-side frame cost was well inside budget while the terminal
+  was being repainted whole. A profile span cannot see bytes on the wire, so
+  the flicker above was invisible to it.
+
+**Bytes per keystroke is now a tracked number, because `--profile` cannot see
+it.** Re-check it the same way after any change to the frame path:
+
+```
+tmux new-session -d -s x -x 80 -y 26 './zig-out/bin/lgtm'
+tmux pipe-pane -o -t x 'cat >> /tmp/pty.raw'
+# send N keys, then divide the growth of /tmp/pty.raw by N
+```
+
+A healthy frame is a few hundred bytes, wrapped in synchronized-output markers
+(`?2026h`/`?2026l`), with the cursor hidden and no `2J`. Thousands of bytes, or
+a `2J`, means the damage tracking has been defeated again.
+- **Binary size has reached the trigger phase 0 set for it.** That table said
+  "recheck if binary size ever approaches 1 MB". It has: 957 KB stripped, 96%
+  of budget, with themes, help, config, notes, the finder and the bridge all
+  still to come. Details below.
+
+### Binary size needs a decision before 5c
+
+`zigimg` is still fully eliminated, so that half of ARCHITECTURE.md 5c's bet
+holds. The other half did not: **the single largest item is 185 KB of `uucode`
+Unicode tables, pulled in by `Window.gwidth()`.** 5c predicted this cost but
+assumed it stayed hypothetical; calling `gwidth` is what made it real, and
+`gwidth` is not optional - the checklist forbids assuming one byte is one
+column, and the status line is full of multi-byte glyphs.
+
+Also present and unexamined: `std.compress.flate` and the DWARF self-unwinder,
+dragged in by Zig's default panic handler so it can symbolise its own stack
+traces.
+
+Neither is a bug and neither needs fixing today, but 5c should not be written
+without deciding which lever to pull: `-Dexternal_uucode`, a `ReleaseSmall`
+distribution build, a narrower panic handler, or raising the budget with a
+reason. Note also that phase 0's 653 KB was measured on macOS arm64, where
+debug info lives in a separate `.dSYM` - so that number and this one were never
+measuring the same thing, and the honest comparison is stripped-to-stripped.
+
+**Gate for 5b/5c:** flawless at 80 columns in a split tmux pane; `--profile`
+shows keystroke-to-frame <= 8 ms, cold start <= 50 ms, re-diff <= 100 ms.
 
 ## Phase 6: Bridge
 

@@ -5,7 +5,7 @@ const builtin = @import("builtin");
 
 pub const lib = @import("lib.zig");
 pub const tty = @import("io/tty.zig");
-pub const smoke = @import("ui/smoke.zig");
+pub const app = @import("ui/app.zig");
 const metrics = lib.metrics;
 
 const usage =
@@ -13,7 +13,7 @@ const usage =
     \\
     \\usage: lgtm [options]
     \\
-    \\  --smoke     render one sample frame at 80 columns and exit
+    \\  --once      render one frame and exit, for screenshots and CI
     \\  --profile   print timing spans on exit (requires -Dprofile build)
     \\  --version   print version and exit
     \\  -h, --help  print this help and exit
@@ -21,7 +21,6 @@ const usage =
 ;
 
 const version = "0.0.0-dev";
-const smoke_hold_ms = 2500;
 
 /// Zig 0.16 hands main the process allocator, arena, and Io implementation.
 pub fn main(init: std.process.Init) !void {
@@ -34,7 +33,7 @@ pub fn main(init: std.process.Init) !void {
     const w = out.writer();
 
     var want_profile = false;
-    var want_smoke = false;
+    var want_once = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
@@ -48,8 +47,8 @@ pub fn main(init: std.process.Init) !void {
             return;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             want_profile = true;
-        } else if (std.mem.eql(u8, arg, "--smoke")) {
-            want_smoke = true;
+        } else if (std.mem.eql(u8, arg, "--once")) {
+            want_once = true;
         } else {
             try w.print("lgtm: unknown option '{s}'\n\n{s}", .{ arg, usage });
             try w.flush();
@@ -57,12 +56,8 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (want_smoke) {
-        try w.flush();
-        try smoke.run(gpa, io, init.environ_map, smoke_hold_ms);
-    } else {
-        try w.print("lgtm {s}: scaffold. No diff view yet, see docs/PLAN.md.\n", .{version});
-    }
+    try w.flush();
+    try app.run(gpa, io, init.environ_map, .{ .once = want_once });
 
     if (want_profile) try metrics.report(w);
     try w.flush();
@@ -71,5 +66,5 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = lib;
     _ = tty;
-    _ = smoke;
+    _ = app;
 }

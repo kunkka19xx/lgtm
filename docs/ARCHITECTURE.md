@@ -148,6 +148,17 @@ Three rules this diagram encodes:
 2. **Only changed paths are re-diffed.** `git diff -- <paths>` scales with the agent's edit, not with the repo.
 3. **Change-id inheritance runs before re-anchoring**, because anchoring uses `hunk_hash` as its fallback and needs hunks already identified.
 
+**Built with two background threads, not one.** The diagram draws the watcher
+alone; `io/input.zig` is a second, because the tty read blocks and the main
+loop must stay free to service the watcher. The property this section actually
+cares about is intact: the UI is single-threaded, and the threads meet at one
+mutex-protected queue and nowhere else. Terminal input is translated to
+`core/event.zig` types at the `io/` boundary, so nothing above it knows vaxis
+exists.
+
+Resize arrives the same way, as an event, from a winsize handler - **not** by
+asking the terminal its size each frame. See 5c for what that cost.
+
 ---
 
 ## 4. Memory strategy
@@ -295,8 +306,37 @@ Either way the *terminal output* stays minimal; what the diff cannot recover is 
 
 **Two costs accepted:**
 
-- `zigimg` is a **non-lazy** dependency of vaxis, present for the kitty graphics protocol that `lgtm` never uses. It is fetched and compiled on every build. Zig's lazy analysis should keep it out of the final binary - confirm rather than trust, since binary size is the budget it threatens.
+- `zigimg` is a **non-lazy** dependency of vaxis, present for the kitty graphics protocol that `lgtm` never uses. It is fetched and compiled on every build. Zig's lazy analysis should keep it out of the final binary - confirm rather than trust, since binary size is the budget it threatens. **Confirmed at phase 5a: zero `zigimg` symbols in the binary.** This half of the bet held.
 - `uucode` (Unicode 17, comptime-embedded 3-stage lookup tables) is lazy and requests only four fields: `east_asian_width`, `grapheme_break`, `general_category`, `is_emoji_presentation`. Because the tables are embedded at compile time there is **no runtime load, so this is a binary-size cost and not a cold-start or RSS cost.** A `-Dexternal_uucode` option exists to share one instance if anything else ever pulls uucode in. For scale: `zide`, a libvaxis editor that also links tree-sitter, ships under 1 MB static.
+
+  **This half of the bet did not hold, and phase 5a is when it came due.** The
+  tables stayed out of the binary only while nothing called into them. The
+  renderer calls `Window.gwidth()` - which it must, because right-aligning a
+  status field full of multi-byte glyphs cannot assume one byte is one column -
+  and that pulls in **185 KB** of tables. Stripped binary is now 957 KB against
+  a 1 MB budget, with themes, help, config, notes, the finder and the bridge
+  still to come.
+
+  Also present and so far unexamined: `std.compress.flate` and the DWARF
+  self-unwinder, dragged in by Zig's default panic handler so it can symbolise
+  its own stack traces.
+
+  A lever has to be chosen before 5c: `-Dexternal_uucode`, a `ReleaseSmall`
+  distribution build, a narrower panic handler, or raising the budget with a
+  stated reason. Note also that phase 0's 653 KB was macOS arm64, where debug
+  info lives in a separate `.dSYM` - that figure and this one were never
+  measuring the same thing, and only stripped-to-stripped is a fair comparison.
+
+**Do not call `resize()` to find out whether you need to.** Phase 5a asked the
+terminal its size every frame and resized unconditionally, on the assumption
+that a no-op resize was free. It is not: `resize` reallocates both screen
+buffers, and one of them is `screen_last`, the damage-tracking baseline. The
+result was a full repaint per keystroke - 3949 bytes on the wire instead of
+248, and a visible flicker. Resize on the resize event, and only then.
+
+This is the same class of mistake as the one below: an API whose cost is not
+where its name suggests. Both were found by looking at the terminal, not at a
+profile.
 
 **Cells reference your text; they do not copy it.** Found the hard way in the walking skeleton: rows built from string literals rendered correctly while a row built into a stack buffer rendered as garbage, because the buffer died before `render()` ran. `printSegment` stores the slice you hand it, and `render()` reads it later.
 
@@ -425,6 +465,11 @@ lgtm/
 │   │   ├── proc.zig
 │   │   └── watch.zig
 │   ├── ui/
+│   │   ├── app.zig        # main loop, state, command dispatch
+│   │   ├── keymap.zig     # key sequences to command names
+│   │   ├── render.zig     # one frame: status, body, mode line
+│   │   ├── rows.zig       # the row model, vaxis-free and headless-testable
+│   │   └── theme.zig      # styles and glyph sets
 │   ├── bridge/
 │   ├── search/
 │   └── syntax/
@@ -445,7 +490,7 @@ The dependency graph suggests a different order than the roadmap does, and the g
 2. `core/diff.zig` + `hunk.zig` - parse `git diff`, assign and inherit change ids. Also testable headless.
 3. `io/watch.zig` polling version. Fifty lines. Native backends much later.
 4. `syntax/lexer.zig` + Zig - pure function from bytes to token spans. Headless-testable, and now cheap enough to belong in v0.1. Zig rather than Rust, because it is the only language there was real recorded input for.
-5. `ui/` with libvaxis - unified diff only, at 80 columns.
+5. `ui/` with libvaxis - unified diff only, at 80 columns. Split in practice into the loop plus a rendered diff, then motions, then chrome; the integration risk is all in the first slice.
 6. `bridge/tmux.zig` + `osc52.zig`.
 
 Steps 1–4 are pure Zig with no terminal involved, which means they are the parts you can actually test. Do them while the design is still cheap to change.

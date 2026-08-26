@@ -274,6 +274,28 @@ the tail of a line would be the worst possible failure here.
 
 Never repaint the screen. Keep front and back cell buffers, diff them, and emit escape sequences only for changed cells. libvaxis does this; the job is to not defeat it by regenerating everything each frame.
 
+**Defeated it anyway, and not in the way this warned about.** Phase 5a called
+`vx.resize` once per frame as a cheap way to notice a resized terminal. That
+call reallocates *both* screen buffers, and the second one is `screen_last` -
+the baseline the diff is taken against. vaxis's own source says it plainly:
+"this has the effect of redrawing every cell". So the regeneration warning
+above was obeyed and the tracking was destroyed regardless, by throwing away
+the thing being compared to.
+
+Measured with `tmux pipe-pane`, over ten `j` presses at 80x26: **3949 bytes per
+keystroke before, 248 after.** The fix was to resize only on an actual resize
+event, which the winsize notifier was already delivering.
+
+**The lesson is about the instrument, not the bug.** `--profile` reported a
+0.171 ms frame against an 8 ms budget throughout - a true number, since
+app-side frame cost really was tiny. A timing span cannot see bytes on the
+wire, so the whole-screen repaint was invisible to the only measurement being
+taken. It was found by a person using the tool and noticing a flicker.
+
+Bytes-per-keystroke is therefore a tracked number in its own right, with the
+recipe in docs/PLAN.md phase 5. A healthy frame is a few hundred bytes wrapped
+in synchronized-output markers, with no `2J`.
+
 ### 7.2 Cache by content hash, not by path (T0)
 
 The single most valuable cache in the program:
@@ -295,6 +317,15 @@ exists to avoid, and the worst number in the first benchmark run.
 The key is a parameter. `core/diff.zig` already captures git's blob hash from
 the `index a..b` line, which is a content hash git computed anyway. A hit is
 now 20 ns.
+
+**Status after phase 5a.** `lex_cache` is in use and earning its keep: whole
+frames cost 0.053 ms of lexing because the runs are computed once per blob, not
+once per frame. `layout_cache` is **not built** - the frame is 0.171 ms against
+an 8 ms budget, so there is nothing for it to save yet. `diff_cache` is still
+unbuilt and now has a number against it: a whole re-diff is 3.1 ms, of which
+2.2 ms is the `git` subprocess a cache would not avoid. About 0.9 ms is on the
+table. All three were called "the single most valuable cache in the program";
+one of them is, so far.
 
 ### 7.3 Struct-of-arrays for diff lines (T0)
 

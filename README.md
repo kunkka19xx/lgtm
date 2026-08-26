@@ -4,7 +4,7 @@
 
 A terminal diff reviewer built for agentic coding. Runs in a pane beside your agent CLI, shows what it changed as it changes, and lets you point at exact lines when you reply.
 
-> **Status: pre-alpha. There is no TUI yet, so there is nothing to run.** The headless core is built and tested. See [Status](#status).
+> **Status: pre-alpha.** It renders a live diff and you can move around it; the keys that send a reference to your agent are not built yet. See [Status](#status).
 
 ## Why
 
@@ -35,7 +35,9 @@ Not an agent. No embedded terminal. No plugin runtime. See `docs/SPEC.md` §4.
 
 ## Status
 
-Pre-alpha. The parts below the terminal are built first, because that is the order the dependency graph demands rather than the order a demo would want - each one is testable headless, and a wrong decision is far cheaper to find before a TUI is attached to it.
+Pre-alpha, and now runnable: `zig build run` shows this repository's own uncommitted changes, with syntax highlighting and hunk headers naming the enclosing function. What it cannot yet do is the thing it exists for - `Enter` does not send a reference, because that is the bridge, phase 6.
+
+The parts below the terminal were built first, because that is the order the dependency graph demands rather than the order a demo would want - each one is testable headless, and a wrong decision is far cheaper to find before a TUI is attached to it.
 
 | Phase | | |
 |---|---|---|
@@ -44,7 +46,7 @@ Pre-alpha. The parts below the terminal are built first, because that is the ord
 | 2 - Diff model and change ids | done | bar the diff cache, which waits for a loop to profile |
 | 3 - File watching | done | one event per settled burst of writes |
 | 4 - Syntax lexer | done | 378 MB/s, 0.5 ms to scan 6.4k lines |
-| 5 - TUI | next | nothing renders until this lands |
+| 5 - TUI | in progress | it renders: live unified diff, 0.17 ms per frame |
 | 6 - Bridge | | |
 
 Every number is measured rather than estimated, but on whichever machine ran it. [`docs/PLAN.md`](docs/PLAN.md) has the conditions, the caveats, and what was deliberately left unbuilt.

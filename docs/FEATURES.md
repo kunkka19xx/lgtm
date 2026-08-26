@@ -193,10 +193,22 @@ Teams add their own sensitive paths. This is also how the feature stays honest -
 
 ```toml
 [layout]
-file_list = "top"        # top | left | hidden
+file_list = "hidden"     # top | left | hidden
 file_list_size = 0.25
 statusline = "{mode} {file} {change_id} {notes} {risk}"
 ```
+
+**The default changed to `hidden` after the mockups** (`lgtm TUI Mockups.dc.html`,
+option 2a). A persistent list costs about five of twenty-six rows permanently,
+and the list is navigation, which should not hold territory while you read.
+Files are reached with `]f` and the full list on `F`. `top` and `left` remain
+supported - they are 1a and 1b, and both were drawn.
+
+Two consequences worth recording. The side-by-side view (1c) already uses this
+same chrome, so when it lands in v0.3 it swaps the body rather than re-laying
+out the screen. And the sign column defaults to classic `+`/`-` (option 1o B),
+which is what every other mockup in the doc already draws; `ui.icons` below
+still selects the glyph set.
 
 Statusline as a format string, tmux/lualine style. People will spend an hour on this and enjoy every minute.
 
