@@ -254,7 +254,7 @@ Snippets (1–3 lines by default, `notes.snippet_lines`) let the agent locate th
 
 A hand-written lexer, not a parser. `lgtm` needs token colouring and the enclosing function name for hunk headers - neither requires a parse tree, and a lexer handles diff fragments (unbalanced braces, truncated functions) more gracefully than a parser, which falls into error recovery on exactly that input.
 
-One generic lexer engine plus a small `LangDef` per language. v1 ships **Rust, Go, Python**; everything else renders as plain text without crashing. The highlighter is a tagged union, so tree-sitter can be added later for context-sensitive languages (JS/TS especially) without touching the call sites. See ARCHITECTURE.md §5.
+One generic lexer engine plus a small `LangDef` per language. v1 ships **Zig, Rust, Go, Python**; everything else renders as plain text without crashing. The highlighter is a tagged union, so tree-sitter can be added later for context-sensitive languages (JS/TS especially) without touching the call sites. See ARCHITECTURE.md §5.
 
 Consequence worth stating: **v0.1 has no C dependency for highlighting**, links nothing, and adds ~50 KB to the binary.
 
@@ -273,7 +273,7 @@ Revisit as a plugin once the review experience is solid.
 ## 8. Roadmap
 
 **v0.1 - useful to me**
-Unified diff, 500 ms polling, vim motions, `Enter` sends a reference. Lexer highlighting for Rust/Go/Python. Bridge: tmux + OSC 52. No search, no notes. Zero C dependencies.
+Unified diff, 500 ms polling, vim motions, `Enter` sends a reference. Lexer highlighting for Zig/Rust/Go/Python. Bridge: tmux + OSC 52. No search, no notes. Zero C dependencies.
 *Success test: you use it for a week without falling back to `git diff`.*
 
 **v0.2 - useful to other people**

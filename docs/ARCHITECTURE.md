@@ -179,16 +179,44 @@ A lexer is also a *better* fit here than a parser. A hunk is by definition a fra
 **One generic lexer, per-language definitions via comptime:**
 
 ```zig
-const rust = LangDef{
-    .line_comment = "//",
+pub const def = lexer.define(.{
+    .name = "rust",
+    .extensions = &.{"rs"},
+    .line_comment = &.{"//"},
     .block_comment = .{ .open = "/*", .close = "*/", .nested = true },
-    .strings = &.{ .{ .delim = "\"", .escape = '\\' }, .raw_hash },
+    .strings = &.{
+        // Longest opener first: `br#"` before `r#"` before `"`.
+        .{ .open = "br", .close = "\"", .escape = null, .multiline = true, .hashed = true },
+        .{ .open = "r", .close = "\"", .escape = null, .multiline = true, .hashed = true },
+        .{ .open = "\"", .close = "\"", .multiline = true },
+        .{ .open = "'", .close = "'", .max_bytes = 12 },
+    },
     .keywords = &.{ "fn", "let", "impl", "pub", "match", ... },
-    .fn_decl = &.{ "fn " },
-};
+    .fn_decl = &.{"fn"},
+});
 ```
 
-Roughly 200–400 lines for the engine plus the first language; ~60 lines of declaration for each language after that.
+**As built.** Four fields the original sketch did not have, each earning its
+place against a real file rather than a hypothetical one:
+
+- `max_bytes` - a literal that does not close within N bytes was never a
+  literal. This is what stops a Rust lifetime (`'a`) from being read as an
+  unterminated char literal and painting the rest of the line as a string.
+- `hashed` - `r#"..."#`, where the closing quote only counts with a matching
+  `#` count.
+- `line_string` - Zig's `\\`, a literal that runs to the end of the line.
+- `blocks: .braces | .indent` - Python closes a function span on a column, not
+  a brace.
+
+`define()` is where the comptime work happens: the keyword maps, the byte
+dispatch tables, and a compile error if a `fn_decl` word was left out of
+`keywords`.
+
+Sizes: the per-language estimate held, the engine estimate did not. 33-41
+lines per `LangDef` against the ~60 predicted, but 840 lines for the engine
+against 200-400, plus 313 for the highlighter and its cache and ~600 of tests.
+The engine is comment-dense in the style of the rest of this codebase, so the
+gap is smaller in code than in lines - but it is a gap, not a rounding error.
 
 **Pluggable, so the decision stays reversible:**
 
@@ -202,15 +230,21 @@ pub const Highlighter = union(enum) {
 
 Selected per language *and* per file size. A language with a lexer uses it; anything else falls back to tree-sitter if linked, otherwise `plain`. The user never sees an unhighlighted screen as a failure - it is just a fallback.
 
-**v0.1 ships three lexers: Rust, Go, Python.** Zero C dependencies for highlighting, ~50 KB of binary, nothing to profile.
+**v0.1 ships four lexers: Zig, Rust, Go, Python.** Zero C dependencies for highlighting, nothing to profile.
+
+Zig was written first, against the plan, for one reason: every fixture, every
+recorded session and every file in this repository is Zig, so a Rust-first
+order would have meant testing the first language definition against no real
+code. All four landed in the same phase regardless.
 
 **When tree-sitter earns its place.** Its real value is not speed - it is that *other people maintain 100+ grammars*. What exhausts you writing lexers is not Rust or Go, it is JavaScript (`/` is division or a regex literal depending on context), nested string interpolation, raw strings with arbitrary `#` counts, heredocs. If demand for those languages materialises, link tree-sitter behind the `tree_sitter` variant and vendor only the grammars that need it. Note that tree-sitter has real costs of its own: TypeScript/TSX grammars alone add megabytes of parse tables, running `highlights.scm` over a whole file often costs more than the parse itself (bound it with `ts_query_cursor_set_byte_range`), and half-written files trigger error recovery - the slow path.
 
 **Guard rails, applied to any highlighter:**
 
 - Files over 500 KB or 10k lines → `plain`, no tokenising. Shares the threshold logic with the diff summary path.
-- Tokenise only the visible range plus a small margin.
+- Tokenise only the visible range plus a small margin. **The API takes `(from, to, state)` and one 50-line screen from the nearest checkpoint measures 4.5 us, but nothing calls it that way until the renderer exists.** Whole-file lexing costs 0.57 ms over a 6.4k-line corpus, so this is a convenience the renderer may not need.
 - Cache token runs keyed by content hash (LRU, ~32 files). The agent touches six files but usually changes one or two; the rest cost nothing on re-diff. This is the optimisation that matters, not micro-tuning the lexer.
+- **The content hash is supplied by the caller, not computed by the cache.** Hashing the file on every lookup made a cache hit cost 5.1 us on a 200 KB input - the same order as the 0.9 ms miss it existed to avoid. `core/diff.zig` already has git's blob hash; that is the key.
 
 ---
 
@@ -396,7 +430,7 @@ lgtm/
 │   └── syntax/
 │       ├── highlight.zig
 │       ├── lexer.zig
-│       └── lang/          # rust.zig, go.zig, python.zig
+│       └── lang/          # zig.zig, rust.zig, go.zig, python.zig
 └── tests/
     └── fixtures/          # recorded git diff output + edit sequences
 ```
@@ -410,7 +444,7 @@ The dependency graph suggests a different order than the roadmap does, and the g
 1. **`core/anchor.zig` first, standalone, before any TUI exists.** Write a harness that replays recorded edit sequences from `tests/fixtures/` and reports the re-anchor hit rate. If it lands below ~90%, the entire review-notes feature needs redesigning - and finding that out with 300 lines of code is far cheaper than finding it out with a finished TUI attached.
 2. `core/diff.zig` + `hunk.zig` - parse `git diff`, assign and inherit change ids. Also testable headless.
 3. `io/watch.zig` polling version. Fifty lines. Native backends much later.
-4. `syntax/lexer.zig` + Rust - pure function from bytes to token spans. Headless-testable, and now cheap enough to belong in v0.1.
+4. `syntax/lexer.zig` + Zig - pure function from bytes to token spans. Headless-testable, and now cheap enough to belong in v0.1. Zig rather than Rust, because it is the only language there was real recorded input for.
 5. `ui/` with libvaxis - unified diff only, at 80 columns.
 6. `bridge/tmux.zig` + `osc52.zig`.
 
@@ -499,4 +533,4 @@ src/
 2. **When does tree-sitter get linked?** Not on performance grounds - on language-coverage grounds. Trigger: users asking for JS/TS, or a lexer for a context-sensitive language taking more than a day. Until then the `tree_sitter` variant stays unimplemented.
 3. **Note storage format** - `jsonl` is append-friendly and greppable, but rewriting on delete is awkward. Acceptable at expected volume (tens of notes). Revisit only if it hurts.
 4. **Windows** - `ReadDirectoryChangesW` and the absence of tmux mean the bridge story there is OSC 52 only. Is Windows a v1.0 target at all, or a later port?
-5. **Where does the enclosing-function scan run?** The lexer needs the full file for brace depth, not just the visible range. Cache it per content hash alongside token runs, or compute it separately on the watch thread - decide after measuring on a 5k-line file.
+5. ~~**Where does the enclosing-function scan run?**~~ **Answered.** Over the whole file, eagerly, on the main thread, per changed file - cached per content hash alongside the token runs. Measured on the 5k-line file this asked for: 0.5 ms for 6.4k lines, against a 100 ms re-diff budget. Neither of the escape hatches is needed, and restricting the scan to the visible range would cost the correct brace depth it exists to produce.

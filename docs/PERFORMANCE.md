@@ -197,6 +197,22 @@ Revisit only if a `--profile` run shows finder scoring above 10 ms post-prefilte
 
 Zig can build a keyword lookup at compile time from the `LangDef` list. Bucket by length first, then a comptime-generated perfect hash - no runtime HashMap, no string comparison chains, no allocation.
 
+**Built as a prefilter, not a perfect hash - and the profile is why.** Deleting
+the lookup entirely dropped a 6.4k-line scan from 0.542 ms to 0.435 ms, so it
+was 20% of total scan time: worth attacking, which is exactly what a T1 item
+needs before anyone touches it.
+
+What shipped is `std.StaticStringMap` (which already buckets by length) behind
+two comptime `[256]u64` masks, one keyed on the word's first byte and one on
+its last, each holding a bit per length. A non-keyword is rejected by two loads
+and an `and`. False positives fall through to the map and are answered
+correctly; false negatives cannot happen, since a real keyword sets both bits.
+That recovered about half.
+
+The remaining half is 12% of half a millisecond. A hand-rolled perfect hash
+could take it and is still not worth the code - which is the T1 discipline
+working, not being ignored.
+
 ### 6.2 Checkpointed incremental lexing (T0 for the data structure)
 
 The enclosing-function scan needs the whole file for brace depth, which conflicts with lexing only the visible range.
@@ -205,13 +221,50 @@ Resolution: store a **checkpoint every 64 lines** - `{brace_depth, lex_state}` w
 
 Checkpoints invalidate from the first changed line onward; everything above survives an edit. Store them in the per-file cache alongside token runs.
 
+**Built, and the invalidation deliberately was not.** The checkpoint table is
+the T0 part and it shipped: the property test lexes from *every* checkpoint and
+requires the runs to match the whole-file result exactly, so a subtly wrong
+stored state cannot pass.
+
+Partial invalidation stayed unbuilt because the whole-file pass costs 0.5 ms
+over 6.4k lines against a 100 ms re-diff budget. It would save half a
+millisecond and cost a second code path that can disagree with the first, which
+is the more expensive kind of bug. Revisit if a file ever shows up where the
+scan is not free.
+
 ### 6.3 Delimiter skipping (T2)
 
 Most source is uninteresting runs between quotes, slashes, and newlines. `std.mem.indexOfAny` is already vectorised in Zig's std - use it to jump between interesting bytes rather than stepping character by character. Free performance from the standard library.
 
+**Built, and it was not the biggest win.** `indexOfScalarPos` to the end of a
+line comment and `indexOfAnyPos` to the next byte that can matter inside a
+block comment or a string literal both help, and comment-heavy source spends
+real time in exactly those loops.
+
+The larger win was one the doc did not anticipate, and it is the same idea
+applied a level up: a comptime `[256]bool` table answering "can any comment or
+literal opener start at this byte". Before it, every byte of source was tested
+against every opener in the language. After it, identifiers and operators skip
+the ladder entirely. Structure-pass cost fell from 148 to roughly 90 ns/line on
+that change alone; the vectorised inner loops took it the rest of the way to
+77.
+
 ### 6.4 Token run encoding (T1)
 
 Emit `{start: u32, len: u16, kind: u8}` runs, not per-character styles. A typical line becomes 5–15 runs. Rendering iterates runs, not characters.
+
+**Built, at about 10 runs per line - inside the estimate.** Two invariants were
+added to make the renderer's job trivial, and most lexer tests assert them
+rather than one test asserting them once:
+
+1. Runs **tile** the scanned span: no gaps, no overlaps. Unclassified bytes are
+   `.text` runs, so a renderer walking runs never falls back to raw bytes.
+2. A run holds at most one `\n`, only as its final byte. Rows are therefore
+   found by walking forward, with nothing to reconcile.
+
+A token longer than `maxInt(u16)` is split across consecutive runs of the same
+kind rather than truncated. Only generated code reaches it, but silently losing
+the tail of a line would be the worst possible failure here.
 
 ---
 
@@ -232,6 +285,16 @@ diff_cache:   LRU<(blob_a, blob_b), Hunks>
 ```
 
 The agent writes six files; two actually changed content. The other four cost nothing. Keying on content hash rather than path also makes revert-and-rewrite free, which agents do constantly.
+
+**One correction from building it: the cache must not compute the hash.** The
+obvious reading of "keyed by content hash" is that the cache hashes the content
+it is handed, and that is wrong at this size. Hashing a 200 KB input on every
+lookup made a hit cost 5.1 us - the same order as the 0.9 ms miss the cache
+exists to avoid, and the worst number in the first benchmark run.
+
+The key is a parameter. `core/diff.zig` already captures git's blob hash from
+the `index a..b` line, which is a content hash git computed anyway. A hit is
+now 20 ns.
 
 ### 7.3 Struct-of-arrays for diff lines (T0)
 
