@@ -49,7 +49,7 @@ A second, smaller but constant problem: the agent needs context that lives **out
 Deliberately out of scope for v1. Written down so scope creep has something to bounce off.
 
 - ❌ **Not an agent.** No LLM loop, no model API calls. This tool reads and points.
-- ❌ **No editing.** No insert mode, no save. The agent edits; you review. Press `e` to open `$EDITOR` if you must.
+- ❌ **No editing in v1.** No insert mode, no save. The agent edits; you review. Press `e` to open `$EDITOR` if you must. Deferred, not refused: §11 of ARCHITECTURE.md keeps it cheap to add, so this is a scheduling call that can be revisited once the review loop is solid.
 - ❌ **No embedded terminal.** No PTY, no ANSI emulator. The agent runs in another pane; the multiplexer handles that.
 - ❌ **No LSP.** See §7.
 - ❌ **No plugin marketplace.**
