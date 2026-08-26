@@ -1,6 +1,6 @@
 # `lgtm` - Implementation plan
 
-**Derived from:** SPEC.md, ARCHITECTURE.md, PERFORMANCE.md, FEATURES.md
+**Derived from:** SPEC.md, ARCHITECTURE.md, PERFORMANCE.md, FEATURES.md, SNAPSHOTS.md, NOTIFICATIONS.md
 **Status:** draft v0.1
 
 Phases are ordered by the dependency graph (ARCHITECTURE.md §10), not the roadmap. Each phase has an exit gate; do not start the next phase until the gate passes. T0 performance items (PERFORMANCE.md) are built inside the phase that owns them, never retrofitted.
@@ -233,15 +233,23 @@ All phase gates green, plus the success test: the author uses `lgtm` for a week 
 
 ## v0.2 outline (useful to other people)
 
-Order within v0.2 follows the same logic: core before UI.
+Order within v0.2 follows the same logic: core before UI. Two documents were
+added after the original outline and are folded in here - `SNAPSHOTS.md` and
+`NOTIFICATIONS.md`. Neither belongs before phase 5: both are gated on code that
+does not exist yet, and nothing can be dogfooded until the TUI does.
 
 1. Review notes: `core/notes.zig` (jsonl store, owned bytes, session allocator), note lifecycle open/sent/stale (ARCHITECTURE.md §8), `c` / `Ctrl-e` / `C` / `dc` / `]c [c`, gutter markers, `core/review.zig` renders `review-N.md`, `Ctrl-s` writes the file and sends exactly one line
-2. Native filesystem watching behind the same `watch.zig` interface
-3. Three-scope finder: SQLite reader for the `look` index (first C dependency, `schema_version` check, degrade with a message), fzf-style scoring, incremental narrowing (T0), bitmask prefilter, parallel top-k
-4. Bridges: WezTerm, kitty (with `allow_remote_control` hint); pane picker UI + `Ctrl-t`
-5. Config surface: keymap remapping with presets (vim/helix/emacs/plain), user `[templates]`, per-repo `.lgtm/config.toml` merged over the global file
-6. Turn checkpoints (`m` / `a`, delta-since-mark view): same machinery as anchoring
-7. Weakened-test detection banner (needs the lexer)
+2. **Snapshot store** (SNAPSHOTS.md §3-4): `snapshot/gitobj.zig` + `snapshot/snapshot.zig`. Git plumbing into `refs/lgtm/**` through an isolated `GIT_INDEX_FILE`, one snapshot per agent turn, pruning by ref deletion. No UI. Ordered this early because item 8 depends on it and because it makes the anchor fast path survive a restart (SNAPSHOTS.md §5.2), which nothing else can. Two constraints the doc should carry before anyone writes code:
+   - **Gate on the watcher's `require_stable` signal.** Hashing a file the agent is mid-write on stores a corrupt turn under a ref that claims to be good. The diff path catches this with `attach()` returning `ContentMismatch`; the snapshot path has no equivalent, so it must not start until the signature has been identical on two consecutive polls (phase 3)
+   - **`.gitignore` is honoured by the path list, not by `update-index`.** `git update-index --add` is plumbing and will happily add `node_modules`. What makes hard boundary 5 true is that paths come from `git status --porcelain --untracked-files=all`, which is already ignore-clean. Any future caller sourcing paths differently breaks a safety property silently
+   - Also: prime `.lgtm/index` with `read-tree HEAD` rather than a full `add -A`. `write-tree` against an empty index emits a tree containing only the changed paths
+3. Native filesystem watching behind the same `watch.zig` interface
+4. Three-scope finder: SQLite reader for the `look` index (first C dependency, `schema_version` check, degrade with a message), fzf-style scoring, incremental narrowing (T0), bitmask prefilter, parallel top-k
+5. Bridges: WezTerm, kitty (with `allow_remote_control` hint); pane picker UI + `Ctrl-t`
+6. **Notifications, layers 1-2** (NOTIFICATIONS.md §2-4): the bell, the tmux user option, the `lgtm notify` subcommand, and quiescence detection as a second longer timer on the watcher's existing clock. Ordered after item 5 because `notify/` reads backend detection and pane addressing from `bridge/` rather than duplicating it, and `bridge/` does not exist until phase 6. One correction the doc needs: the `lgtm notify` state file **cannot** be picked up "through the existing watcher", because that watcher polls `git status` and `.lgtm/` is now ignored. It needs its own `fs.statFile` poll of one known path
+7. Config surface: keymap remapping with presets (vim/helix/emacs/plain), user `[templates]`, per-repo `.lgtm/config.toml` merged over the global file
+8. Turn checkpoints (`m` / `a`, delta-since-mark view): same machinery as anchoring, and durable once item 2 exists - the mark is a ref name in `.lgtm/state.json` rather than an in-memory marker, and it is the same state the pending badge reads, not a second copy of it (SNAPSHOTS.md §5.1, NOTIFICATIONS.md §4 rule 3)
+9. Weakened-test detection banner (needs the lexer)
 
 ## v0.3 outline (finished)
 
@@ -249,6 +257,8 @@ Order within v0.2 follows the same logic: core before UI.
 - Stage/unstage hunks (`s`/`u`) and revert-a-hunk, both as `TextEdit` through `Buffer.apply()`
 - Risk-ordered hunks with configurable rules; session history; Zellij (degraded, OSC 52 default)
 - Custom TOML themes + live reload + `--theme-preview`; more lexers, or tree-sitter if language demand justifies it
+- Turn timeline (`[t` / `]t`) and restore (`R`, `lgtm restore <path> --turn N`), both on the v0.2 snapshot store (SNAPSHOTS.md §5.3-5.4). Comparing any two turns is diff-of-diff with no extra machinery. Restore is the most dangerous action in the tool and gets the most friction: snapshot first, always show a confirmation diff, never restore more than was selected
+- Desktop notifications, layer 3 (NOTIFICATIONS.md §2): opt-in, and it stays opt-in because it needs tmux `allow-passthrough` and silently no-ops without it
 
 ## Pre-1.0
 
