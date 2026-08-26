@@ -264,6 +264,15 @@ Either way the *terminal output* stays minimal; what the diff cannot recover is 
 - `zigimg` is a **non-lazy** dependency of vaxis, present for the kitty graphics protocol that `lgtm` never uses. It is fetched and compiled on every build. Zig's lazy analysis should keep it out of the final binary - confirm rather than trust, since binary size is the budget it threatens.
 - `uucode` (Unicode 17, comptime-embedded 3-stage lookup tables) is lazy and requests only four fields: `east_asian_width`, `grapheme_break`, `general_category`, `is_emoji_presentation`. Because the tables are embedded at compile time there is **no runtime load, so this is a binary-size cost and not a cold-start or RSS cost.** A `-Dexternal_uucode` option exists to share one instance if anything else ever pulls uucode in. For scale: `zide`, a libvaxis editor that also links tree-sitter, ships under 1 MB static.
 
+**Cells reference your text; they do not copy it.** Found the hard way in the walking skeleton: rows built from string literals rendered correctly while a row built into a stack buffer rendered as garbage, because the buffer died before `render()` ran. `printSegment` stores the slice you hand it, and `render()` reads it later.
+
+This is load-bearing for the diff view, where almost every row is generated (line numbers, gutter markers, expanded tabs) rather than literal. Two consequences, both non-negotiable:
+
+- Per-frame row text is allocated from the **frame arena**, and that arena is reset **after** `render()` and its flush, never before. The ordering in §4 is not stylistic.
+- Nothing handed to `printSegment` may live in a scope that closes before the render call.
+
+A dangling slice here does not crash. It renders plausible-looking garbage on one row, which is a far worse failure mode, so treat this as a review checklist item rather than something the compiler will catch.
+
 **Boundary rule, from §7.** `render()` accepts a `*std.Io.Writer`, so vaxis's API surface pulls `std.Io` types toward the UI. Rule 5 quarantines `std.fs` and `std.process` specifically, so this is not a violation - but the spirit of that rule is insulating against `std.Io` churn, which is where the 0.16 cycle moved things. Therefore: **the tty writer is constructed in `io/`, and `ui/` receives it as a parameter.** No writer construction in `ui/`.
 
 **Alternatives surveyed (August 2026).** Nothing else combines cell-level control, damage tracking, and a maintained Zig 0.16 build:
@@ -274,7 +283,7 @@ Either way the *terminal output* stays minimal; what the diff cannot recover is 
 | `ansi_term` (ziglibs) | Alive on 0.16; style and escape formatting only, not a TUI library |
 | `zigzag` | New Elm/Bubble Tea-style framework on 0.16, ~528 stars. Model-Update-View is the wrong shape for a custom diff renderer, and it is young |
 | `TUI.zig` | Claims double buffering on 0.16, but ~11 commits. Too early to bet on |
-| `zig-spoon` / `zig-spork` | Dormant since roughly Zig 0.10 (2023). Upstream also relocated to GPL, which conflicts with Apache-2.0 OR MIT |
+| `zig-spoon` / `zig-spork` | Dormant since roughly Zig 0.10 (2023). Upstream also relocated to GPL, which conflicts with Apache-2.0 |
 | `zbox`, `zig-termbox` | Dead or unmaintained; no 0.16 support |
 | `termbox2`, `ncurses`, `notcurses` bindings | All reintroduce the C dependency §5b just eliminated. Notably, Flow's author moved *off* notcurses onto libvaxis |
 | `opentui` | Zig core exists but is packaged for TypeScript bindings, not standalone Zig consumption |
@@ -319,7 +328,21 @@ Two invariants enforced in `bridge.zig` rather than in each backend, so no backe
 
 **Pin the compiler.** `minimum_zig_version` in `build.zig.zon`, plus a `.zigversion` file for `zvm`/`zigup`. Upgrade deliberately, on a branch, never mid-feature.
 
-**Quarantine `std.Io`.** All filesystem and subprocess calls go through `io/fs.zig` and `io/proc.zig`. Nothing else in the codebase imports `std.fs` or `std.process` directly. When the next release rearranges those APIs, the fix is two files rather than forty. This is cheap to set up on day one and expensive to retrofit later.
+**Quarantine `std.Io`.** All filesystem and subprocess calls go through `io/fs.zig` and `io/proc.zig`; the render writer goes through `io/tty.zig`. Nothing else imports these APIs directly. When the next release rearranges them, the fix is three files rather than forty.
+
+**This rule already paid for itself, on day one.** 0.16 did not merely rearrange `std.fs`, it emptied it. Confirmed against the shipping compiler while scaffolding:
+
+| Pre-0.16 | Zig 0.16 |
+|---|---|
+| `std.fs.File`, `std.fs.Dir` | `std.Io.File`, `std.Io.Dir` (`std.fs` retains only `path` and base64 aliases) |
+| `std.Thread.Mutex`, `std.Thread.Condition` | `std.Io.Mutex`, `std.Io.Condition`, and their methods now take an `Io` |
+| `std.time.nanoTimestamp()` | `std.Io.Timestamp.now(io, clock)`; `std.time` is constants only |
+| `Child.Term.Exited` | `Child.Term.exited` (tags lowercased) |
+| `fn main()` obtains its own allocator | `fn main(init: std.process.Init)` receives `gpa`, `io`, `arena`, `args`, `environ_map` |
+
+The practical consequence is broader than the original wording: **`Io` is now a value that must be threaded through**, like `Allocator`. Anything that reads a clock, locks a mutex, or touches a file needs one. Where threading it to every call site would be noise, capture it once at startup (`io/metrics.zig` does this) rather than reaching for a global in each module.
+
+**Vendor, don't float.** C grammars and any Zig dependency (libvaxis) get pinned by hash in `build.zig.zon`. A tool whose whole pitch is "it starts instantly and never breaks" cannot have a build that breaks on someone else's push.
 
 **Vendor, don't float.** C grammars and any Zig dependency (libvaxis) get pinned by hash in `build.zig.zon`. A tool whose whole pitch is "it starts instantly and never breaks" cannot have a build that breaks on someone else's push.
 

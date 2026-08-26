@@ -1,0 +1,18 @@
+.{
+    .name = .lgtm,
+    .version = "0.0.0",
+    .fingerprint = 0x657ceb15ee40c88a,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .vaxis = .{
+            .url = "git+https://github.com/rockorager/libvaxis#c060d314930c5552b99a89278a6a695baf0352da",
+            .hash = "vaxis-0.6.0-BWNV_LC4CwBka_bJk8SOXqzCM-nyQH00jzdL0kUhGwRE",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+    },
+}

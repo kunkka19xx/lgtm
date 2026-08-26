@@ -7,20 +7,35 @@ Phases are ordered by the dependency graph (ARCHITECTURE.md §10), not the roadm
 
 ---
 
-## Phase 0: Scaffold and instrumentation
+## Phase 0: Scaffold and instrumentation - DONE
 
 No product code until the skeleton builds, tests, and measures.
 
-- [ ] `.zigversion` (0.16.0), `build.zig`, `build.zig.zon` with `minimum_zig_version` and libvaxis pinned to a **main-branch commit hash**, not a release tag (ARCHITECTURE.md §5c; tags lag 0.16 and v0.5.0 announced breaking changes)
-- [ ] `zig build` produces a stub binary; `zig build test` runs a test step covering all modules
-- [ ] Baseline measurement of the empty vaxis binary: **size first** (that is the budget `zigimg` and uucode tables threaten), plus RSS and cold start. Measure before real code hides it (ARCHITECTURE.md §5c)
-- [ ] `src/io/fs.zig` + `src/io/proc.zig`: the only files importing `std.fs` / `std.process`. fs: whole-file read in one `read()` into a caller-supplied arena. proc: run argv, capture stdout
-- [ ] `src/io/tty.zig`: constructs the buffered `std.Io.Writer` handed to `vx.render()`. Writer construction lives in `io/`, never in `ui/` (ARCHITECTURE.md §5c)
-- [ ] `src/io/metrics.zig` + `--profile` flag: comptime-gated timed spans, histogram dump on exit (PERFORMANCE.md §0, ~20 lines)
-- [ ] `src/text/edit.zig`: `Position`, `Range`, `TextEdit`, all byte offsets
-- [ ] `src/text/buffer.zig`: line-array `Buffer` over owned bytes; read-only; `apply()` returns `error.NotImplemented` (ARCHITECTURE.md §11.1)
-- [ ] Full `Mode` enum (normal, visual, note_input, finder, insert, command) and `Event` union (key, files_changed, resize); one mutex+condvar event queue (ARCHITECTURE.md §11.4)
-- [ ] SPDX header on every source file, enforced by a test or build step
+- [x] `.zigversion` (0.16.0), `build.zig`, `build.zig.zon` with `minimum_zig_version` and libvaxis pinned to a **main-branch commit hash**, not a release tag (ARCHITECTURE.md 5c). Pinned: `c060d31`, resolving to `vaxis-0.6.0`
+- [x] `zig build` produces a binary; `zig build test` runs 16 tests across every module
+- [x] Baseline measured with vaxis linked (see table below)
+- [x] `src/io/fs.zig` + `src/io/proc.zig`: the only files touching filesystem and process APIs. fs: whole-file read in one call. proc: run argv, capture stdout
+- [x] `src/io/tty.zig`: owns the terminal handle and the buffered writer handed to `vx.render()`. Wraps `vaxis.tty.Tty` rather than reimplementing raw mode. Writer construction never happens in `ui/` (ARCHITECTURE.md 5c)
+- [x] `src/io/metrics.zig` + `--profile`: comptime-gated spans, report on exit, budget violations flagged `OVER` (PERFORMANCE.md 0)
+- [x] `src/text/edit.zig`: `Position`, `Range`, `TextEdit`, all byte offsets
+- [x] `src/text/buffer.zig`: line-array `Buffer` over owned bytes; read-only; `apply()` returns `error.NotImplemented` (ARCHITECTURE.md 11.1)
+- [x] Full `Mode` enum (six variants, three reachable) and `Event` union; one mutex+condvar `Queue` (ARCHITECTURE.md 11.4)
+- [x] SPDX header on every source file
+- [x] **Walking skeleton** `src/ui/smoke.zig`, run with `lgtm --smoke`: enters the alt screen, renders a sample diff plus an 80-column ruler, holds, restores the terminal. Delete when `ui/view/diff.zig` lands
+- [ ] SPDX header enforced automatically (currently by convention only)
+
+### Measured baseline
+
+ReleaseFast, macOS arm64, with vaxis, zigimg and uucode linked:
+
+| Metric | Budget | Measured |
+|---|---|---|
+| Binary size | under 1 MB (reference: zide) | 653 KB |
+| Peak RSS | 40 MB | 1.6 MB |
+| Cold start (warm cache) | 50 ms | under 10 ms |
+| Frame render, 80x24 | 8 ms | 0.29 ms (render alone 0.21 ms) |
+
+The `zigimg` question from ARCHITECTURE.md 5c is answered: it is fetched and compiled, but dead-code elimination keeps it out of the binary. 653 KB and 1.6 MB RSS leave ample headroom. No action needed; recheck if binary size ever approaches 1 MB.
 
 **Gate:** `zig build` and `zig build test` pass; `--profile` prints.
 
@@ -85,6 +100,7 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 - [ ] Per-frame regeneration must be cheap: `lex_cache` and `layout_cache` (PERFORMANCE.md §7.2) and lazy layout for visible rows plus margin (§7.5) are required, not optional. Vaxis's internal cell diff handles terminal output; app-side regeneration cost is ours
 - [ ] Start by over-drawing the visible region each frame and letting the vaxis diff absorb it. Vaxis does not clear its cell buffer between frames, so row-level dirty tracking is available as a later option - do not build it until `--profile` shows the caches are insufficient (ARCHITECTURE.md §5c)
 - [ ] Use `Window.gwidth()` for display width; never assume one byte or one codepoint equals one column
+- [ ] Generated row text (line numbers, gutters, expanded tabs) is allocated from the frame arena, and that arena resets **after** render and flush. Vaxis cells reference the text rather than copying it, so a slice that dies early renders as plausible garbage rather than crashing (ARCHITECTURE.md §5c)
 - [ ] File list on top (collapsible) + unified diff below; `Tab` toggles full-screen diff
 - [ ] Hunk headers: `@@ #<id> <enclosing fn> @@`
 - [ ] Every action is a named command; keymap maps key sequences to command names; zero hardcoded keys in dispatch (FEATURES.md §4.3)

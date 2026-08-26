@@ -48,4 +48,4 @@ Not an agent. No editing. No embedded terminal. No LSP. No plugin runtime. See `
 
 ## License
 
-Apache-2.0 OR MIT, at your option.
+Apache-2.0. See [`LICENSE`](LICENSE).
