@@ -1,0 +1,7 @@
+fn pipeline() {
+    ONE();
+    two();
+    stable();
+    four();
+    FIVE();
+}

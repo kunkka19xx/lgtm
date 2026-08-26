@@ -1,0 +1,3 @@
+# The agent adds a line then reverts it. v2 is byte-identical to v0, so the
+# anchor must return to its original position, not drift permanently.
+n1 4 5 4

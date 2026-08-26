@@ -1,0 +1,8 @@
+fn pipeline() {
+    one();
+    one_b();
+    two();
+    two_b();
+    three();
+    anchor_here();
+}

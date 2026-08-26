@@ -1,0 +1,3 @@
+# Two edits separated by fewer than 3 context lines merge into a single hunk.
+# The anchor sits on the untouched line between them and must not move.
+n1 4 4

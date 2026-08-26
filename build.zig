@@ -43,10 +43,30 @@ pub fn build(b: *std.Build) void {
     test_module.addOptions("build_options", build_options);
     test_module.addImport("vaxis", vaxis);
 
+    const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{
         .name = "lgtm-test",
         .root_module = test_module,
+        .filters = if (test_filter) |f| &.{f} else &.{},
     });
     const run_tests = b.addRunArtifact(tests);
     b.step("test", "Run unit tests").dependOn(&run_tests.step);
+
+    // Licence header check. Runs as its own step and as part of `zig build check`.
+    const spdx = b.addExecutable(.{
+        .name = "check-spdx",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_spdx.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+        }),
+    });
+    const run_spdx = b.addRunArtifact(spdx);
+    run_spdx.addArgs(&.{ "src", "tools", "build.zig" });
+    const spdx_step = b.step("spdx", "Check SPDX headers");
+    spdx_step.dependOn(&run_spdx.step);
+
+    const check = b.step("check", "Run tests and the SPDX header check");
+    check.dependOn(&run_tests.step);
+    check.dependOn(&run_spdx.step);
 }

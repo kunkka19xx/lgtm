@@ -1,0 +1,5 @@
+fn summary(rows: &[Row]) -> u32 {
+    let x = 1;
+    deprecated_call(x);
+    total(x)
+}

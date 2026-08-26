@@ -1,0 +1,4 @@
+# The anchored line and its whole neighbourhood are rewritten. Every tier must
+# miss and the note must become stale, never silently relocated or dropped
+# (hard rule 7).
+n1 3 stale

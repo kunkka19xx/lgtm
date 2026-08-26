@@ -1,0 +1,3 @@
+# A whole function is inserted above the anchor. Pure offset shift.
+# Row format: <note_id> <1-based line in v0> <line in v1> ...
+n1 9 13

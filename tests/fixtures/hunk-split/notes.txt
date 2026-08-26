@@ -1,0 +1,3 @@
+# v1 inserts two lines, v2 reverts one of them, splitting the original hunk.
+# The anchor is below both edits and must track the net offset each time.
+n1 5 7 6

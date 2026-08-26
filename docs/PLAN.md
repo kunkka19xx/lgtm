@@ -22,7 +22,7 @@ No product code until the skeleton builds, tests, and measures.
 - [x] Full `Mode` enum (six variants, three reachable) and `Event` union; one mutex+condvar `Queue` (ARCHITECTURE.md 11.4)
 - [x] SPDX header on every source file
 - [x] **Walking skeleton** `src/ui/smoke.zig`, run with `lgtm --smoke`: enters the alt screen, renders a sample diff plus an 80-column ruler, holds, restores the terminal. Delete when `ui/view/diff.zig` lands
-- [ ] SPDX header enforced automatically (currently by convention only)
+- [x] SPDX header enforced automatically: `tools/check_spdx.zig`, run by `zig build spdx` and `zig build check`
 
 ### Measured baseline
 
@@ -48,8 +48,9 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 - [ ] In-process line diff over interned ids with common prefix/suffix trimming (PERFORMANCE.md §1.2, §1.3; histogram preferred, simple algorithm acceptable behind the same interface): produces the exact old-to-new line map between previous and current buffer
 - [ ] Primary re-anchor path: table lookup through the line map, O(1) per note (PERFORMANCE.md §3.1)
 - [ ] Fallback tiers 1-5: exact window hash ±50 lines; whole-file window-hash multimap index; whitespace-normalised hash; token-multiset similarity; `hunk_hash`. Tier 6 = `stale` (PERFORMANCE.md §3.2). No edit distance, ever (§3.3)
-- [ ] Harness: replays edit sequences from `tests/fixtures/`, reports hit rate and timing
-- [ ] Fixtures: insert-above drift, in-hunk drift, formatter pass (indent change), hunk merge (<3 context lines apart), hunk split, revert-and-rewrite, plus at least one recorded real agent session
+- [ ] Harness: replays edit sequences from `tests/fixtures/`, reports hit rate and timing. **On load, assert that the content at each expected line matches the v0 anchor line ignoring leading whitespace**, and fail loudly on mismatch. Hand-written expectations are wrong often enough that scoring against a bad one would silently corrupt the gate
+- [x] Fixture format defined and seven mechanical fixtures written (`tests/fixtures/README.md`): whole-file `vN.txt` snapshots plus a `notes.txt` of expected lines per version. Snapshots rather than stored diffs, because the primary path (PERFORMANCE.md §3.1) needs both worktree states to build the line map
+- [ ] One recorded real agent session, captured from an actual session. The seven mechanical fixtures cover known failure modes; a real one covers the rest
 
 **Gate:** hit rate >= ~90% and 50 notes re-anchor in <= 5 ms. Below 90%: STOP, redesign review notes before writing any more code.
 

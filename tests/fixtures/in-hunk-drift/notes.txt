@@ -1,0 +1,3 @@
+# One line inserted inside the hunk, above the anchor. The hunk itself is
+# unchanged in identity; only the offset within it moves.
+n1 6 7

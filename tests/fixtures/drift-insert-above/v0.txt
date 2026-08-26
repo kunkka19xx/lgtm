@@ -1,0 +1,13 @@
+use std::time::SystemTime;
+
+fn now() -> u64 {
+    SystemTime::now().elapsed().unwrap().as_secs()
+}
+
+fn validate_token(t: &str) -> Result<Claims, Error> {
+    let claims = decode(t)?;
+    if claims.exp < now() {
+        return Err(Error::Expired);
+    }
+    Ok(claims)
+}

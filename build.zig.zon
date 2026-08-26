@@ -13,6 +13,8 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "tools",
+        "tests",
         "LICENSE",
     },
 }

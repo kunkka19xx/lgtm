@@ -1,0 +1,5 @@
+fn totals() -> u32 {
+    let x = 1;
+    let y = 2;
+    total(x, y)
+}

@@ -1,0 +1,4 @@
+fn summary(rows: &[Row]) -> u32 {
+    let x = compute(rows);
+    summarise(x)
+}

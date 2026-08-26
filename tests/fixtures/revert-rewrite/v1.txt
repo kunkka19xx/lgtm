@@ -1,0 +1,6 @@
+fn totals() -> u32 {
+    let x = 1;
+    let z = 9;
+    let y = 2;
+    total(x, y)
+}
