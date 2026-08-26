@@ -11,9 +11,11 @@ Phases are ordered by the dependency graph (ARCHITECTURE.md §10), not the roadm
 
 No product code until the skeleton builds, tests, and measures.
 
-- [ ] `.zigversion` (0.16.0), `build.zig`, `build.zig.zon` with `minimum_zig_version` and libvaxis pinned by hash
+- [ ] `.zigversion` (0.16.0), `build.zig`, `build.zig.zon` with `minimum_zig_version` and libvaxis pinned to a **main-branch commit hash**, not a release tag (ARCHITECTURE.md §5c; tags lag 0.16 and v0.5.0 announced breaking changes)
 - [ ] `zig build` produces a stub binary; `zig build test` runs a test step covering all modules
+- [ ] Baseline measurement of the empty vaxis binary: **size first** (that is the budget `zigimg` and uucode tables threaten), plus RSS and cold start. Measure before real code hides it (ARCHITECTURE.md §5c)
 - [ ] `src/io/fs.zig` + `src/io/proc.zig`: the only files importing `std.fs` / `std.process`. fs: whole-file read in one `read()` into a caller-supplied arena. proc: run argv, capture stdout
+- [ ] `src/io/tty.zig`: constructs the buffered `std.Io.Writer` handed to `vx.render()`. Writer construction lives in `io/`, never in `ui/` (ARCHITECTURE.md §5c)
 - [ ] `src/io/metrics.zig` + `--profile` flag: comptime-gated timed spans, histogram dump on exit (PERFORMANCE.md §0, ~20 lines)
 - [ ] `src/text/edit.zig`: `Position`, `Range`, `TextEdit`, all byte offsets
 - [ ] `src/text/buffer.zig`: line-array `Buffer` over owned bytes; read-only; `apply()` returns `error.NotImplemented` (ARCHITECTURE.md §11.1)
@@ -78,7 +80,11 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 `ui/` with libvaxis. First phase that needs a terminal. Test at 80 columns from day one.
 
 - [ ] Main loop: drain event queue, re-diff only changed paths, inherit change ids, re-anchor (order fixed by ARCHITECTURE.md §3), render. Diff arena resets per re-diff, frame arena per render (ARCHITECTURE.md §4)
-- [ ] Rendering: preserve libvaxis damage tracking (do not regenerate everything per frame); all output in one buffered write per frame (PERFORMANCE.md §7.1, §7.4); lazy layout for visible rows plus margin
+- [ ] Rendering via the libvaxis **low-level API only** (`Window.writeCell`, `child()` for sub-regions). Do not import `vxfw` (ARCHITECTURE.md §5c)
+- [ ] Output through the `io/tty.zig` buffered writer passed into `vx.render()`: one flush per frame (PERFORMANCE.md §7.4)
+- [ ] Per-frame regeneration must be cheap: `lex_cache` and `layout_cache` (PERFORMANCE.md §7.2) and lazy layout for visible rows plus margin (§7.5) are required, not optional. Vaxis's internal cell diff handles terminal output; app-side regeneration cost is ours
+- [ ] Start by over-drawing the visible region each frame and letting the vaxis diff absorb it. Vaxis does not clear its cell buffer between frames, so row-level dirty tracking is available as a later option - do not build it until `--profile` shows the caches are insufficient (ARCHITECTURE.md §5c)
+- [ ] Use `Window.gwidth()` for display width; never assume one byte or one codepoint equals one column
 - [ ] File list on top (collapsible) + unified diff below; `Tab` toggles full-screen diff
 - [ ] Hunk headers: `@@ #<id> <enclosing fn> @@`
 - [ ] Every action is a named command; keymap maps key sequences to command names; zero hardcoded keys in dispatch (FEATURES.md §4.3)
@@ -97,7 +103,8 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 
 - [ ] `bridge.zig` tagged union; invariants enforced here, not per backend: reject any payload containing `\n` (runtime assert), trailing space, no carriage return (ARCHITECTURE.md §6)
 - [ ] `detect()` from env vars, infallible, falls back to `osc52`; backend failure degrades to OSC 52 with a status-line notice, never fatal
-- [ ] `osc52.zig` (works over SSH); `tmux.zig` via `send-keys -t <pane_id>`
+- [ ] `osc52.zig` (works over SSH): evaluate reusing libvaxis's existing OSC 52 implementation before hand-rolling escape sequences (ARCHITECTURE.md §5c). If reused, the no-`\n` assert still lives in `bridge.zig`, above it
+- [ ] `tmux.zig` via `send-keys -t <pane_id>`
 - [ ] Target pane: detect `$TMUX`, minimal selection (flag or simple prompt), persist to `.lgtm/`; dead pane gives a clear error. Full picker UI polish lands v0.2
 - [ ] `Enter` sends a reference from the internal template table (`#{change_id} {path}:{line}`); `V` range sends `:start-end`; references always resolve against the new file; on a deleted line send the enclosing hunk reference plus a short note (SPEC.md §6.3)
 - [ ] `y` copies the reference, `Y` copies reference plus line contents
@@ -148,6 +155,7 @@ The hard rules in CLAUDE.md apply to every line written. The ones easiest to vio
 | Notes own their bytes, never arena pointers | Phase 2 onward; v0.2 notes |
 | `core/` imports no `ui/`/`bridge/`/terminal | Phases 1, 2 |
 | Only `io/fs.zig`/`io/proc.zig` import `std.fs`/`std.process` | Every phase |
+| `std.Io.Writer` construction stays in `io/tty.zig`; `ui/` receives it | Phases 0, 5 |
 | No `\n` through the bridge, no Enter, trailing space | Phase 6 |
 | `Wyhash` only, never cryptographic | Phases 1, 2, 4 |
 | Instrument before optimising | T1/T2 items wait for `--profile` evidence |

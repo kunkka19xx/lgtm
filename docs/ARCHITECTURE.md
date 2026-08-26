@@ -236,6 +236,55 @@ const c = @cImport({
 
 ---
 
+## 5c. The TUI library: libvaxis
+
+Evaluated August 2026. Decision: **libvaxis, low-level API only.** MIT, `minimum_zig_version = "0.16.0"`, main at `0.6.0`.
+
+It is chosen on fit, not just availability. Four requirements from PERFORMANCE.md land directly on library behaviour, and libvaxis satisfies each without a workaround:
+
+| Requirement | What libvaxis provides |
+|---|---|
+| Full cell control, no widget framework (§7.3) | `Window.writeCell(col, row, cell)`, `child()` for clipped sub-regions, `fill`, `clear`, `scroll`. The `vxfw` Flutter-style layer is a separate opt-in import |
+| Damage tracking (§7.1) | Internal `screen` / `screen_last` double buffer; `render()` emits escape sequences only for changed cells, tracks SGR state to avoid redundant codes, and wraps each frame in synchronized output (BSU/ESU) so partial frames never show |
+| One buffered flush per frame (§7.4) | `render(self: *Vaxis, tty: *std.Io.Writer)` takes a **caller-supplied** writer and flushes once at the end. We own the buffer and its size |
+| We drive the event loop (§3) | Vaxis parses input bytes and returns events; it does not own the loop. Fits the watch thread plus `Event` queue design |
+
+Also relevant: `gwidth()` for grapheme width (correct rendering of source containing CJK or emoji), synchronized output to prevent tearing, OSC 52 already implemented, and capability detection via terminal queries rather than terminfo.
+
+**Redraw-everything is a convention, not a requirement.** `render()` does not clear `self.screen`; the cell buffer persists between frames, and `window()` / `child()` are offset views into it. So there are two valid strategies and we can mix them: over-draw freely and let the internal diff absorb it, or touch only dirty rows and leave the rest of the buffer alone. `queueRefresh()` forces a full repaint when needed (theme change, resize).
+
+Either way the *terminal output* stays minimal; what the diff cannot recover is the *app-side* cost of regenerating content. That is why `lex_cache` and `layout_cache` (§7.2) and lazy layout (§7.5) are load-bearing rather than optional: they make regeneration cheap enough that the choice above stops mattering inside an 8 ms keystroke budget. Do not hand-roll row-level dirty tracking before `--profile` says the caches are insufficient.
+
+**Pin to a main-branch commit hash, not a release tag.** This is the one piece of operational hygiene that matters. The most recent tag is **v0.5.1, November 2024** - close to two years of active development lives only on `main`, including the entire Zig 0.16 port. Tags are not a usable channel here. v0.5.0 also announced deliberate breaking changes (removing deprecated items, `window.child` width/height moving from union to optional, narrowing `usize` to `u16`), so floating is not an option either. Reference point at evaluation time: `c060d314930c5552b99a89278a6a695baf0352da` (2026-08-20).
+
+**If upstream churn ever blocks us, fork and pin the fork.** This is the established pattern in this ecosystem, not an exotic escape hatch: Flow Control (the largest libvaxis application) depends on `neurocyte/libvaxis` at a pinned commit rather than upstream. MIT licensing makes it free to do. Prefer upstream; keep this in reserve.
+
+**Two costs accepted:**
+
+- `zigimg` is a **non-lazy** dependency of vaxis, present for the kitty graphics protocol that `lgtm` never uses. It is fetched and compiled on every build. Zig's lazy analysis should keep it out of the final binary - confirm rather than trust, since binary size is the budget it threatens.
+- `uucode` (Unicode 17, comptime-embedded 3-stage lookup tables) is lazy and requests only four fields: `east_asian_width`, `grapheme_break`, `general_category`, `is_emoji_presentation`. Because the tables are embedded at compile time there is **no runtime load, so this is a binary-size cost and not a cold-start or RSS cost.** A `-Dexternal_uucode` option exists to share one instance if anything else ever pulls uucode in. For scale: `zide`, a libvaxis editor that also links tree-sitter, ships under 1 MB static.
+
+**Boundary rule, from §7.** `render()` accepts a `*std.Io.Writer`, so vaxis's API surface pulls `std.Io` types toward the UI. Rule 5 quarantines `std.fs` and `std.process` specifically, so this is not a violation - but the spirit of that rule is insulating against `std.Io` churn, which is where the 0.16 cycle moved things. Therefore: **the tty writer is constructed in `io/`, and `ui/` receives it as a parameter.** No writer construction in `ui/`.
+
+**Alternatives surveyed (August 2026).** Nothing else combines cell-level control, damage tracking, and a maintained Zig 0.16 build:
+
+| Candidate | Verdict |
+|---|---|
+| `mibu` | Alive on 0.16, but escape codes and input only - no screen model, no damage tracking. We would build the cell buffer ourselves |
+| `ansi_term` (ziglibs) | Alive on 0.16; style and escape formatting only, not a TUI library |
+| `zigzag` | New Elm/Bubble Tea-style framework on 0.16, ~528 stars. Model-Update-View is the wrong shape for a custom diff renderer, and it is young |
+| `TUI.zig` | Claims double buffering on 0.16, but ~11 commits. Too early to bet on |
+| `zig-spoon` / `zig-spork` | Dormant since roughly Zig 0.10 (2023). Upstream also relocated to GPL, which conflicts with Apache-2.0 OR MIT |
+| `zbox`, `zig-termbox` | Dead or unmaintained; no 0.16 support |
+| `termbox2`, `ncurses`, `notcurses` bindings | All reintroduce the C dependency §5b just eliminated. Notably, Flow's author moved *off* notcurses onto libvaxis |
+| `opentui` | Zig core exists but is packaged for TypeScript bindings, not standalone Zig consumption |
+
+**Maintenance signal.** Real applications depend on it: Flow Control (a text editor on Zig 0.16), `comlink` (the maintainer's own IRC client, packaged in AUR), and `zide`. There is also active performance work upstream - grapheme-width caching, an ASCII fast path in the parser, SIMD scanning, with a `zig build bench` harness. No performance complaints surfaced in the survey.
+
+Known rough edges, none blocking: `src/widgets` has bitrotted and is excluded from tests, and some examples lag the core. We use neither. Revisit this decision only if libvaxis stops tracking Zig releases.
+
+---
+
 ## 6. The bridge interface
 
 Runtime-selected backends, so this is a tagged union rather than comptime dispatch:
