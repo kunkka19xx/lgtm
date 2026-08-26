@@ -47,6 +47,16 @@ pub fn freeNames(gpa: Allocator, names: [][]u8) void {
     gpa.free(names);
 }
 
+/// Size and modification time, for cheap change detection. Absent when the
+/// file cannot be stat'd, which the watcher treats as "not there right now"
+/// rather than an error: files appear and disappear under an active agent.
+pub const Meta = struct { size: u64, mtime_ns: i128 };
+
+pub fn statFile(io: Io, path: []const u8) ?Meta {
+    const st = Dir.cwd().statFile(io, path, .{}) catch return null;
+    return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds };
+}
+
 pub fn fileExists(io: Io, path: []const u8) bool {
     const file = Dir.cwd().openFile(io, path, .{}) catch return false;
     file.close(io);

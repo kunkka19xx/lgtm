@@ -89,7 +89,7 @@ corrupting a fixture expectation and confirming the failure.
 - [x] Files over `large_file_lines` defer their render, and `materialise()` parses the deferred section on demand from the retained byte range. **Deferring is not discarding**: an earlier version dropped the content outright, which would have made oversized files unreviewable rather than merely slower to open
 - [x] Blob hashes captured from git's `index a..b` line, ready to key the cache on
 - [x] **HEAD and worktree content in `Buffer`s, with the diff as an overlay (ARCHITECTURE.md §11.1).** `core/source.zig` loads HEAD blobs through a single `git cat-file --batch` and worktree files directly, then `attach()` repoints every line's text into the buffers. Rendering now reads from buffers, not from git's diff output
-- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Deferred to phase 3, when the watcher starts producing repeated re-diffs and `--profile` can say whether parsing is worth caching. Blob hashes are already captured
+- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Still deferred: the watcher now exists, but nothing yet wires watch events to re-diffs, so there is no loop to profile. Revisit in phase 5 once the main loop runs. Blob hashes are already captured
 
 **Gate: met.** Recorded real `git diff` output (`tests/fixtures/diffs/mixed.diff`,
 covering add, rename, modify, binary, delete and a git-merged multi-change hunk)
@@ -115,15 +115,31 @@ what any future batched git call will need.
 `zig build diff -- [repo]` dumps the parsed diff of any repository, which is how
 the untracked-file gap surfaced.
 
-## Phase 3: File watching
+## Phase 3: File watching - DONE
 
-`io/watch.zig`, polling only (docs estimate ~50 lines). Native backends are v0.2.
+`io/watch.zig`, polling only. Native backends are v0.2 behind the same interface.
 
-- [ ] Watch thread: 500 ms poll (one `git status --porcelain` style batch, not N stat calls)
-- [ ] 200 ms debounce and burst coalescing inside the watch thread; emits a single `FilesChanged{paths}`; the main loop never sees a burst (ARCHITECTURE.md §3)
-- [ ] Optional torn-write guard behind a flag: require size/mtime stable across two ticks (SPEC.md §9)
+- [x] Watch thread: 500 ms poll driven by one `git status --porcelain --untracked-files=all` subprocess, not a tree walk (PERFORMANCE.md §8.1)
+- [x] **Plus a stat per candidate path, which the docs did not anticipate.** `git status` prints an identical line when an already-modified file is modified again, so status alone cannot see a second edit to the same file. The stat (size and mtime) is what catches it. N is small because it only covers paths git already flagged
+- [x] 200 ms debounce and burst coalescing inside the watch thread; the main loop only ever sees one `files_changed` per settled burst (ARCHITECTURE.md §3)
+- [x] Deletions and reverts are changes too: a path that vanishes since the last poll is reported
+- [x] Torn-write guard behind `require_stable`: signature must be identical on two consecutive polls before emitting (SPEC.md §9)
+- [x] `Poller` takes the clock as a parameter, so debounce and coalescing are asserted deterministically instead of slept through. `Watcher` wraps it with the thread and queue
 
-**Gate:** scripted burst of writes produces exactly one event after settling.
+**Gate: PASSED.** A scripted burst produces exactly one event after settling,
+asserted in a unit test against a real scratch repo with an injected clock, and
+confirmed live: `zig build watch` against a simulated agent writing three files
+at once emitted a single 3-path batch, then a single 1-path batch for a later
+edit to one of them.
+
+```
+[+2500ms] batch 1: 3 path(s)   a.txt b.txt c.txt
+[+5500ms] batch 2: 1 path(s)   a.txt
+```
+
+73 tests pass. `zig build watch -- [repo] [seconds]` runs the real thread and
+prints batches as they arrive, which is how the thread path is exercised without
+a timing-dependent test in CI.
 
 ## Phase 4: Lexer
 

@@ -98,6 +98,19 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_dump.addArgs(a);
     b.step("diff", "Dump the parsed diff of a repository").dependOn(&run_dump.step);
 
+    // Live watcher against a repository. `zig build watch -- [repo] [seconds]`.
+    const watch_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/watch_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    watch_mod.addImport("lgtm", lgtm_mod);
+    const watch_exe = b.addExecutable(.{ .name = "watch-demo", .root_module = watch_mod });
+    const run_watch = b.addRunArtifact(watch_exe);
+    run_watch.setCwd(b.path("."));
+    if (b.args) |a| run_watch.addArgs(a);
+    b.step("watch", "Watch a repository and print coalesced change events").dependOn(&run_watch.step);
+
     // Licence header check. Runs as its own step and as part of `zig build check`.
     const spdx = b.addExecutable(.{
         .name = "check-spdx",

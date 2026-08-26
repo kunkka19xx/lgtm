@@ -11,6 +11,7 @@
 pub const fs = @import("io/fs.zig");
 pub const proc = @import("io/proc.zig");
 pub const metrics = @import("io/metrics.zig");
+pub const watch = @import("io/watch.zig");
 
 pub const buffer = @import("text/buffer.zig");
 pub const edit = @import("text/edit.zig");
@@ -26,6 +27,7 @@ test {
     _ = fs;
     _ = proc;
     _ = metrics;
+    _ = watch;
     _ = buffer;
     _ = edit;
     _ = anchor;
