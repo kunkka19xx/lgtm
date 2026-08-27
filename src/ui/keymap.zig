@@ -22,6 +22,43 @@ pub const Command = enum {
     prev_file,
     center,
     refresh,
+    /// Enter and leave visual line select. One command rather than two,
+    /// because `V` in visual mode is what leaves it.
+    visual_toggle,
+    /// Escape: leave visual mode, and nothing at all in normal mode. Bound
+    /// only in visual so that a stray Escape in normal mode stays inert.
+    visual_cancel,
+    search_forward,
+    search_backward,
+    search_next,
+    search_prev,
+    open_editor,
+    command_line,
+    /// Hide the chrome and give the body the whole pane.
+    toggle_zen,
+};
+
+/// Which modes a binding is live in. Motions are live in both, which is what
+/// makes visual select "normal mode plus an anchor" rather than a second
+/// dispatch table that has to be kept in step with the first.
+pub const Modes = packed struct(u8) {
+    normal: bool = false,
+    visual: bool = false,
+    _pad: u6 = 0,
+
+    pub const both: Modes = .{ .normal = true, .visual = true };
+    pub const normal_only: Modes = .{ .normal = true };
+    pub const visual_only: Modes = .{ .visual = true };
+
+    pub fn has(self: Modes, mode: event.Mode) bool {
+        return switch (mode) {
+            .normal => self.normal,
+            .visual => self.visual,
+            // The prompt modes never reach the keymap: `prompt.zig` takes the
+            // keys, because they are text rather than actions.
+            else => false,
+        };
+    }
 };
 
 pub const Chord = struct {
@@ -36,6 +73,7 @@ pub const Chord = struct {
 pub const Binding = struct {
     chords: []const Chord,
     command: Command,
+    modes: Modes = Modes.both,
     /// Shown in the status-line hint strip. Null keeps a binding working but
     /// unadvertised, which is how aliases stay out of an already tight row.
     hint: ?[]const u8 = null,
@@ -63,8 +101,17 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "]f [f file" },
     .{ .chords = &.{ c('['), c('f') }, .command = .prev_file },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center },
+    .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "/ search" },
+    .{ .chords = &.{c('?')}, .command = .search_backward },
+    .{ .chords = &.{c('n')}, .command = .search_next },
+    .{ .chords = &.{c('N')}, .command = .search_prev },
+    .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "V select" },
+    .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "Esc cancel" },
+    .{ .chords = &.{c('e')}, .command = .open_editor, .hint = "e edit" },
+    .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen },
+    .{ .chords = &.{c(':')}, .command = .command_line },
     .{ .chords = &.{ctrl('l')}, .command = .refresh },
-    .{ .chords = &.{c('q')}, .command = .quit, .hint = "q quit" },
+    .{ .chords = &.{c('q')}, .command = .quit, .modes = Modes.normal_only, .hint = "q quit" },
 };
 
 pub const Match = union(enum) {
@@ -88,9 +135,12 @@ pub const Keymap = struct {
         self.len = 0;
     }
 
-    /// Feeds one key. Resolving or failing both clear the pending sequence, so
-    /// a mistyped prefix never leaves the next keystroke stranded.
-    pub fn feed(self: *Keymap, key: event.Key) Match {
+    /// Feeds one key for `mode`. Resolving or failing both clear the pending
+    /// sequence, so a mistyped prefix never leaves the next keystroke
+    /// stranded. Bindings not live in `mode` are invisible to the match,
+    /// including as prefixes - otherwise a key bound only in visual mode would
+    /// swallow the next keystroke in normal mode.
+    pub fn feed(self: *Keymap, key: event.Key, mode: event.Mode) Match {
         if (self.len == max_sequence) self.len = 0;
         self.pending[self.len] = key;
         self.len += 1;
@@ -98,6 +148,7 @@ pub const Keymap = struct {
 
         var prefix = false;
         for (self.bindings) |b| {
+            if (!b.modes.has(mode)) continue;
             if (b.chords.len < typed.len) continue;
             var i: usize = 0;
             while (i < typed.len) : (i += 1) {
@@ -119,9 +170,10 @@ pub const Keymap = struct {
 /// The hint strip, built from the bindings themselves so it cannot drift from
 /// what the keys actually do. Written into `buf`, which the caller owns - in
 /// practice the frame arena.
-pub fn hints(bindings: []const Binding, buf: []u8) []const u8 {
+pub fn hints(bindings: []const Binding, mode: event.Mode, buf: []u8) []const u8 {
     var n: usize = 0;
     for (bindings) |b| {
+        if (!b.modes.has(mode)) continue;
         const h = b.hint orelse continue;
         const sep: usize = if (n == 0) 0 else 2;
         if (n + sep + h.len > buf.len) break;
@@ -148,36 +200,39 @@ fn ctrlTap(cp: u21) event.Key {
 
 test "a single-key binding resolves immediately" {
     var km: Keymap = .{};
-    try testing.expectEqual(Command.line_down, km.feed(tap('j')).command);
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
     try testing.expectEqual(@as(usize, 0), km.len);
 }
 
 test "a two-key sequence waits for its second key" {
     var km: Keymap = .{};
-    try testing.expect(km.feed(tap(']')) == .pending);
-    try testing.expectEqual(Command.next_hunk, km.feed(tap('h')).command);
+    try testing.expect(km.feed(tap(']'), .normal) == .pending);
+    try testing.expectEqual(Command.next_hunk, km.feed(tap('h'), .normal).command);
 }
 
 test "an unknown second key drops the sequence without stranding the next" {
     var km: Keymap = .{};
-    try testing.expect(km.feed(tap(']')) == .pending);
-    try testing.expect(km.feed(tap('x')) == .none);
+    try testing.expect(km.feed(tap(']'), .normal) == .pending);
+    try testing.expect(km.feed(tap('x'), .normal) == .none);
     // The dropped prefix must not swallow what follows.
-    try testing.expectEqual(Command.line_down, km.feed(tap('j')).command);
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 
 test "ctrl is part of the match, not ignored" {
     var km: Keymap = .{};
-    try testing.expectEqual(Command.page_down, km.feed(ctrlTap('d')).command);
+    try testing.expectEqual(Command.page_down, km.feed(ctrlTap('d'), .normal).command);
     // Plain 'd' is not bound, and must not fall through to Ctrl-d.
-    try testing.expect(km.feed(tap('d')) == .none);
+    try testing.expect(km.feed(tap('d'), .normal) == .none);
 }
 
 test "case is significant" {
     var km: Keymap = .{};
-    try testing.expectEqual(Command.bottom, km.feed(tap('G')).command);
-    try testing.expect(km.feed(tap('g')) == .pending);
-    try testing.expectEqual(Command.top, km.feed(tap('g')).command);
+    try testing.expectEqual(Command.bottom, km.feed(tap('G'), .normal).command);
+    try testing.expect(km.feed(tap('g'), .normal) == .pending);
+    try testing.expectEqual(Command.top, km.feed(tap('g'), .normal).command);
+    // And it separates `n` from `N`, which search relies on.
+    try testing.expectEqual(Command.search_next, km.feed(tap('n'), .normal).command);
+    try testing.expectEqual(Command.search_prev, km.feed(tap('N'), .normal).command);
 }
 
 test "every command is reachable from the default bindings" {
@@ -192,15 +247,64 @@ test "every command is reachable from the default bindings" {
     }
 }
 
+test "every binding is live in at least one mode" {
+    // An empty mode set is a binding that can never fire, and nothing else in
+    // the file would ever say so.
+    for (default_bindings) |b| {
+        try testing.expect(b.modes.normal or b.modes.visual);
+    }
+}
+
+test "motions work in visual mode, so selecting is moving with an anchor" {
+    var km: Keymap = .{};
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .visual).command);
+    try testing.expect(km.feed(tap(']'), .visual) == .pending);
+    try testing.expectEqual(Command.next_hunk, km.feed(tap('h'), .visual).command);
+}
+
+test "a visual-only binding is invisible in normal mode, prefix included" {
+    var km: Keymap = .{};
+    try testing.expectEqual(Command.visual_cancel, km.feed(tap(event.code.escape), .visual).command);
+    try testing.expect(km.feed(tap(event.code.escape), .normal) == .none);
+    // Having been dropped, it does not strand the next keystroke either.
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
+}
+
+test "quit is normal-only, so q mid-selection does not exit" {
+    var km: Keymap = .{};
+    try testing.expectEqual(Command.quit, km.feed(tap('q'), .normal).command);
+    try testing.expect(km.feed(tap('q'), .visual) == .none);
+}
+
+test "the prompt modes reach no binding at all" {
+    // While `/foo` is being typed, `j` is the letter j.
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap('j'), .command) == .none);
+    try testing.expect(km.feed(tap('q'), .finder) == .none);
+}
+
 test "hints come from the bindings and fit the width given" {
     var buf: [80]u8 = undefined;
-    const h = hints(default_bindings, &buf);
+    const h = hints(default_bindings, .normal, &buf);
     try testing.expect(std.mem.indexOf(u8, h, "j k move") != null);
     try testing.expect(std.mem.indexOf(u8, h, "q quit") != null);
 
     // A narrow strip truncates on a boundary rather than overrunning.
     var tiny: [10]u8 = undefined;
-    const t = hints(default_bindings, &tiny);
+    const t = hints(default_bindings, .normal, &tiny);
     try testing.expect(t.len <= tiny.len);
     try testing.expectEqualStrings("j k move", t);
+}
+
+test "the hint strip advertises only what the current mode can do" {
+    var buf: [160]u8 = undefined;
+    const normal = hints(default_bindings, .normal, &buf);
+    try testing.expect(std.mem.indexOf(u8, normal, "Esc cancel") == null);
+    try testing.expect(std.mem.indexOf(u8, normal, "q quit") != null);
+
+    var buf2: [160]u8 = undefined;
+    const visual = hints(default_bindings, .visual, &buf2);
+    try testing.expect(std.mem.indexOf(u8, visual, "Esc cancel") != null);
+    // `q` does not quit from visual mode, so the strip must not claim it does.
+    try testing.expect(std.mem.indexOf(u8, visual, "q quit") == null);
 }

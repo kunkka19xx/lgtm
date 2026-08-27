@@ -49,6 +49,31 @@ test "run captures stdout" {
     try testing.expectEqualStrings("ok\n", out.stdout);
 }
 
+/// Runs argv with the parent's own terminal and waits for it to finish.
+///
+/// The child owns the tty while it runs, which is the whole point - `e` hands
+/// it to `$EDITOR`. The caller is responsible for having stopped reading input
+/// and restored the terminal modes first; nothing here can check that.
+pub fn runInherit(io: Io, argv: []const []const u8) RunError!u8 {
+    var child = try std.process.spawn(io, .{ .argv = argv });
+    const term = child.wait(io) catch return error.ProcessFailed;
+    return switch (term) {
+        .exited => |code| code,
+        else => 1,
+    };
+}
+
+test "runInherit waits for the child and reports its status" {
+    const testing = std.testing;
+    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+
+    try testing.expectEqual(@as(u8, 0), try runInherit(threaded.io(), &.{ "true" }));
+    // A non-zero exit must come back as itself: an editor that failed to open
+    // is something the status line should be able to say.
+    try testing.expect(try runInherit(threaded.io(), &.{ "false" }) != 0);
+}
+
 /// Runs argv, writes `stdin_data` to its standard input, and collects stdout.
 ///
 /// Needed for `git cat-file --batch`, which is how many blobs are fetched in

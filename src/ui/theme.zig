@@ -75,6 +75,15 @@ pub const Theme = struct {
     mode_badge: Style,
     hint: Style,
     cursor_line: Style,
+    /// Visual line select. Distinct from `cursor_line` and drawn under it, so
+    /// the cursor stays findable inside its own selection.
+    selection: Style,
+    /// A `/` hit. Inverted rather than tinted: it has to survive being drawn
+    /// over an add row, a del row and a selection.
+    search_match: Style,
+    /// The `/`, `?` and `:` input line.
+    prompt: Style,
+    notice: Style,
 
     /// Style for one token kind. The lexer's `Kind` is the only thing `ui/`
     /// needs to know about `syntax/`.
@@ -114,6 +123,10 @@ pub const default: Theme = .{
     .mode_badge = .{ .fg = .{ .index = 0 }, .bg = .{ .index = 2 }, .bold = true },
     .hint = .{ .fg = .{ .index = 8 } },
     .cursor_line = .{ .bg = .{ .index = 236 } },
+    .selection = .{ .bg = .{ .index = 238 } },
+    .search_match = .{ .fg = .{ .index = 0 }, .bg = .{ .index = 3 } },
+    .prompt = .{ .bold = true },
+    .notice = .{ .fg = .{ .index = 3 } },
 };
 
 test "every token kind has a style" {

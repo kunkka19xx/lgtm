@@ -5,6 +5,7 @@
 // (ARCHITECTURE.md 5c).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const vaxis = @import("vaxis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -47,6 +48,35 @@ pub const Tty = struct {
 
     pub fn read(self: *const Tty, buf: []u8) !usize {
         return self.inner.read(buf);
+    }
+
+    /// The raw descriptor, for `poll`. Null where there is nothing pollable -
+    /// Windows consoles - and callers fall back to a blocking read there.
+    pub fn handle(self: *const Tty) ?std.posix.fd_t {
+        if (builtin.os.tag == .windows) {
+            return null;
+        } else {
+            const F = @TypeOf(self.inner.fd);
+            // The test tty stores a bare descriptor; the real one wraps it.
+            return if (F == std.posix.fd_t) self.inner.fd else self.inner.fd.handle;
+        }
+    }
+
+    /// Hands the terminal back to the shell's settings, for the duration of a
+    /// child process that expects to own it - `e` and `$EDITOR`. Without this
+    /// the editor starts in raw mode with no echo, which looks like a hang.
+    ///
+    /// `resumeRaw` is the other half and must always follow, including on the
+    /// error paths: a `lgtm` that exits leaving the terminal raw is a terminal
+    /// the user has to `reset`.
+    pub fn suspendRaw(self: *Tty) void {
+        if (comptime !@hasField(@TypeOf(self.inner), "termios")) return;
+        std.posix.tcsetattr(self.inner.fd.handle, .FLUSH, self.inner.termios) catch {};
+    }
+
+    pub fn resumeRaw(self: *Tty) void {
+        if (comptime !@hasField(@TypeOf(self.inner), "termios")) return;
+        _ = vaxis.tty.PosixTty.makeRaw(self.inner.fd.handle) catch {};
     }
 };
 

@@ -73,6 +73,27 @@ pub const Rows = struct {
         return null;
     }
 
+    /// Index into `FileDiff.lines` for a row, or null when the row is chrome.
+    /// Search and the bridge both need "which line is the cursor on", and a
+    /// header is not one.
+    pub fn lineAt(self: Rows, row: u32) ?u32 {
+        if (row >= self.items.len) return null;
+        return switch (self.items[row]) {
+            .line => |li| li,
+            else => null,
+        };
+    }
+
+    /// The reverse: which row draws line `li`. Search finds a line index by
+    /// scanning `DiffLines` - which works for files whose rows were never
+    /// built - and this is what turns that answer back into a cursor position.
+    pub fn rowForLine(self: Rows, li: u32) ?u32 {
+        for (self.items, 0..) |r, i| {
+            if (r == .line and r.line == li) return @intCast(i);
+        }
+        return null;
+    }
+
     /// First row that is a diff line, so the cursor never opens on a header or
     /// a rule - neither is something you can point an agent at.
     pub fn firstLineRow(self: Rows) u32 {
@@ -233,4 +254,26 @@ test "a file with no hunks produces no rows and no crash" {
     try testing.expectEqual(@as(u32, 0), rows.len());
     try testing.expect(rows.nextHunkRow(0) == null);
     try testing.expectEqual(@as(u32, 0), rows.firstLineRow());
+}
+
+test "rows map to line indexes and back" {
+    const gpa = testing.allocator;
+    var f = try fixture(gpa);
+    defer freeFixture(gpa, &f);
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+
+    // Row 0 is a header: it carries no line, and saying so is what keeps the
+    // bridge from sending a reference to a `@@` row.
+    try testing.expect(rows.lineAt(0) == null);
+    try testing.expectEqual(@as(u32, 0), rows.lineAt(1).?);
+    try testing.expect(rows.lineAt(4) == null); // the rule
+    try testing.expectEqual(@as(u32, 3), rows.lineAt(5 + 1).?);
+
+    // Round trip, including across the rule that shifts every later row.
+    try testing.expectEqual(@as(u32, 1), rows.rowForLine(0).?);
+    try testing.expectEqual(@as(u32, 6), rows.rowForLine(3).?);
+    try testing.expect(rows.rowForLine(99) == null);
+    // Out of range is null rather than a trap: a resize can outrun the rows.
+    try testing.expect(rows.lineAt(9999) == null);
 }

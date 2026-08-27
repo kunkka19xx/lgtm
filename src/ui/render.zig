@@ -16,10 +16,12 @@ const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
 const diff = @import("../core/diff.zig");
+const event = @import("../core/event.zig");
 const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
 const rows_mod = @import("rows.zig");
+const search = @import("search.zig");
 const theme_mod = @import("theme.zig");
 
 pub const Theme = theme_mod.Theme;
@@ -28,9 +30,34 @@ pub const Glyphs = theme_mod.Glyphs;
 /// Rows of chrome: status, rule, rule, mode.
 pub const chrome_rows = 4;
 
-pub fn bodyHeight(win_rows: u16) u16 {
+/// `Tab` hides the chrome and gives those four rows to the body - on a 26-row
+/// pane that is 22 rows of diff becoming 26, which is the difference between
+/// one hunk and two.
+pub fn bodyHeight(win_rows: u16, zen: bool) u16 {
+    if (zen) return win_rows;
     return if (win_rows > chrome_rows) win_rows - chrome_rows else 0;
 }
+
+/// An inclusive range of body rows. Normalised by the caller, so `lo <= hi`.
+pub const Range = struct {
+    lo: u32,
+    hi: u32,
+
+    pub fn contains(self: Range, row: u32) bool {
+        return row >= self.lo and row <= self.hi;
+    }
+
+    pub fn count(self: Range) u32 {
+        return self.hi - self.lo + 1;
+    }
+};
+
+/// The open `/`, `?` or `:` line. Present only while one is open, which is
+/// also what tells the renderer to put the terminal cursor in it.
+pub const PromptView = struct {
+    prefix: []const u8,
+    text: []const u8,
+};
 
 /// Everything one frame needs. Assembled by the app; nothing here reaches back
 /// into the diff pipeline or the terminal.
@@ -42,8 +69,19 @@ pub const View = struct {
     /// Row index of the cursor, and of the first visible row.
     cursor: u32,
     scroll: u32,
-    mode: []const u8 = "NORMAL",
+    mode: event.Mode = .normal,
     hints: []const u8 = "",
+    /// Visual line select, in body-row indexes.
+    selection: ?Range = null,
+    prompt: ?PromptView = null,
+    /// A message about the last keystroke: a search that found nothing, a
+    /// command that is not one. Takes the mode row when present.
+    notice: []const u8 = "",
+    /// The live search query, so hits stay highlighted after `/` closes -
+    /// which is what makes `n` legible without re-reading the line.
+    query: []const u8 = "",
+    /// Chrome hidden, body full-height.
+    zen: bool = false,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -104,14 +142,45 @@ pub const Frame = struct {
 
 pub fn draw(f: Frame, v: View) Allocator.Error!void {
     f.win.clear();
+    f.win.hideCursor();
     const h = f.win.height;
-    if (h < chrome_rows + 1 or f.width() < 20) return drawTooSmall(f);
+    if (h == 0 or f.width() < 20) return drawTooSmall(f);
+
+    if (v.zen) {
+        // No chrome at all, and no prompt either: `/` leaves zen rather than
+        // drawing an input line with nothing to anchor it.
+        try drawBody(f, v, 0, h);
+        return;
+    }
+    if (h < chrome_rows + 1) return drawTooSmall(f);
 
     try drawStatus(f, v, 0);
     f.put(1, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
-    try drawBody(f, v, 2, bodyHeight(h));
+    try drawBody(f, v, 2, bodyHeight(h, false));
     f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
-    try drawMode(f, v, h - 1);
+    if (v.prompt) |p| drawPrompt(f, p, h - 1) else try drawMode(f, v, h - 1);
+}
+
+/// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
+/// A real cursor rather than a drawn block: it blinks the way the user's
+/// terminal blinks, and screen readers find it.
+fn drawPrompt(f: Frame, p: PromptView, row: u16) void {
+    f.put(row, 0, p.prefix, f.theme.prompt);
+    const at = f.win.gwidth(p.prefix);
+    f.put(row, at, p.text, f.theme.prompt);
+    const col = at + f.win.gwidth(p.text);
+    if (col < f.width()) f.win.showCursor(col, row);
+}
+
+fn modeLabel(mode: event.Mode) []const u8 {
+    return switch (mode) {
+        .normal => "NORMAL",
+        .visual => "VISUAL",
+        .command => "COMMAND",
+        .note_input => "NOTE",
+        .finder => "FIND",
+        .insert => "INSERT",
+    };
 }
 
 /// Below this there is no honest layout, so say so instead of drawing a
@@ -156,23 +225,48 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
 fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     const t = f.theme;
 
-    const badge = try std.fmt.allocPrint(f.arena, " {s} ", .{v.mode});
+    const badge = try std.fmt.allocPrint(f.arena, " {s} ", .{modeLabel(v.mode)});
     f.put(row, 1, badge, t.mode_badge);
     var col: u16 = 1 + f.win.gwidth(badge) + 2;
 
-    if (v.torn) {
-        const warn = "file changed while reading, re-diffing";
-        f.put(row, col, warn, t.removed_count);
-        col += f.win.gwidth(warn) + 2;
-    } else {
-        const info = try std.fmt.allocPrint(f.arena, "{d} rows", .{v.rows.len()});
-        f.put(row, col, info, t.dim);
-        col += f.win.gwidth(info) + 2;
-    }
+    // One slot, three claimants, in order of how much the reader needs it: a
+    // torn read is a correctness warning, a notice answers the keystroke just
+    // typed, and the row count is what fills the space when neither applies.
+    const left: []const u8, const style = if (v.torn)
+        .{ "file changed while reading, re-diffing", t.removed_count }
+    else if (v.notice.len > 0)
+        .{ v.notice, t.notice }
+    else if (v.selection) |sel|
+        .{ try std.fmt.allocPrint(f.arena, "{d} lines selected", .{sel.count()}), t.dim }
+    else
+        .{ try std.fmt.allocPrint(f.arena, "{d} rows", .{v.rows.len()}), t.dim };
 
-    if (v.hints.len > 0 and f.win.gwidth(v.hints) + col + 1 <= f.width()) {
-        f.putRight(row, v.hints, t.hint);
+    f.put(row, col, left, style);
+    col += f.win.gwidth(left) + 2;
+
+    const room = f.width() -| col -| 1;
+    const fitted = fitHints(f, v.hints, room);
+    if (fitted.len > 0) f.putRight(row, fitted, t.hint);
+}
+
+/// The longest prefix of the hint strip that fits `cols`.
+///
+/// Cut on the double space between hints, never mid-hint: "]f [f fi" advertises
+/// a key that does not exist. Truncating rather than dropping the whole strip
+/// is what keeps it visible at 80 columns, which is the width the layout is
+/// designed for - and the strip outgrew that width the moment 5b added keys.
+fn fitHints(f: Frame, hints: []const u8, cols: u16) []const u8 {
+    if (hints.len == 0 or cols == 0) return "";
+    if (f.win.gwidth(hints) <= cols) return hints;
+
+    var cut: usize = 0;
+    var at: usize = 0;
+    while (std.mem.indexOfPos(u8, hints, at, "  ")) |sep| {
+        if (f.win.gwidth(hints[0..sep]) > cols) break;
+        cut = sep;
+        at = sep + 2;
     }
+    return hints[0..cut];
 }
 
 fn drawBody(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
@@ -180,12 +274,29 @@ fn drawBody(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
     while (screen_row < height) : (screen_row += 1) {
         const idx = v.scroll + screen_row;
         if (idx >= v.rows.len()) break;
-        const on_cursor = idx == v.cursor;
-        try drawRow(f, v, top + screen_row, v.rows.items[idx], on_cursor);
+        const mark: Mark = .{
+            .cursor = idx == v.cursor,
+            .selected = if (v.selection) |sel| sel.contains(idx) else false,
+        };
+        try drawRow(f, v, top + screen_row, v.rows.items[idx], mark);
     }
 }
 
-fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, on_cursor: bool) Allocator.Error!void {
+/// How a body row is standing out, if it is. Two independent bits rather than
+/// one enum: the cursor is *inside* a selection for all but the first row of
+/// it, and both have to be visible at once or the reader loses the cursor.
+const Mark = struct {
+    cursor: bool = false,
+    selected: bool = false,
+
+    fn background(self: Mark, t: Theme) ?vaxis.Color {
+        if (self.cursor) return t.cursor_line.bg;
+        if (self.selected) return t.selection.bg;
+        return null;
+    }
+};
+
+fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, mark: Mark) Allocator.Error!void {
     switch (r) {
         .gap => {
             const cols = if (f.width() > 6) f.width() - 6 else f.width();
@@ -200,7 +311,7 @@ fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, on_cursor: bool) Alloca
             f.put(row, 0, msg, f.theme.dim);
         },
         .hunk_header => |hi| try drawHunkHeader(f, v, row, hi),
-        .line => |li| try drawLine(f, v, row, li, on_cursor),
+        .line => |li| try drawLine(f, v, row, li, mark),
     }
 }
 
@@ -253,14 +364,14 @@ fn numWidth(f: *const diff.FileDiff) u16 {
     return @max(w, 2);
 }
 
-fn drawLine(f: Frame, v: View, row: u16, li: u32, on_cursor: bool) Allocator.Error!void {
+fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!void {
     const lines = v.file.lines;
     if (li >= lines.len()) return;
     const kind = lines.kind[li];
     const t = f.theme;
     const g = f.glyphs;
 
-    const bg: ?vaxis.Color = if (on_cursor) t.cursor_line.bg else null;
+    const bg: ?vaxis.Color = mark.background(t);
 
     const sign: []const u8 = switch (kind) {
         .add => g.add,
@@ -280,12 +391,12 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, on_cursor: bool) Allocator.Err
     const nw = numWidth(v.file);
     const prefix = try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}  ", .{ sign, no, nw });
 
-    // The cursor row is filled first so the highlight spans the full width,
-    // not just the columns that happen to carry text.
-    if (on_cursor) {
+    // A highlighted row is filled first so it spans the full width, not just
+    // the columns that happen to carry text.
+    if (bg) |b| {
         var c: u16 = 0;
         while (c < f.width()) : (c += 1) {
-            f.win.writeCell(c, row, .{ .char = .{ .grapheme = " " }, .style = t.cursor_line });
+            f.win.writeCell(c, row, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
         }
     }
 
@@ -331,28 +442,73 @@ fn drawCode(
         else => lines.new_no[li],
     };
 
-    const buf = src orelse return f.put(row, col, text, plain);
-    if (runs.len == 0 or no == 0 or no > buf.lineCount()) {
-        return f.put(row, col, text, plain);
-    }
-    const lo = buf.starts[no - 1];
-    const hi = lo + @as(u32, @intCast(text.len));
-
-    const slice = runsIn(runs, lo, hi);
-    if (slice.len == 0) return f.put(row, col, text, plain);
-
     var segs: std.ArrayList(vaxis.Segment) = .empty;
-    for (slice) |r| {
-        const s = @max(r.start, lo);
-        const e = @min(r.end(), hi);
-        if (e <= s) continue;
-        try segs.append(f.arena, .{
-            .text = buf.bytes[s..e],
-            .style = withBg(f.theme.forKind(r.kind), bg),
-        });
+
+    build: {
+        const buf = src orelse break :build;
+        if (runs.len == 0 or no == 0 or no > buf.lineCount()) break :build;
+        const lo = buf.starts[no - 1];
+        const hi = lo + @as(u32, @intCast(text.len));
+
+        for (runsIn(runs, lo, hi)) |r| {
+            const s = @max(r.start, lo);
+            const e = @min(r.end(), hi);
+            if (e <= s) continue;
+            try segs.append(f.arena, .{
+                .text = buf.bytes[s..e],
+                .style = withBg(f.theme.forKind(r.kind), bg),
+            });
+        }
     }
-    if (segs.items.len == 0) return f.put(row, col, text, plain);
+    // Unstyled is the fallback for every reason the lexer had nothing to say -
+    // an unattached file, an unknown language, a line past the buffer.
+    if (segs.items.len == 0) try segs.append(f.arena, .{ .text = text, .style = plain });
+
+    if (v.query.len > 0) {
+        segs = try markMatches(f.arena, segs, v.query, f.theme.search_match);
+    }
     _ = f.win.print(segs.items, .{ .row_offset = row, .col_offset = col, .wrap = .none });
+}
+
+/// Splits segments so every occurrence of `query` gets `style`.
+///
+/// Done on the segments rather than by overwriting cells afterwards, because a
+/// byte offset is not a column: a tab or a wide glyph earlier in the line
+/// would put the highlight somewhere else entirely. A match straddling two
+/// lexer runs comes out as two highlighted pieces, which reads the same.
+fn markMatches(
+    arena: Allocator,
+    segs: std.ArrayList(vaxis.Segment),
+    query: []const u8,
+    style: vaxis.Style,
+) Allocator.Error!std.ArrayList(vaxis.Segment) {
+    const sensitive = search.caseSensitive(query);
+    var out: std.ArrayList(vaxis.Segment) = .empty;
+
+    for (segs.items) |seg| {
+        var rest = seg.text;
+        while (indexOfMatch(rest, query, sensitive)) |at| {
+            if (at > 0) try out.append(arena, .{ .text = rest[0..at], .style = seg.style });
+            try out.append(arena, .{ .text = rest[at..][0..query.len], .style = style });
+            rest = rest[at + query.len ..];
+        }
+        if (rest.len > 0) try out.append(arena, .{ .text = rest, .style = seg.style });
+    }
+    return out;
+}
+
+fn indexOfMatch(haystack: []const u8, needle: []const u8, sensitive: bool) ?usize {
+    if (needle.len == 0 or needle.len > haystack.len) return null;
+    if (sensitive) return std.mem.indexOf(u8, haystack, needle);
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
+        } else return i;
+    }
+    return null;
 }
 
 /// Runs overlapping `[lo, hi)`. Binary search for the first, then a walk:
@@ -374,9 +530,83 @@ pub fn runsIn(runs: []const lexer.Run, lo: u32, hi: u32) []const lexer.Run {
 const testing = std.testing;
 
 test "body height leaves exactly the chrome rows" {
-    try testing.expectEqual(@as(u16, 22), bodyHeight(26));
-    try testing.expectEqual(@as(u16, 0), bodyHeight(4));
-    try testing.expectEqual(@as(u16, 0), bodyHeight(1));
+    try testing.expectEqual(@as(u16, 22), bodyHeight(26, false));
+    try testing.expectEqual(@as(u16, 0), bodyHeight(4, false));
+    try testing.expectEqual(@as(u16, 0), bodyHeight(1, false));
+}
+
+test "zen mode hands the chrome rows to the body" {
+    // Four rows back on a 26-row pane: one more hunk visible, which is the
+    // whole reason `Tab` exists.
+    try testing.expectEqual(@as(u16, 26), bodyHeight(26, true));
+    try testing.expectEqual(@as(u16, 1), bodyHeight(1, true));
+    try testing.expectEqual(@as(u16, 0), bodyHeight(0, true));
+}
+
+test "a selection range is inclusive at both ends" {
+    const r: Range = .{ .lo = 4, .hi = 6 };
+    try testing.expect(!r.contains(3));
+    try testing.expect(r.contains(4));
+    try testing.expect(r.contains(6));
+    try testing.expect(!r.contains(7));
+    try testing.expectEqual(@as(u32, 3), r.count());
+
+    // A one-row selection is one line, not zero.
+    const one: Range = .{ .lo = 2, .hi = 2 };
+    try testing.expectEqual(@as(u32, 1), one.count());
+}
+
+test "match highlighting splits segments without losing or duplicating bytes" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+    const plain: vaxis.Style = .{};
+    const hit: vaxis.Style = .{ .bold = true };
+
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = "let token = ", .style = plain });
+    try segs.append(arena, .{ .text = "tokenise();", .style = plain });
+
+    const out = try markMatches(arena, segs, "token", hit);
+
+    // Every byte survives, in order: a highlight that eats text is worse than
+    // no highlight at all.
+    var joined: std.ArrayList(u8) = .empty;
+    var marked: usize = 0;
+    for (out.items) |seg| {
+        try joined.appendSlice(arena, seg.text);
+        if (seg.style.bold) marked += 1;
+    }
+    try testing.expectEqualStrings("let token = tokenise();", joined.items);
+    try testing.expectEqual(@as(usize, 2), marked);
+}
+
+test "match highlighting follows smart case and leaves a clean line alone" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = "TokenStore", .style = .{} });
+
+    // Lowercase query: matches either case.
+    const loose = try markMatches(arena, segs, "token", .{ .bold = true });
+    try testing.expect(loose.items[0].style.bold);
+
+    // A capital pins it, so this one does not match at all - and an unmatched
+    // line comes back as the single segment it went in as.
+    const strict = try markMatches(arena, segs, "TOKEN", .{ .bold = true });
+    try testing.expectEqual(@as(usize, 1), strict.items.len);
+    try testing.expect(!strict.items[0].style.bold);
+    try testing.expectEqualStrings("TokenStore", strict.items[0].text);
+}
+
+test "every mode has a label, including the ones v0.1 cannot reach" {
+    // A mode with no label would render as an empty badge rather than fail.
+    inline for (@typeInfo(event.Mode).@"enum".fields) |f| {
+        const m: event.Mode = @enumFromInt(f.value);
+        try testing.expect(modeLabel(m).len > 0);
+    }
 }
 
 test "run lookup finds only the runs overlapping a line" {

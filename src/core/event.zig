@@ -32,6 +32,18 @@ pub const Key = struct {
     };
 };
 
+/// Codepoints for the keys that are not characters. These are the C0 controls
+/// a terminal actually sends, which is also what vaxis reports, so `io/input`
+/// stays a copy rather than a translation table - and `io/input.zig` has a
+/// test that pins them to vaxis's own constants so a library change is a
+/// failing test rather than a dead keybinding.
+pub const code = struct {
+    pub const tab: u21 = 0x09;
+    pub const enter: u21 = 0x0d;
+    pub const escape: u21 = 0x1b;
+    pub const backspace: u21 = 0x7f;
+};
+
 pub const Event = union(enum) {
     key: Key,
     /// Owned by the queue until drained; paths are freed by the consumer.
