@@ -84,20 +84,8 @@ pub const View = struct {
     query: []const u8 = "",
     /// Chrome hidden, body full-height.
     zen: bool = false,
-    /// The `?` popup. Non-null floats a box over the body; the entries are
-    /// for the mode it was opened from, already narrowed by `help_query`, and
-    /// come from the bindings, so a remapped keymap documents itself rather
-    /// than the defaults (FEATURES.md 4.4).
-    help: ?[]const keymap.HelpEntry = null,
-    help_query: []const u8 = "",
-    /// Selected row, an index into `help` after filtering.
-    help_index: usize = 0,
-    /// The popup's own keys, drawn along its bottom border. Generated like
-    /// every other row, so remapping the navigation relabels the box.
-    help_keys: []const keymap.HelpEntry = &.{},
-    /// Written by the renderer with the grid it laid out, so the app can move
-    /// the selection by a whole column without duplicating the layout maths.
-    help_layout: ?*HelpLayout = null,
+    /// The `?` popup. Non-null floats a box over the body.
+    help: ?HelpView = null,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -166,7 +154,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         // No chrome at all, and no prompt either: `/` leaves zen rather than
         // drawing an input line with nothing to anchor it.
         try drawBody(f, v, 0, h);
-        if (v.help != null) try drawHelpPopup(f, v, 0, h);
+        if (v.help) |hv| try drawHelpPopup(f, hv, 0, h);
         return;
     }
     if (h < chrome_rows + 1) return drawTooSmall(f);
@@ -178,7 +166,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     if (v.prompt) |p| drawPrompt(f, p, h - 1) else try drawMode(f, v, h - 1);
 
     // Last, and over everything: it is a layer, not a pane.
-    if (v.help != null) try drawHelpPopup(f, v, 2, bodyHeight(h, false));
+    if (v.help) |hv| try drawHelpPopup(f, hv, 2, bodyHeight(h, false));
 }
 
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
@@ -327,6 +315,25 @@ fn helpFooter(arena: Allocator, keys: []const keymap.HelpEntry) Allocator.Error!
     return .{ .text = out.items, .keys = spans.items };
 }
 
+/// Everything the `?` popup draws. Separate from `View` because the popup has
+/// to be drawable over the empty screen too, where there is no file to review
+/// and so no `View` to put it in.
+pub const HelpView = struct {
+    /// Rows for the mode the popup was opened from, already narrowed by
+    /// `query`. From the bindings, so a remapped keymap documents itself
+    /// rather than the defaults (FEATURES.md 4.4).
+    entries: []const keymap.HelpEntry,
+    query: []const u8 = "",
+    /// Selected row, an index into `entries` after filtering.
+    index: usize = 0,
+    /// The popup's own keys, drawn along its bottom border. Generated like
+    /// every other row, so remapping the navigation relabels the box.
+    keys: []const keymap.HelpEntry = &.{},
+    /// Written by the renderer with the grid it laid out, so the app can move
+    /// the selection by a whole column without duplicating the layout maths.
+    layout: ?*HelpLayout = null,
+};
+
 /// The grid the popup last drew: how many columns, and how tall each is.
 pub const HelpLayout = struct {
     cols: u16 = 1,
@@ -356,8 +363,8 @@ fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []con
 /// Two columns where the width allows, because the default keymap is 23 rows
 /// and an 80x26 pane has 22 to give. Nothing here is a written-out key list:
 /// every row is rendered from the bindings, so a key that moves moves here too.
-fn drawHelpPopup(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
-    const entries = v.help orelse return;
+pub fn drawHelpPopup(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
+    const entries = v.entries;
     // Below this there is no honest box: border, filter line, one row, border.
     if (height < 4 or f.width() < 24) return;
 
@@ -377,9 +384,9 @@ fn drawHelpPopup(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void 
     // remapping relabels the box. `<Esc>` is `prompt.zig`'s, the same
     // hardcoded cancel every prompt has, which is why it is written here
     // rather than generated.
-    const foot = try helpFooter(f.arena, v.help_keys);
+    const foot = try helpFooter(f.arena, v.keys);
     const footer = foot.text;
-    const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.help_query });
+    const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
 
     // Content width: the columns, but never narrower than the chrome that
     // frames them, and never wider than the pane.
@@ -400,14 +407,14 @@ fn drawHelpPopup(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void 
     if (overflows and per > 1) per -= 1;
 
     const window = per * cols;
-    const sel = @min(v.help_index, entries.len -| 1);
+    const sel = @min(v.index, entries.len -| 1);
     // Scroll a whole column at a time, so the columns stay aligned and the
     // selection is always inside the window.
     const offset: usize = if (window > 0 and sel >= window) ((sel - window) / per + 1) * per else 0;
     const shown = @min(entries.len -| offset, window);
     const hidden = entries.len - offset - shown;
     const list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
-    if (v.help_layout) |hl| hl.* = .{ .cols = cols, .per = per };
+    if (v.layout) |hl| hl.* = .{ .cols = cols, .per = per };
 
     const box_w = content + 4;
     const box_h = list_rows + 3;

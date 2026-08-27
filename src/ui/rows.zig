@@ -55,8 +55,9 @@ pub const Rows = struct {
     }
 
     /// Row of the next hunk header strictly after `row`, or null at the end.
-    /// Returning null rather than wrapping keeps `]h` from silently looping a
-    /// reviewer back to the top of a file they thought they had finished.
+    /// Reporting the end rather than wrapping is what lets the caller decide
+    /// what the end means: `app.stepHunk` wraps and says so in the status
+    /// line, which it could not do if the wrap were hidden in here.
     pub fn nextHunkRow(self: Rows, row: u32) ?u32 {
         for (self.hunk_rows) |h| {
             if (h > row) return h;

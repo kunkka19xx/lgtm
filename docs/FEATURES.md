@@ -154,7 +154,7 @@ A remapping user can rebind either form independently: both are ordinary rows in
 
 This is the highest-value discoverability feature in any TUI. Every key the user never finds is a feature that does not exist.
 
-**Shipped:** `?` opens a box floating over the diff - sized to its contents and centred, so the review stays visible around it and the overlay reads as a layer rather than a screen. `Esc` closes it, as does backspacing past the start of an empty filter.
+**Shipped:** `?` opens a box floating over the diff - and over the empty screen too, which is when a reader is most likely to want it, since a review with nothing in it offers nothing to learn the keys from - sized to its contents and centred, so the review stays visible around it and the overlay reads as a layer rather than a screen. `Esc` closes it, as does backspacing past the start of an empty filter.
 
 `help` is a real `Mode`, and inside it the keymap serves only navigation: `H`/`J`/`K`/`L` move the selection - `J`/`K` by a row, `H`/`L` by a whole column, since the list is a grid (the arrow keys and `<C-n>`/`<C-p>` alias them), and every other keystroke is filter text - so `j` cannot scroll a body the user cannot see and `q` cannot quit. Navigation stays in the binding table rather than being hardcoded in the popup, so it is remappable like everything else.
 
@@ -233,6 +233,12 @@ which is what every other mockup in the doc already draws; `ui.icons` below
 still selects the glyph set.
 
 Statusline as a format string, tmux/lualine style. People will spend an hour on this and enjoy every minute.
+
+### 4.7b Navigation policy
+
+Motions that could reasonably go either way are settings rather than opinions baked into dispatch. The first is `nav.hunk_crosses_files` (default **true**): `]h` walks the whole review, carrying on into the next file rather than looping inside the current one. The default follows from the status line, which already counts hunks across every file - "4 of 17" describes a sequence, and the primary motion should be able to traverse it. Set it false to keep `]h` inside one file, wrapping at its ends.
+
+These live in an `app.Nav` struct declared now and read from a config file when `config.zig` lands, so adding the file is a parse plus an assignment rather than a hunt through dispatch for hardcoded policy - the same reasoning that put `Command` between keys and actions.
 
 ### 4.8 Per-repo config
 

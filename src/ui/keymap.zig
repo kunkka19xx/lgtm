@@ -121,8 +121,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page" },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line" },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
-    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .hint = "]h [h hunk", .desc = "next hunk" },
-    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk" },
+    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .hint = "]h [h hunk", .desc = "next hunk (wraps)" },
+    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
+    .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .desc = "next hunk" },
+    .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .desc = "previous hunk" },
     .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "]f [f file", .desc = "next file (wraps)" },
     .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .desc = "next file" },
@@ -557,7 +559,8 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     // The filter reaches the keys too, so the leader bindings are findable by
     // the name a user would type for them.
     const leader_hits = try helpEntries(default_bindings, .normal, "space", arena);
-    try testing.expectEqual(@as(usize, 2), leader_hits.len);
+    try testing.expectEqual(@as(usize, 4), leader_hits.len);
+    for (leader_hits) |e| try testing.expect(std.mem.startsWith(u8, e.keys, "<Space>"));
 
     const none = try helpEntries(default_bindings, .normal, "zzzz", arena);
     try testing.expectEqual(@as(usize, 0), none.len);

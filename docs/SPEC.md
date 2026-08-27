@@ -113,7 +113,8 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; `N` runs it backwards |
 | `}` `{` | paragraph |
-| `]h` / `[h` | next / previous hunk |
+| `]h` / `[h` | next / previous hunk, across the whole review |
+| `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
 | `]f` / `[f` | next / previous file (wraps at either end) |
 | `<Space>nf` / `<Space>pf` | next / previous file, leader aliases |
 | `V` | visual line select |
@@ -124,7 +125,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 
 No insert mode. No `:` command mode in v1, except `:q`. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
 
-File stepping wraps: `]f` from the last file lands on the first, `[f` from the first lands on the last, and the wrap is announced in the status line the way a wrapped search is. A review is a ring; stopping dead at the end reads as a dropped keystroke.
+Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing into the next file at the end of one - the status line already counts hunks across all files ("4 of 17"), so stopping at a file boundary would leave the primary motion unable to reach most of what it advertises. It wraps only at the far end of the last file. `nav.hunk_crosses_files = false` keeps hunk motions inside the current file, wrapping there instead. `]f` from the last file lands on the first, `[f` from the first lands on the last, and the wrap is announced in the status line the way a wrapped search is. A review is a ring; stopping dead at the end reads as a dropped keystroke.
 
 ### 6.3 Chat bridge - core feature #1
 

@@ -117,6 +117,8 @@ pub const App = struct {
     /// column, and only the renderer knows how tall a column came out - it
     /// depends on the pane, the filter and the widest description.
     help_layout: render.HelpLayout = .{},
+    /// Config-owned behaviour; see `Nav`.
+    nav: Nav = .{},
     prompt: prompt_mod.Prompt = .{},
     finder: search.State = .{},
     notice: Notice = .{},
@@ -366,8 +368,8 @@ pub const App = struct {
             .page_up => self.moveTo(self.cursor -| @max(1, body / 2)),
             .top => self.moveTo(0),
             .bottom => self.moveTo(self.rows.len() -| 1),
-            .next_hunk => if (self.rows.nextHunkRow(self.cursor)) |r| self.moveTo(r + 1),
-            .prev_hunk => if (self.rows.prevHunkRow(self.cursor)) |r| self.moveTo(r + 1),
+            .next_hunk => try self.stepHunk(1),
+            .prev_hunk => try self.stepHunk(-1),
             .next_file => try self.stepFile(1),
             .prev_file => try self.stepFile(-1),
             .center => self.centerCursor(body),
@@ -635,6 +637,72 @@ pub const App = struct {
         self.cursor = @min(row, n - 1);
     }
 
+    /// Wraps within the file, the way `]f` wraps within the review: at the last
+    /// hunk `]h` returns to the first. Announced for the same reason - the
+    /// cursor moved further than one step, and nothing else on screen says so.
+    ///
+    /// The wrap lives here rather than in `rows.nextHunkRow` because only here
+    /// is there a status line to announce it in.
+    fn stepHunk(self: *App, delta: i32) !void {
+        const hs = self.rows.hunk_rows;
+        if (hs.len == 0) return;
+
+        // By hunk *index*, not by row. Stepping by row cannot go backwards at
+        // all: the cursor always lands on `header + 1`, and the nearest header
+        // strictly above that row is the very one it just landed on, so `[h`
+        // returned to where it already was and the backward wrap was
+        // unreachable.
+        const n: i64 = @intCast(hs.len);
+        const here: ?u32 = self.rows.hunkAt(self.cursor);
+        const raw: i64 = if (here) |h|
+            @as(i64, @intCast(h)) + delta
+        else
+            // Above the first header, `]h` means the first hunk rather than
+            // the second, and `[h` means the last.
+            (if (delta > 0) 0 else n - 1);
+
+        // Still inside this file: the common case, and no file work at all.
+        if (raw >= 0 and raw < n) {
+            self.moveTo(hs[@intCast(raw)] + 1);
+            return;
+        }
+
+        // Off the end of the file's hunks.
+        if (self.nav.hunk_crosses_files and try self.crossToHunk(delta)) return;
+
+        const idx = @mod(raw, n);
+        const target = hs[@intCast(idx)] + 1;
+        // One hunk wraps onto itself; saying so every time would be noise.
+        if (target != self.cursor) {
+            self.notice.set("wrapped to {s} hunk", .{if (delta > 0) "first" else "last"});
+        }
+        self.moveTo(target);
+    }
+
+    /// Carries `]h` into the next file's first hunk, or `[h` into the previous
+    /// file's last one. Returns false when there is nowhere to go, leaving the
+    /// caller to wrap inside this file instead.
+    ///
+    /// Skips files that contribute no hunk rows - a summarised file has none -
+    /// rather than parking the cursor somewhere `]h` cannot leave. Bounded by
+    /// the file count, so a review of nothing but such files terminates.
+    fn crossToHunk(self: *App, delta: i32) !bool {
+        const count = self.files().len;
+        if (count <= 1) return false;
+
+        var tries: usize = 0;
+        while (tries < count) : (tries += 1) {
+            // `stepFile` wraps across the review and announces it, which is
+            // exactly the right message at the true end of the last file.
+            try self.stepFile(delta);
+            const hs = self.rows.hunk_rows;
+            if (hs.len == 0) continue;
+            self.moveTo(if (delta > 0) hs[0] + 1 else hs[hs.len - 1] + 1);
+            return true;
+        }
+        return false;
+    }
+
     /// Wraps: `]f` from the last file lands on the first, `[f` from the first
     /// lands on the last. A review is a ring, and stopping dead at the end
     /// reads as a dropped keystroke. Announced for the same reason the search
@@ -697,6 +765,22 @@ pub const Options = struct {
     /// Render one frame and exit. What CI and a screenshot need, and the only
     /// way to exercise the render path without a human at a keyboard.
     once: bool = false,
+    nav: Nav = .{},
+};
+
+/// Navigation behaviour a config file will own once `config.zig` lands
+/// (FEATURES.md 4.8). Declared as its own struct now so that landing it is a
+/// parse plus an assignment, not a hunt through dispatch for hardcoded
+/// policy - the same reasoning that put `Command` between keys and actions.
+/// Nothing reads a file yet; these are the shipped defaults.
+pub const Nav = struct {
+    /// `]h` walks the whole review, crossing into the next file at the end of
+    /// this one. Default true because the status line already counts hunks
+    /// across every file - "4 of 17" - so stopping at a file boundary leaves
+    /// the primary motion unable to reach most of what it advertises.
+    ///
+    /// False keeps hunk motions inside the current file, wrapping there.
+    hunk_crosses_files: bool = true,
 };
 
 /// Scroll offset that keeps `cursor` visible with a margin, given the current
@@ -753,6 +837,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
     var app = App.init(gpa, io, &queue);
     defer app.deinit();
+    app.nav = opts.nav;
 
     var reader = input.Reader.init(&term, &queue);
     var winsize: input.WinsizeNotifier = .{ .tty = &term, .queue = &queue };
@@ -870,6 +955,29 @@ fn openEditor(
     try app.rediff();
 }
 
+fn frameOf(app: *App, win: vaxis.Window, arena: Allocator) render.Frame {
+    return .{ .win = win, .arena = arena, .theme = app.theme, .glyphs = app.glyphs };
+}
+
+/// The popup's contents, or null when it is not open. Built here rather than in
+/// `view()` because it needs the frame arena, and drawn from both the review
+/// and the empty screen.
+fn helpView(app: *App, arena: Allocator) !?render.HelpView {
+    if (app.mode != .help) return null;
+    // The keys for the mode `?` was opened from, not for `.help` - the overlay
+    // describes the review, not itself.
+    const filter = app.help_filter.text();
+    return .{
+        .entries = try keymap.helpEntries(app.km.bindings, app.help_return, filter, arena),
+        .query = filter,
+        .index = app.help_index,
+        .keys = try keymap.helpEntries(app.km.bindings, .help, "", arena),
+        // Written back by the renderer: the next keypress moves through the
+        // grid this frame drew, not one the app guessed at.
+        .layout = &app.help_layout,
+    };
+}
+
 fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
     const frame = metrics.span(.frame);
     defer frame.end();
@@ -881,30 +989,19 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
         var shown = v;
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keymap.hints(app.km.bindings, app.mode, &hint_buf));
-        if (app.mode == .help) {
-            // The keys for the mode `?` was opened from, not for `.help` -
-            // the overlay describes the review, not itself.
-            const filter = app.help_filter.text();
-            shown.help = try keymap.helpEntries(app.km.bindings, app.help_return, filter, arena);
-            shown.help_query = filter;
-            shown.help_index = app.help_index;
-            shown.help_keys = try keymap.helpEntries(app.km.bindings, .help, "", arena);
-            // Written back by the renderer: the next keypress moves through
-            // the grid this frame drew, not one the app guessed at.
-            shown.help_layout = &app.help_layout;
-        }
-        try render.draw(.{
-            .win = win,
-            .arena = arena,
-            .theme = app.theme,
-            .glyphs = app.glyphs,
-        }, shown);
+        shown.help = try helpView(app, arena);
+        try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
         _ = win.printSegment(
             .{ .text = " lgtm: no changes against HEAD", .style = app.theme.dim },
             .{ .row_offset = 0, .wrap = .none },
         );
+        // An empty review is exactly when a reader is most likely to want the
+        // key list - there is nothing on screen to learn the keys from.
+        if (try helpView(app, arena)) |hv| {
+            try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
+        }
     }
 
     const render_span = metrics.span(.render);
@@ -1178,6 +1275,119 @@ test "search crosses into the next file and lands on the matching row" {
     try testing.expect(!fx.app.finder.wrapped);
 }
 
+test "hunk stepping crosses into the next file by default" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+    try testing.expect(fx.app.nav.hunk_crosses_files);
+    try testing.expect(fx.app.files().len > 1);
+
+    // To the last hunk of the first file.
+    while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < fx.app.rows.hunk_rows.len) {
+        try fx.key(']');
+        try fx.key('h');
+    }
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+
+    // One more leaves the file rather than looping inside it.
+    try fx.key(']');
+    try fx.key('h');
+    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+    // Crossing a boundary mid-review is not a wrap and must not claim to be.
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped") == null);
+
+    // Backwards over the same boundary returns to the *last* hunk of file 0.
+    try fx.key('[');
+    try fx.key('h');
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    const hs = fx.app.rows.hunk_rows;
+    try testing.expectEqual(hs[hs.len - 1] + 1, fx.app.cursor);
+}
+
+test "the whole review wraps at its far end, and says so" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    // `[h` from the very first hunk of the first file has nowhere earlier to
+    // go, so it wraps round to the last file - which `stepFile` announces.
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try fx.key('[');
+    try fx.key('h');
+    try testing.expectEqual(@as(u32, @intCast(fx.app.files().len - 1)), fx.app.file_index);
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to last file") != null);
+}
+
+test "hunk stepping stays in the file when config says so" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+    // The flag a config file will set once `config.zig` lands.
+    fx.app.nav.hunk_crosses_files = false;
+
+    const in_file = fx.app.rows.hunk_rows.len;
+    while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < in_file) {
+        try fx.key(']');
+        try fx.key('h');
+    }
+
+    try fx.key(']');
+    try fx.key('h');
+    // Same file, back at its first hunk.
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+    if (in_file > 1) {
+        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to first hunk") != null);
+    }
+}
+
+test "prev hunk steps back a hunk rather than to the top of this one" {
+    // The regression this guards: stepping by *row* could never go backwards.
+    // The cursor always lands on `header + 1`, and the nearest header strictly
+    // above that row is the one it just landed on, so `[h` returned to where
+    // it already was - and the backward wrap could never be reached.
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    const hunks = fx.app.rows.hunk_rows.len;
+    if (hunks < 2) return; // nothing to step between
+
+    try fx.key(']');
+    try fx.key('h');
+    const second = fx.app.cursor;
+    try testing.expectEqual(fx.app.rows.hunk_rows[1] + 1, second);
+
+    try fx.key('[');
+    try fx.key('h');
+    try testing.expect(fx.app.cursor != second);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+}
+
+test "the leader reaches the hunk motions too" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    const start = fx.app.cursor;
+    try fx.key(' ');
+    try fx.key('n');
+    try fx.key('h');
+    const after_bracket = fx.app.cursor;
+
+    // Same command as `]h`, so the same landing row.
+    fx.app.cursor = start;
+    try fx.key(']');
+    try fx.key('h');
+    try testing.expectEqual(after_bracket, fx.app.cursor);
+
+    fx.app.cursor = start;
+    try fx.key(' ');
+    try fx.key('p');
+    try fx.key('h');
+    const leader_prev = fx.app.cursor;
+    fx.app.cursor = start;
+    try fx.key('[');
+    try fx.key('h');
+    try testing.expectEqual(leader_prev, fx.app.cursor);
+}
+
 test "stepping past the last file wraps to the first and says so" {
     var fx = try Fixture.init(testing.allocator, null);
     defer fx.deinit();
@@ -1358,6 +1568,34 @@ test "narrowing the filter puts the selection back at the top" {
     try fx.key(event.code.down);
     try testing.expectEqual(@as(usize, 0), fx.app.help_index);
     try testing.expectEqual(@as(usize, 0), keymap.helpCount(fx.app.km.bindings, .normal, fx.app.help_filter.text()));
+}
+
+test "the popup is available when there is nothing to review" {
+    // An empty review is drawn from a different branch than a diff is, and it
+    // is exactly when a reader is most likely to want the key list: there is
+    // nothing on screen to learn the keys from.
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    try testing.expect(try helpView(&fx.app, arena) == null);
+
+    // No current file, so `view()` is null and the review branch never runs.
+    fx.app.file_index = 99;
+    try testing.expect(fx.app.view() == null);
+
+    try fx.key('?');
+    const hv = (try helpView(&fx.app, arena)).?;
+    try testing.expect(hv.entries.len > 0);
+    try testing.expect(hv.keys.len > 0);
+
+    // And it still closes.
+    try fx.key(event.code.escape);
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try testing.expect(try helpView(&fx.app, arena) == null);
 }
 
 test "search wraps past the end of the review and says so" {
