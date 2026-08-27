@@ -140,6 +140,13 @@ Every action is a named command; the keymap is a table from key sequence to comm
 
 Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individual bindings without redefining the whole map.
 
+**The leader.** `<Space>` fronts the command namespace, so it can grow without competing for single keys. It is defined once as `keymap.leader`, which is what lets a preset move it to `,` or `\` in one edit instead of a sweep over every sequence. Two rules keep it working:
+
+- **Never bind the leader on its own.** The matcher resolves an exact match as soon as it finds one, so a bare-leader binding would shadow every sequence behind it - the sequences would still be listed, and silently never fire. Pinned by a test rather than a comment.
+- **Leader fronts commands, not hot motions.** Anything pressed dozens of times per review earns a direct key; the leader is for what you reach for occasionally. Where both exist (`<Space>nf` alongside `]f`) the leader form is the discoverable alias, not the replacement.
+
+A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
+
 ### 4.4 The `?` popup - and a keybinding conflict to resolve
 
 `?` opens a **context-aware** help overlay: only the keys valid in the current mode, grouped, with the user's *actual* bindings rather than the defaults. Fuzzy-searchable within the popup.

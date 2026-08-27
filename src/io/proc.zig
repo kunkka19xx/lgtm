@@ -39,7 +39,10 @@ pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) 
 
 test "run captures stdout" {
     const testing = std.testing;
-    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    // The real binary gets its environ from `std.process.Init`; a test has to
+    // hand it over explicitly, or the child inherits no PATH and std falls back
+    // to "/usr/local/bin:/bin/:/usr/bin" - empty on NixOS, so argv[0] never resolves.
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
     defer threaded.deinit();
 
     const out = try run(testing.allocator, threaded.io(), &.{ "echo", "ok" }, 1 << 16);
@@ -65,7 +68,7 @@ pub fn runInherit(io: Io, argv: []const []const u8) RunError!u8 {
 
 test "runInherit waits for the child and reports its status" {
     const testing = std.testing;
-    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
     defer threaded.deinit();
 
     try testing.expectEqual(@as(u8, 0), try runInherit(threaded.io(), &.{ "true" }));
@@ -126,7 +129,7 @@ pub fn runWithInput(
 
 test "runWithInput feeds stdin and collects stdout" {
     const testing = std.testing;
-    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
     defer threaded.deinit();
 
     const out = try runWithInput(testing.allocator, threaded.io(), &.{"cat"}, "hello\nworld\n", 1 << 16);

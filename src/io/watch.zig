@@ -339,7 +339,9 @@ fn scratchDir(gpa: Allocator, name: []const u8) ![]u8 {
 
 test "a burst of writes produces exactly one event after settling" {
     const gpa = testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
+    // Without the real environ the child has no PATH and `git` never resolves;
+    // see the note in proc.zig.
+    var threaded: std.Io.Threaded = .init(gpa, .{ .environ = testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
 
@@ -376,7 +378,7 @@ test "a burst of writes produces exactly one event after settling" {
 
 test "a second edit to the same file is detected" {
     const gpa = testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
+    var threaded: std.Io.Threaded = .init(gpa, .{ .environ = testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
 
@@ -407,7 +409,7 @@ test "a second edit to the same file is detected" {
 
 test "a quiet tree never emits" {
     const gpa = testing.allocator;
-    var threaded: std.Io.Threaded = .init(gpa, .{});
+    var threaded: std.Io.Threaded = .init(gpa, .{ .environ = testing.environ });
     defer threaded.deinit();
     const io = threaded.io();
 

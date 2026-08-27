@@ -87,6 +87,12 @@ fn ctrl(cp: u21) Chord {
     return .{ .cp = cp, .ctrl = true };
 }
 
+/// The leader. Named once so rebinding it is one edit rather than a sweep over
+/// every sequence that starts with it. Space is unbound on its own and must
+/// stay that way: `feed` resolves an exact match as soon as it finds one, so a
+/// bare-Space binding would shadow every `<leader>x` sequence behind it.
+pub const leader: Chord = c(' ');
+
 /// The v0.1 set. Only bindings that do something are listed: a hint strip that
 /// advertises keys the build does not implement is worse than a shorter one.
 pub const default_bindings: []const Binding = &.{
@@ -100,6 +106,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk },
     .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "]f [f file" },
     .{ .chords = &.{ c('['), c('f') }, .command = .prev_file },
+    .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file },
+    .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center },
     .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "/ search" },
     .{ .chords = &.{c('?')}, .command = .search_backward },
@@ -216,6 +224,44 @@ test "an unknown second key drops the sequence without stranding the next" {
     try testing.expect(km.feed(tap('x'), .normal) == .none);
     // The dropped prefix must not swallow what follows.
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
+}
+
+test "a leader sequence resolves on its last key" {
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    try testing.expect(km.feed(tap('n'), .normal) == .pending);
+    try testing.expectEqual(Command.next_file, km.feed(tap('f'), .normal).command);
+
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    try testing.expect(km.feed(tap('p'), .normal) == .pending);
+    try testing.expectEqual(Command.prev_file, km.feed(tap('f'), .normal).command);
+}
+
+test "the leader is never bound on its own" {
+    // `feed` returns the first exact match it finds, so a bare-leader binding
+    // would shadow every sequence behind it. Pending is what proves it is a
+    // prefix and nothing else.
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    km.reset();
+    try testing.expect(km.feed(tap(' '), .visual) == .pending);
+}
+
+test "a key under the leader keeps its own meaning outside it" {
+    // `n` is search_next; it must not be eaten by `<leader>nf`.
+    var km: Keymap = .{};
+    try testing.expectEqual(Command.search_next, km.feed(tap('n'), .normal).command);
+    // And an unknown key after the leader drops without stranding the next.
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    try testing.expect(km.feed(tap('x'), .normal) == .none);
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
+}
+
+test "leader motions are live in visual mode like the bracket forms" {
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap(' '), .visual) == .pending);
+    try testing.expect(km.feed(tap('n'), .visual) == .pending);
+    try testing.expectEqual(Command.next_file, km.feed(tap('f'), .visual).command);
 }
 
 test "ctrl is part of the match, not ignored" {

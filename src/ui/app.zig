@@ -553,13 +553,19 @@ pub const App = struct {
         self.cursor = @min(row, n - 1);
     }
 
+    /// Wraps: `]f` from the last file lands on the first, `[f` from the first
+    /// lands on the last. A review is a ring, and stopping dead at the end
+    /// reads as a dropped keystroke. Announced for the same reason the search
+    /// announces its wrap - the file under you changed further than one step.
     fn stepFile(self: *App, delta: i32) !void {
         const n: i64 = @intCast(self.files().len);
         if (n == 0) return;
-        var i: i64 = @as(i64, self.file_index) + delta;
-        if (i < 0) i = 0;
-        if (i >= n) i = n - 1;
+        const raw: i64 = @as(i64, self.file_index) + delta;
+        // `@mod`, not `@rem`: a negative step has to land at the far end
+        // rather than staying negative.
+        const i = @mod(raw, n);
         if (i == self.file_index) return;
+        if (raw != i) self.notice.set("wrapped to {s} file", .{if (delta > 0) "first" else "last"});
         self.file_index = @intCast(i);
         try self.rebuildRows(.reset);
     }
@@ -1066,6 +1072,49 @@ test "search crosses into the next file and lands on the matching row" {
     try testing.expectEqual(@as(u32, 2), fx.app.cursor);
     // Reaching the next file in order is not a wrap.
     try testing.expect(!fx.app.finder.wrapped);
+}
+
+test "stepping past the last file wraps to the first and says so" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    // Two files in the fixture, so one step leaves us on the last.
+    try fx.key(']');
+    try fx.key('f');
+    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    // Landing on the last file is not itself a wrap.
+    try testing.expectEqual(@as(usize, 0), fx.app.notice.len);
+
+    try fx.key(']');
+    try fx.key('f');
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to first") != null);
+}
+
+test "stepping back from the first file wraps to the last" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try fx.key('[');
+    try fx.key('f');
+    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to last") != null);
+}
+
+test "the leader form steps files like the bracket form" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key(' ');
+    try fx.key('n');
+    try fx.key('f');
+    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+
+    try fx.key(' ');
+    try fx.key('p');
+    try fx.key('f');
+    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
 }
 
 test "search wraps past the end of the review and says so" {
