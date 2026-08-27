@@ -174,4 +174,8 @@ test "the core key codes are the ones vaxis reports" {
     try testing.expectEqual(vaxis.Key.enter, event.code.enter);
     try testing.expectEqual(vaxis.Key.escape, event.code.escape);
     try testing.expectEqual(vaxis.Key.backspace, event.code.backspace);
+    try testing.expectEqual(vaxis.Key.up, event.code.up);
+    try testing.expectEqual(vaxis.Key.down, event.code.down);
+    try testing.expectEqual(vaxis.Key.left, event.code.left);
+    try testing.expectEqual(vaxis.Key.right, event.code.right);
 }

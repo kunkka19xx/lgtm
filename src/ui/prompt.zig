@@ -22,13 +22,18 @@ pub const max_bytes = 256;
 pub const Kind = enum {
     search_forward,
     command,
+    /// The `?` popup's filter. Not a bottom-line prompt: it is drawn inside
+    /// the popup, and it is the reason `help` is a mode the keymap steps out
+    /// of - inside the overlay a keystroke is a query character, not a motion.
+    help_filter,
 
-    /// Drawn at column 0, and the only thing that tells the user which of the
-    /// two they are in.
+    /// Drawn before the text, and the only thing that tells the user which of
+    /// them they are in.
     pub fn prefix(self: Kind) []const u8 {
         return switch (self) {
             .search_forward => "/",
             .command => ":",
+            .help_filter => "> ",
         };
     }
 };
@@ -203,7 +208,8 @@ test "a full line drops keystrokes rather than splitting a codepoint" {
 test "each kind draws its own prefix" {
     try testing.expectEqualStrings("/", Kind.search_forward.prefix());
     try testing.expectEqualStrings(":", Kind.command.prefix());
+    try testing.expectEqualStrings("> ", Kind.help_filter.prefix());
     // No `?` kind: reverse search was dropped as redundant with `/` plus `N`,
-    // which is what frees the key for the help popup (FEATURES.md 4.4).
-    try testing.expectEqual(@as(usize, 2), @typeInfo(Kind).@"enum".fields.len);
+    // which is what freed the key for the help popup (FEATURES.md 4.4).
+    try testing.expectEqual(@as(usize, 3), @typeInfo(Kind).@"enum".fields.len);
 }

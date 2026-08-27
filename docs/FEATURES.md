@@ -120,7 +120,8 @@ Delight is real value, and for a keyboard tool it is also *retention*. But it is
 Share `look`'s themes so the two tools look like siblings - Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa.
 
 Beyond that:
-- **Custom themes in TOML.** Every semantic slot nameable: `added`, `removed`, `context`, `hunk_header`, `note_marker`, `risk_high`, `stale`, `line_number`, `cursor_line`.
+- **Custom themes in TOML.** Every semantic slot nameable: `added`, `removed`, `context`, `hunk_header`, `note_marker`, `risk_high`, `stale`, `line_number`, `cursor_line`, `accent`.
+- **One named primary.** `accent` is the theme's primary colour, set once rather than picked per call site - the `?` popup's key column is the first thing drawn in it, and `popup_border` is the same hue dimmed, so the box and its keys read as one object. A terminal has no opacity, so `dim` is what stands in for it; terminals that ignore the attribute simply get the undimmed hue, which is still correct. It exists because that column shared `hint`'s grey with `comment`, `punct` and `dim`, so the keys read as commented-out code instead of as keys. Any slot that ends up grey next to other greys is a bug in the palette, not in the drawing.
 - **Live reload.** Watching files is already core infrastructure - point it at the theme file too. Editing a theme and watching it apply instantly is genuinely fun, and costs almost nothing given the watcher exists.
 - **`lgtm --theme-preview`** renders a sample diff in every bundled theme so people can choose without restarting.
 - **Terminal-native mode** - use only the 16 ANSI colours, inheriting the user's terminal palette. A surprising number of people want exactly this.
@@ -147,13 +148,27 @@ Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individ
 
 A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
 
-### 4.4 The `?` popup - and a keybinding conflict to resolve
+### 4.4 The `?` popup - conflict resolved, overlay shipped
 
-`?` opens a **context-aware** help overlay: only the keys valid in the current mode, grouped, with the user's *actual* bindings rather than the defaults. Fuzzy-searchable within the popup.
+`?` opens a **context-aware** help overlay: only the keys valid in the current mode, with the user's *actual* bindings rather than the defaults.
 
 This is the highest-value discoverability feature in any TUI. Every key the user never finds is a feature that does not exist.
 
-**But `?` is currently triple-booked**, and this needs deciding now rather than after muscle memory forms:
+**Shipped:** `?` opens a box floating over the diff - sized to its contents and centred, so the review stays visible around it and the overlay reads as a layer rather than a screen. `Esc` closes it, as does backspacing past the start of an empty filter.
+
+`help` is a real `Mode`, and inside it the keymap serves only navigation: `H`/`J`/`K`/`L` move the selection - `J`/`K` by a row, `H`/`L` by a whole column, since the list is a grid (the arrow keys and `<C-n>`/`<C-p>` alias them), and every other keystroke is filter text - so `j` cannot scroll a body the user cannot see and `q` cannot quit. Navigation stays in the binding table rather than being hardcoded in the popup, so it is remappable like everything else.
+
+Shifted rather than `<C-j>`/`<C-k>`, deliberately. A Ctrl chord is the one thing a multiplexer takes before the application sees it: vim-tmux-navigator binds `C-h`/`C-j`/`C-k`/`C-l` at the tmux **root** table and forwards them only to processes matching its vim pattern, which `lgtm` does not match - so under that very common config `<C-j>` switches a tmux pane and never arrives. tmux decides from the *process name*, so an application cannot ask for the chord back only while a popup is open; adding `lgtm` to `@vim_navigator_pattern` claims those keys for the whole session instead. `<C-j>`/`<C-k>` are therefore not bound at all: a footer advertising a key the user cannot press is worse than one key fewer. The shifted pair is free, and nothing intercepts an arrow either.
+
+Capitals cost nothing here: inside the popup every other key is filter text, and the filter matches case-insensitively, so `J` was never going to be typed as a query.
+
+The same reasoning applies to `<C-l>` for refresh, which that config also swallows - it wants a second, chord-free binding before v0.1, and the box's own footer is generated from those bindings: remap `<C-j>` and the label follows. Typing filters as you go, over the descriptions **and** the rendered keys, so `space` finds the leader bindings. Matching is a subsequence in two tiers - a run of the query as typed sorts above scattered letters, without which "file" surfaces "gg first line" next to "next file" and the list reads as noise.
+
+Every row is rendered from the bindings by `keymap.writeChords`, so a remapped key moves in the overlay too, and a test refuses a binding that is advertised in the hint strip but explains nothing in `?`. Two columns where the width allows, one where it does not, and the selected row marked the way the body marks its cursor line. The popup's own keys sit along the bottom border with the filter hint, and keys that share a description collapse into one label - four bindings become `H J K L move`, because four rows each saying "move" is the verbose spelling of the same thing. Sideways movement is by a whole column of the grid the last frame actually drew - the renderer writes its layout back, rather than the app guessing at a column height that depends on the pane, the filter and the widest description. A list too tall for the box scrolls a whole column at a time so the columns stay aligned, with `+N more` counting what is below, and "no key matches" when the filter excludes everything - a silently short key list is indistinguishable from a keymap that really is that small.
+
+**Still to come:** grouping by category, and ranking beyond the two tiers. `F1` and `g?` aliases are not bound.
+
+**`?` was triple-booked**, and was resolved before muscle memory could form:
 
 | Claimant | Resolution |
 |---|---|

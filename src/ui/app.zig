@@ -103,6 +103,20 @@ pub const App = struct {
     /// The mode to return to when the prompt closes, so `/` from a selection
     /// does not silently drop it.
     prompt_return: event.Mode = .normal,
+    /// The mode `?` was opened from, so closing the overlay puts the user
+    /// back where they were rather than always in normal.
+    help_return: event.Mode = .normal,
+    /// The popup's filter line. Its own prompt rather than the bottom-line
+    /// one, so opening `?` cannot disturb a `/` query the user still wants.
+    help_filter: prompt_mod.Prompt = .{},
+    /// Which popup row is selected. An index into the *filtered* list, reset
+    /// whenever the filter changes - a selection that survives a narrowing
+    /// points at a different row than the one the user was looking at.
+    help_index: usize = 0,
+    /// The grid the last frame actually drew. Sideways movement is by a whole
+    /// column, and only the renderer knows how tall a column came out - it
+    /// depends on the pane, the filter and the widest description.
+    help_layout: render.HelpLayout = .{},
     prompt: prompt_mod.Prompt = .{},
     finder: search.State = .{},
     notice: Notice = .{},
@@ -368,6 +382,11 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .toggle_zen => self.zen = !self.zen,
+            .help => self.toggleHelp(),
+            .help_down => self.moveHelp(1),
+            .help_up => self.moveHelp(-1),
+            .help_right => self.moveHelpColumn(1),
+            .help_left => self.moveHelpColumn(-1),
         }
         self.clampScroll(body);
     }
@@ -405,6 +424,67 @@ pub const App = struct {
         self.notice.clear();
     }
 
+    /// `?` from normal or visual opens the overlay; `?`, `Esc` or `q` from
+    /// inside closes it. One command rather than two, for the same reason
+    /// `visual_toggle` is one: the key that opens it also closes it. While
+    /// `.help` is the mode, every other binding is invisible to the matcher,
+    /// so nothing fires behind the overlay.
+    fn toggleHelp(self: *App) void {
+        if (self.mode == .help) {
+            self.help_filter.close();
+            self.mode = self.help_return;
+        } else {
+            self.help_return = self.mode;
+            self.help_filter.start(.help_filter);
+            self.help_index = 0;
+            self.mode = .help;
+        }
+    }
+
+    /// One column sideways. Clamping rather than wrapping at the edges: the
+    /// last column is usually short, so wrapping would land on a different row
+    /// than the one the eye came from.
+    fn moveHelpColumn(self: *App, delta: i32) void {
+        const per: i32 = @intCast(@min(@max(self.help_layout.per, 1), 1000));
+        self.moveHelp(delta * per);
+    }
+
+    /// Clamped against the same filter the popup is drawn from, so the
+    /// selection can never sit past the end of what is on screen.
+    fn moveHelp(self: *App, delta: i32) void {
+        const n = keymap.helpCount(self.km.bindings, self.help_return, self.help_filter.text());
+        if (n == 0) {
+            self.help_index = 0;
+            return;
+        }
+        const i = @as(i64, @intCast(self.help_index)) + delta;
+        self.help_index = if (i < 0)
+            0
+        else if (i >= @as(i64, @intCast(n)))
+            n - 1
+        else
+            @intCast(i);
+    }
+
+    /// Keys inside the popup are filter text, not commands - the same rule the
+    /// bottom-line prompt follows, and why `help` is a mode the keymap ignores.
+    /// Escape closes, and so does backspacing past the start of an empty
+    /// query, which is what `prompt.zig` already means by cancel.
+    fn feedHelp(self: *App, key: event.Key, body: u16) !void {
+        // Navigation is an action and stays in the keymap, so it is remappable
+        // like everything else. Only bindings live in `.help` can match here,
+        // and they are all single chords, so a miss never strands the next key.
+        switch (self.km.feed(key, .help)) {
+            .command => |cmd| return self.run(cmd, body),
+            .pending, .none => {},
+        }
+        switch (self.help_filter.feed(key)) {
+            // A narrowed list is a different list: start at the top of it.
+            .typing => self.help_index = 0,
+            .submit, .cancel => self.toggleHelp(),
+        }
+    }
+
     fn closePrompt(self: *App) void {
         self.prompt.close();
         self.mode = self.prompt_return;
@@ -439,6 +519,9 @@ pub const App = struct {
                         }
                     },
                     .command => self.submitCommand(line),
+                    // The popup's filter is its own `Prompt` and is fed by
+                    // `feedHelp`, so it never arrives here.
+                    .help_filter => {},
                 }
                 self.clampScroll(body);
             },
@@ -587,6 +670,7 @@ pub const App = struct {
                 // While a prompt is open the keys are text, not actions, so
                 // they never reach the keymap.
                 if (self.mode == .command) return self.feedPrompt(k, body);
+                if (self.mode == .help) return self.feedHelp(k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
@@ -597,8 +681,9 @@ pub const App = struct {
                 }
             },
             .files_changed => |paths| {
-                for (paths) |p| self.gpa.free(p);
-                self.gpa.free(paths);
+                // One place knows what an event owns, so a new owning variant
+                // cannot be freed here and forgotten in `Queue.deinit`.
+                event.Queue.freePayload(self.gpa, .{ .files_changed = paths });
                 try self.rediff();
                 self.clampScroll(body);
             },
@@ -677,10 +762,14 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         winsize.register() catch {};
         watcher.start() catch {};
     }
-    defer if (!opts.once) {
-        reader.stop();
-        watcher.stop();
-    };
+    defer {
+        if (!opts.once) reader.stop();
+        // `deinit`, not `stop`: stopping only joins the thread. The poller
+        // still holds a duped path per watched file in `prev` and `pending`,
+        // and those are what a leak check sees on exit. Unconditional because
+        // deinit of a watcher that never started is a no-op.
+        watcher.deinit();
+    }
 
     // Sized once here and again only when a resize event says so. Calling
     // `vx.resize` per frame reallocates both screen buffers and throws away
@@ -792,6 +881,18 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
         var shown = v;
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keymap.hints(app.km.bindings, app.mode, &hint_buf));
+        if (app.mode == .help) {
+            // The keys for the mode `?` was opened from, not for `.help` -
+            // the overlay describes the review, not itself.
+            const filter = app.help_filter.text();
+            shown.help = try keymap.helpEntries(app.km.bindings, app.help_return, filter, arena);
+            shown.help_query = filter;
+            shown.help_index = app.help_index;
+            shown.help_keys = try keymap.helpEntries(app.km.bindings, .help, "", arena);
+            // Written back by the renderer: the next keypress moves through
+            // the grid this frame drew, not one the app guessed at.
+            shown.help_layout = &app.help_layout;
+        }
         try render.draw(.{
             .win = win,
             .arena = arena,
@@ -999,6 +1100,10 @@ const Fixture = struct {
         try self.app.handle(.{ .key = .{ .codepoint = cp, .mods = .{} } }, 22);
     }
 
+    fn ctrlKey(self: *Fixture, cp: u21) !void {
+        try self.app.handle(.{ .key = .{ .codepoint = cp, .mods = .{ .ctrl = true } } }, 22);
+    }
+
     fn typeIn(self: *Fixture, text: []const u8) !void {
         for (text) |ch| try self.key(ch);
     }
@@ -1114,6 +1219,145 @@ test "the leader form steps files like the bracket form" {
     try fx.key('p');
     try fx.key('f');
     try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+}
+
+test "? opens the overlay and returns to the mode it came from" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key('?');
+    try testing.expectEqual(event.Mode.help, fx.app.mode);
+    try fx.key(event.code.escape);
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+
+    // Opened from visual, it goes back to visual rather than dumping the
+    // selection the user was building.
+    try fx.key('V');
+    try testing.expect(fx.app.selection() != null);
+    try fx.key('?');
+    try testing.expectEqual(event.Mode.help, fx.app.mode);
+    try fx.key(event.code.escape);
+    try testing.expectEqual(event.Mode.visual, fx.app.mode);
+    try testing.expect(fx.app.selection() != null);
+}
+
+test "keys under the overlay do nothing while it is up" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key('j');
+    const moved = fx.app.cursor;
+    try testing.expect(moved > 0);
+
+    try fx.key('?');
+    try fx.key('j');
+    try fx.key('j');
+    try testing.expectEqual(moved, fx.app.cursor);
+    // Those keys went into the filter instead, which is what makes the popup
+    // searchable - and `q` types rather than quitting the app.
+    try fx.key('q');
+    try testing.expect(!fx.app.quit);
+    try testing.expectEqualStrings("jjq", fx.app.help_filter.text());
+
+    try fx.key(event.code.escape);
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    // Closing clears the query, so `?` never reopens onto a stale filter.
+    try testing.expectEqual(@as(usize, 0), fx.app.help_filter.text().len);
+}
+
+test "the popup selection moves with the arrows, and stops at both ends" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key('?');
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+
+    // Already at the top: Up must not wrap round to the bottom, because a list
+    // you can scroll off the end of is one you can lose your place in.
+    try fx.key(event.code.up);
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+
+    try fx.key(event.code.down);
+    try fx.key(event.code.down);
+    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try fx.key(event.code.up);
+    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
+    // `J`/`K` are the advertised pair and reach the same commands. A capital
+    // letter is navigation here, never filter text - which costs nothing,
+    // because the filter matches case-insensitively.
+    try fx.key('J');
+    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try fx.key('K');
+    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help_filter.text().len);
+    // `<C-n>`/`<C-p>` reach the same commands.
+    try fx.ctrlKey('n');
+    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try fx.ctrlKey('p');
+    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
+
+    // And it cannot walk past the last row.
+    const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
+    var i: usize = 0;
+    while (i < n + 5) : (i += 1) try fx.key(event.code.down);
+    try testing.expectEqual(n - 1, fx.app.help_index);
+}
+
+test "left and right move by a whole column of the grid the frame drew" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key('?');
+    // Nothing has rendered in this fixture, so the layout is the one-column
+    // default: sideways is then the same as a single step, never a jump into
+    // an index the list does not have.
+    try fx.key(event.code.right);
+    try testing.expectEqual(fx.app.help_layout.per, fx.app.help_index);
+
+    // With the grid a real frame produces, one column is a real jump.
+    fx.app.help_layout = .{ .cols = 2, .per = 11 };
+    fx.app.help_index = 0;
+    try fx.key(event.code.right);
+    try testing.expectEqual(@as(usize, 11), fx.app.help_index);
+    try fx.key('H');
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try fx.key('L');
+    try testing.expectEqual(@as(usize, 11), fx.app.help_index);
+    try fx.key(event.code.left);
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+
+    // Left from the first column stays put rather than wrapping.
+    try fx.key(event.code.left);
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+
+    // Right from the last column clamps to the final row instead of running
+    // off the end of the list.
+    const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
+    fx.app.help_index = n - 1;
+    try fx.key(event.code.right);
+    try testing.expectEqual(n - 1, fx.app.help_index);
+}
+
+test "narrowing the filter puts the selection back at the top" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    try fx.key('?');
+    try fx.key(event.code.down);
+    try fx.key(event.code.down);
+    try testing.expect(fx.app.help_index > 0);
+
+    // The list under the selection just changed; index 2 of the old list is a
+    // different row than index 2 of the new one.
+    try fx.key('f');
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+
+    // A filter that matches nothing leaves nothing to select.
+    try fx.key('z');
+    try fx.key('z');
+    try fx.key(event.code.down);
+    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), keymap.helpCount(fx.app.km.bindings, .normal, fx.app.help_filter.text()));
 }
 
 test "search wraps past the end of the review and says so" {

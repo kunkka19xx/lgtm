@@ -12,6 +12,10 @@ pub const Mode = enum {
     visual,
     note_input,
     finder,
+    /// The `?` overlay. Its own mode so that the keys which close it are rows
+    /// in the keymap like everything else, and so every other binding is
+    /// invisible while it is up rather than firing behind it.
+    help,
     // Not reachable in v0.1. Present so dispatch never grows an `if (in_visual)`.
     insert,
     command,
@@ -42,6 +46,13 @@ pub const code = struct {
     pub const enter: u21 = 0x0d;
     pub const escape: u21 = 0x1b;
     pub const backspace: u21 = 0x7f;
+    /// Kitty functional keycodes, well outside anything a keyboard types as
+    /// text. Bound as aliases where a Ctrl chord might be eaten by whatever
+    /// multiplexer the user runs under.
+    pub const left: u21 = 57350;
+    pub const right: u21 = 57351;
+    pub const up: u21 = 57352;
+    pub const down: u21 = 57353;
 };
 
 pub const Event = union(enum) {
@@ -83,8 +94,25 @@ pub const Queue = struct {
     }
 
     pub fn deinit(self: *Queue) void {
+        // Undrained events still own their payloads - the contract above says
+        // the queue holds them until a consumer takes them. Quitting with a
+        // `files_changed` still queued is ordinary, not exceptional: the
+        // watch thread pushes on its own clock.
+        for (self.items.items) |ev| freePayload(self.gpa, ev);
         self.items.deinit(self.gpa);
         self.* = undefined;
+    }
+
+    /// Frees whatever an event owns. Consumers that drain call this too.
+    pub fn freePayload(gpa: Allocator, ev: Event) void {
+        switch (ev) {
+            .files_changed => |paths| {
+                for (paths) |p| gpa.free(p);
+                gpa.free(paths);
+            },
+            .snapshot_taken => |s| gpa.free(s.ref),
+            else => {},
+        }
     }
 
     pub fn push(self: *Queue, ev: Event) Allocator.Error!void {
@@ -168,8 +196,30 @@ test "drain unblocks on close" {
     try testing.expectEqual(@as(usize, 0), events.len);
 }
 
-test "all six modes are declared" {
-    try std.testing.expectEqual(@as(usize, 6), @typeInfo(Mode).@"enum".fields.len);
+test "deinit frees the payloads of events nobody drained" {
+    // Quitting with a `files_changed` still queued is ordinary rather than
+    // exceptional: the watch thread pushes on its own clock, and the main loop
+    // stops the moment `q` is pressed. The testing allocator is the assertion.
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var q = Queue.init(testing.allocator, threaded.io());
+
+    const paths = try testing.allocator.alloc([]const u8, 2);
+    paths[0] = try testing.allocator.dupe(u8, "src/a.zig");
+    paths[1] = try testing.allocator.dupe(u8, "src/b.zig");
+    try q.push(.{ .files_changed = paths });
+    try q.push(.{ .snapshot_taken = .{ .turn = 3, .ref = try testing.allocator.dupe(u8, "HEAD~1") } });
+    // An event that owns nothing must survive the same pass untouched.
+    try q.push(.quit);
+
+    q.deinit();
+}
+
+test "all seven modes are declared" {
+    // Six from the original set, plus `help` - added when `?` gained an
+    // overlay whose close keys had to be keymap rows like any other.
+    try std.testing.expectEqual(@as(usize, 7), @typeInfo(Mode).@"enum".fields.len);
 }
 
 test "unreachable event variants are declared, not retrofitted" {

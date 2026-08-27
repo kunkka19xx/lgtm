@@ -120,6 +120,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `zz` | center current line |
 | `e` | open current line in `$EDITOR` |
 | `q` | quit |
+| `?` | help popup: every key live in the current mode, fuzzy-filtered as you type, `HJKL` or arrows to move: `J`/`K` a row, `H`/`L` a column |
 
 No insert mode. No `:` command mode in v1, except `:q`. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
 

@@ -256,8 +256,7 @@ pub const Watcher = struct {
             elapsed += poll;
             const paths = self.poller.tick(elapsed) catch continue orelse continue;
             self.queue.push(.{ .files_changed = paths }) catch {
-                for (paths) |p| self.poller.gpa.free(p);
-                self.poller.gpa.free(paths);
+                event.Queue.freePayload(self.poller.gpa, .{ .files_changed = paths });
             };
         }
     }

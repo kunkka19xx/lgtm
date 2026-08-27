@@ -20,6 +20,8 @@ const event = @import("../core/event.zig");
 const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
+const keymap = @import("keymap.zig");
+const prompt_mod = @import("prompt.zig");
 const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
 const theme_mod = @import("theme.zig");
@@ -82,6 +84,20 @@ pub const View = struct {
     query: []const u8 = "",
     /// Chrome hidden, body full-height.
     zen: bool = false,
+    /// The `?` popup. Non-null floats a box over the body; the entries are
+    /// for the mode it was opened from, already narrowed by `help_query`, and
+    /// come from the bindings, so a remapped keymap documents itself rather
+    /// than the defaults (FEATURES.md 4.4).
+    help: ?[]const keymap.HelpEntry = null,
+    help_query: []const u8 = "",
+    /// Selected row, an index into `help` after filtering.
+    help_index: usize = 0,
+    /// The popup's own keys, drawn along its bottom border. Generated like
+    /// every other row, so remapping the navigation relabels the box.
+    help_keys: []const keymap.HelpEntry = &.{},
+    /// Written by the renderer with the grid it laid out, so the app can move
+    /// the selection by a whole column without duplicating the layout maths.
+    help_layout: ?*HelpLayout = null,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -150,6 +166,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         // No chrome at all, and no prompt either: `/` leaves zen rather than
         // drawing an input line with nothing to anchor it.
         try drawBody(f, v, 0, h);
+        if (v.help != null) try drawHelpPopup(f, v, 0, h);
         return;
     }
     if (h < chrome_rows + 1) return drawTooSmall(f);
@@ -159,6 +176,9 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     try drawBody(f, v, 2, bodyHeight(h, false));
     f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
     if (v.prompt) |p| drawPrompt(f, p, h - 1) else try drawMode(f, v, h - 1);
+
+    // Last, and over everything: it is a layer, not a pane.
+    if (v.help != null) try drawHelpPopup(f, v, 2, bodyHeight(h, false));
 }
 
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
@@ -177,6 +197,7 @@ fn modeLabel(mode: event.Mode) []const u8 {
         .normal => "NORMAL",
         .visual => "VISUAL",
         .command => "COMMAND",
+        .help => "HELP",
         .note_input => "NOTE",
         .finder => "FIND",
         .insert => "INSERT",
@@ -267,6 +288,189 @@ fn fitHints(f: Frame, hints: []const u8, cols: u16) []const u8 {
         at = sep + 2;
     }
     return hints[0..cut];
+}
+
+/// A byte range inside a border label.
+const Span = struct { start: usize, len: usize };
+
+/// The popup's bottom label, and where the key names sit inside it so they can
+/// be repainted in the accent: a key is a key wherever it is drawn, and one
+/// colour in the list with another in the footer makes them look like two
+/// different things.
+///
+/// Keys sharing a description collapse into one label - four bindings become
+/// `H J K L move`, because four rows each saying "move" is the verbose
+/// spelling of the same thing. `<Esc>` is written rather than generated
+/// because closing is `prompt.zig`'s hardcoded cancel, not a binding.
+fn helpFooter(arena: Allocator, keys: []const keymap.HelpEntry) Allocator.Error!struct {
+    text: []const u8,
+    keys: []const Span,
+} {
+    var out: std.ArrayList(u8) = .empty;
+    var spans: std.ArrayList(Span) = .empty;
+    try out.appendSlice(arena, " type to filter  ");
+    var n: usize = 0;
+    while (n < keys.len) {
+        var last = n;
+        while (last + 1 < keys.len and std.mem.eql(u8, keys[last + 1].desc, keys[n].desc)) last += 1;
+        for (keys[n .. last + 1]) |e| {
+            try spans.append(arena, .{ .start = out.items.len, .len = e.keys.len });
+            try out.appendSlice(arena, e.keys);
+            try out.appendSlice(arena, " ");
+        }
+        try out.appendSlice(arena, keys[n].desc);
+        try out.appendSlice(arena, "  ");
+        n = last + 1;
+    }
+    try spans.append(arena, .{ .start = out.items.len, .len = "<Esc>".len });
+    try out.appendSlice(arena, "<Esc> close ");
+    return .{ .text = out.items, .keys = spans.items };
+}
+
+/// The grid the popup last drew: how many columns, and how tall each is.
+pub const HelpLayout = struct {
+    cols: u16 = 1,
+    per: usize = 1,
+};
+
+/// One horizontal border of the popup, with a label let into it.
+const prompt_filter_prefix = prompt_mod.Kind.help_filter.prefix();
+
+fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []const u8, inner: u16) Allocator.Error![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    try out.appendSlice(f.arena, corner_l);
+    const lw = f.win.gwidth(label);
+    const lead: u16 = if (lw == 0) 0 else 1;
+    if (lead > 0) try out.appendSlice(f.arena, try f.rule(f.glyphs.box_h, lead));
+    if (lw <= inner) try out.appendSlice(f.arena, label);
+    const used = if (lw <= inner) lead + lw else 0;
+    try out.appendSlice(f.arena, try f.rule(f.glyphs.box_h, inner -| used));
+    try out.appendSlice(f.arena, corner_r);
+    return out.toOwnedSlice(f.arena);
+}
+
+/// The `?` popup: a box floating over the diff rather than a screen replacing
+/// it, so the review stays visible around the edges and the overlay reads as a
+/// layer. Sized to its contents and centred in the body.
+///
+/// Two columns where the width allows, because the default keymap is 23 rows
+/// and an 80x26 pane has 22 to give. Nothing here is a written-out key list:
+/// every row is rendered from the bindings, so a key that moves moves here too.
+fn drawHelpPopup(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
+    const entries = v.help orelse return;
+    // Below this there is no honest box: border, filter line, one row, border.
+    if (height < 4 or f.width() < 24) return;
+
+    var keyw: u16 = 0;
+    var descw: u16 = 0;
+    for (entries) |e| {
+        keyw = @max(keyw, f.win.gwidth(e.keys));
+        descw = @max(descw, f.win.gwidth(e.desc));
+    }
+    const gap: u16 = 2;
+    const one = @max(keyw + gap + descw, 12);
+
+    const title = " keys ";
+    // The popup's own keys, along the bottom with the filter hint. Keys that
+    // share a description collapse into one label - four rows saying "move" is
+    // the verbose spelling of `H J K L move`. Built from the bindings, so
+    // remapping relabels the box. `<Esc>` is `prompt.zig`'s, the same
+    // hardcoded cancel every prompt has, which is why it is written here
+    // rather than generated.
+    const foot = try helpFooter(f.arena, v.help_keys);
+    const footer = foot.text;
+    const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.help_query });
+
+    // Content width: the columns, but never narrower than the chrome that
+    // frames them, and never wider than the pane.
+    const max_content = f.width() -| 4;
+    var cols: u16 = if (one * 2 + gap <= max_content and entries.len > 6) 2 else 1;
+    var content = @min(max_content, @max(one * cols + (cols - 1) * gap, @max(f.win.gwidth(title), f.win.gwidth(footer))));
+    if (content < one and cols == 2) {
+        cols = 1;
+        content = @min(max_content, one);
+    }
+
+    // Rows: two borders and the filter line are chrome; the rest is the list.
+    const list_max = height - 3;
+    const per_full: usize = (entries.len + cols - 1) / cols;
+    var per: usize = @max(@min(per_full, list_max), 1);
+    const overflows = entries.len > per * cols;
+    // A row of the list is spent on the "+N more" marker when there is more.
+    if (overflows and per > 1) per -= 1;
+
+    const window = per * cols;
+    const sel = @min(v.help_index, entries.len -| 1);
+    // Scroll a whole column at a time, so the columns stay aligned and the
+    // selection is always inside the window.
+    const offset: usize = if (window > 0 and sel >= window) ((sel - window) / per + 1) * per else 0;
+    const shown = @min(entries.len -| offset, window);
+    const hidden = entries.len - offset - shown;
+    const list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
+    if (v.help_layout) |hl| hl.* = .{ .cols = cols, .per = per };
+
+    const box_w = content + 4;
+    const box_h = list_rows + 3;
+    const box_col = (f.width() -| box_w) / 2;
+    const box_top = top + (height -| box_h) / 2;
+    const text_col = box_col + 2;
+
+    // Blank the box first: the diff is underneath it, not behind it.
+    const blank = try f.arena.alloc(u8, box_w);
+    @memset(blank, ' ');
+    var r: u16 = 0;
+    while (r < box_h) : (r += 1) f.put(box_top + r, box_col, blank, f.theme.text);
+
+    const border = f.theme.popup_border;
+    f.put(box_top, box_col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title, content + 2), border);
+    f.put(box_top + box_h - 1, box_col, try borderLine(f, f.glyphs.box_bl, f.glyphs.box_br, footer, content + 2), border);
+    // `borderLine` lays the label after a corner and one rule glyph, so the
+    // label starts two columns in. Key names are ASCII, so a byte offset into
+    // the label is also a column offset.
+    if (f.win.gwidth(footer) <= content + 2) {
+        for (foot.keys) |sp| {
+            f.put(box_top + box_h - 1, box_col + 2 + @as(u16, @intCast(sp.start)), footer[sp.start..][0..sp.len], f.theme.accent);
+        }
+    }
+    var body_row: u16 = 1;
+    while (body_row < box_h - 1) : (body_row += 1) {
+        f.put(box_top + body_row, box_col, f.glyphs.box_v, border);
+        f.put(box_top + body_row, box_col + box_w - 1, f.glyphs.box_v, border);
+    }
+
+    f.put(box_top + 1, text_col, query, f.theme.prompt);
+
+    const list_top = box_top + 2;
+    var i: usize = 0;
+    while (i < shown and per > 0) : (i += 1) {
+        const col_index: u16 = @intCast(i / per);
+        if (col_index >= cols) break;
+        const row = list_top + @as(u16, @intCast(i % per));
+        const col = text_col + col_index * (one + gap);
+        if (col + keyw >= box_col + box_w) break;
+        const e = entries[offset + i];
+        if (offset + i == sel) {
+            // The selected row, marked the way the cursor line is marked in
+            // the body - one idea of "you are here" across the whole app.
+            const bg = f.theme.cursor_line.bg;
+            f.put(row, col, blank[0..@min(one, blank.len)], f.theme.cursor_line);
+            f.put(row, col, e.keys, withBg(f.theme.accent, bg));
+            f.put(row, col + keyw + gap, e.desc, withBg(f.theme.text, bg));
+        } else {
+            f.put(row, col, e.keys, f.theme.accent);
+            f.put(row, col + keyw + gap, e.desc, f.theme.text);
+        }
+    }
+
+    if (hidden > 0) {
+        // A silently short list is indistinguishable from a keymap that really
+        // is that small.
+        const more = try std.fmt.allocPrint(f.arena, "+{d} more", .{hidden});
+        f.put(list_top + @as(u16, @intCast(per)), text_col, more, f.theme.dim);
+    }
+    if (entries.len == 0) {
+        f.put(list_top, text_col, "no key matches", f.theme.dim);
+    }
 }
 
 fn drawBody(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
@@ -528,6 +732,31 @@ pub fn runsIn(runs: []const lexer.Run, lo: u32, hi: u32) []const lexer.Run {
 }
 
 const testing = std.testing;
+
+test "the popup footer marks exactly its key names, and no other text" {
+    // The spans are what get repainted in the accent. An offset off by one
+    // paints the space beside a key, or eats the first letter of a word, and
+    // nothing else in the file would say so.
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const nav: []const keymap.HelpEntry = &.{
+        .{ .keys = "H", .desc = "move" },
+        .{ .keys = "J", .desc = "move" },
+        .{ .keys = "<Right>", .desc = "column" },
+    };
+    const foot = try helpFooter(arena, nav);
+
+    // Same description, so `H` and `J` collapse under one label.
+    try testing.expectEqualStrings(" type to filter  H J move  <Right> column  <Esc> close ", foot.text);
+
+    const want = [_][]const u8{ "H", "J", "<Right>", "<Esc>" };
+    try testing.expectEqual(want.len, foot.keys.len);
+    for (foot.keys, want) |sp, expected| {
+        try testing.expectEqualStrings(expected, foot.text[sp.start..][0..sp.len]);
+    }
+}
 
 test "body height leaves exactly the chrome rows" {
     try testing.expectEqual(@as(u16, 22), bodyHeight(26, false));

@@ -25,6 +25,15 @@ pub const Glyphs = struct {
     context: []const u8,
     /// Opens and closes a hunk header.
     at: []const u8,
+    /// Border of the `?` popup. Rounded in unicode, because the popup floats
+    /// over the diff and a soft corner reads as "on top of" rather than "cut
+    /// out of" (FEATURES.md 4.2 makes the style config later).
+    box_h: []const u8,
+    box_v: []const u8,
+    box_tl: []const u8,
+    box_tr: []const u8,
+    box_bl: []const u8,
+    box_br: []const u8,
 
     pub const unicode: Glyphs = .{
         .sep = "\u{258f}",
@@ -36,6 +45,12 @@ pub const Glyphs = struct {
         .del = "\u{2212}",
         .context = " ",
         .at = "@@",
+        .box_h = "\u{2500}",
+        .box_v = "\u{2502}",
+        .box_tl = "\u{256d}",
+        .box_tr = "\u{256e}",
+        .box_bl = "\u{2570}",
+        .box_br = "\u{256f}",
     };
 
     pub const ascii: Glyphs = .{
@@ -46,6 +61,12 @@ pub const Glyphs = struct {
         .del = "-",
         .context = " ",
         .at = "@@",
+        .box_h = "-",
+        .box_v = "|",
+        .box_tl = "+",
+        .box_tr = "+",
+        .box_bl = "+",
+        .box_br = "+",
     };
 };
 
@@ -61,6 +82,17 @@ pub const Theme = struct {
     type_name: Style,
     fn_name: Style,
     punct: Style,
+
+    /// The theme's primary. One named slot rather than a colour picked per
+    /// call site, so a config file can move every accented thing at once
+    /// (FEATURES.md 4.1). Used for the key column of the `?` popup, which read
+    /// as commented-out code while it shared `hint`'s grey with `comment`.
+    accent: Style,
+
+    /// The `?` popup's box: the accent hue so the border and the key column
+    /// read as one object, dimmed so it frames the list instead of competing
+    /// with it. A terminal has no opacity; `dim` is the nearest thing to it.
+    popup_border: Style,
 
     /// Chrome.
     rule: Style,
@@ -111,6 +143,9 @@ pub const default: Theme = .{
     .fn_name = .{ .fg = .{ .index = 4 } },
     .punct = .{ .fg = .{ .index = 8 } },
 
+    .accent = .{ .fg = .{ .index = 6 }, .bold = true },
+    .popup_border = .{ .fg = .{ .index = 6 }, .dim = true },
+
     .rule = .{ .fg = .{ .index = 8 } },
     .dim = .{ .fg = .{ .index = 8 } },
     .line_no = .{ .fg = .{ .index = 8 } },
@@ -128,6 +163,25 @@ pub const default: Theme = .{
     .prompt = .{ .bold = true },
     .notice = .{ .fg = .{ .index = 3 } },
 };
+
+test "the accent is legible against the greys it sits next to" {
+    // The popup's key column is drawn in `accent`. While it was `hint` - index
+    // 8, the same grey as `comment`, `punct` and `dim` - the keys read as
+    // commented out rather than as keys.
+    const eq = std.meta.eql;
+    try std.testing.expect(!eq(default.accent, default.comment));
+    try std.testing.expect(!eq(default.accent, default.dim));
+    try std.testing.expect(!eq(default.accent, default.hint));
+    try std.testing.expect(!eq(default.accent, default.text));
+}
+
+test "the popup border is the accent, recessed" {
+    // Same hue as the keys, so the box reads as one object rather than a grey
+    // frame round a cyan list - and dimmer, so it stays a frame.
+    try std.testing.expect(std.meta.eql(default.popup_border.fg, default.accent.fg));
+    try std.testing.expect(default.popup_border.dim);
+    try std.testing.expect(!default.popup_border.bold);
+}
 
 test "every token kind has a style" {
     inline for (@typeInfo(lexer.Kind).@"enum".fields) |f| {
