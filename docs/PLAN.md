@@ -218,7 +218,8 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] `--once` renders a single frame and exits, which is what makes the render path testable without a human at a keyboard
 - [x] Walking skeleton `ui/smoke.zig` deleted, as its own header instructed
 - [x] 5b: `V`, `/ n N`, `e $EDITOR`, `:q`, `Tab` - shipped, with `ui/prompt.zig`, `ui/search.zig` and `ui/editor.zig` as their own modules. Beyond the checklist: a `<Space>` leader defined once as `keymap.leader` (FEATURES.md 4.3), `]f`/`[f` wrap at either end and announce it the way a wrapped search does (SPEC.md 6.2), and `?` freed for the help popup by dropping reverse search (FEATURES.md 4.4)
-- [ ] 5c: file list on `F`, `theme.zig` + bundled themes, `config.zig`, SIGWINCH re-layout preserving cursor and scroll
+- [ ] 5c: file list on `F`, `theme.zig` + bundled themes, `config.zig`, SIGWINCH re-layout preserving cursor and scroll. **SIGWINCH first**: `app.handle`'s `.resize` arm is an empty block, so a resize currently re-lays out nothing - the only outright bug left on the list, and the 5b/5c gate is "flawless at 80 columns in a split tmux pane". Then `config.zig`, before themes and the file list: both sit on top of it, and `app.Nav` is already shaped to be filled from it
+- [ ] `<C-l>` needs a second, chord-free binding. vim-tmux-navigator binds `C-h`/`C-j`/`C-k`/`C-l` at the tmux **root** table and forwards them only to processes matching its vim pattern, which `lgtm` does not match - so refresh is unreachable under a very common config (FEATURES.md 4.4)
 - [x] 5c, part: `]h`/`[h` walk the whole review, crossing files, wrapping only at its far end; `<Space>nh`/`<Space>ph` alias them. Stepping is by hunk *index*, not by row - by row, `[h` could never move, because the cursor lands on `header + 1` and the nearest header above it is the one it just landed on. The policy sits in an `app.Nav` struct (`hunk_crosses_files`, default true) for `config.zig` to fill in (FEATURES.md 4.7b)
 - [x] 5c, part: `?` help popup. A box floating over the diff, sized to content and centred, with a fuzzy filter over both descriptions and rendered keys and an `HJKL` selection moving by row and by column, arrows aliasing it. Shifted rather than `<C-j>`/`<C-k>`, which vim-tmux-navigator takes at the tmux root table before the app sees them. Its own `Mode`, in which the keymap serves navigation only and every other key is filter text, so nothing fires behind it. Rows come from the bindings, so a remapped keymap documents itself; two columns where the width allows, `+N more` rather than a silently truncated list (FEATURES.md 4.4). Grouping by category is not built
 - [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
@@ -308,6 +309,30 @@ certainly free, but almost certainly is not a measurement.
 
 **Gate for 5b/5c:** flawless at 80 columns in a split tmux pane; `--profile`
 shows keystroke-to-frame <= 8 ms, cold start <= 50 ms, re-diff <= 100 ms.
+
+**Verifying the TUI without a human at the keyboard.** `--once` covers the
+render path; anything interactive is driven through a throwaway tmux session:
+
+```
+tmux new-session -d -s lgtm-test-x -x 100 -y 30 './zig-out/bin/lgtm'
+tmux send-keys -t lgtm-test-x '?'
+tmux capture-pane -p  -t lgtm-test-x   # text
+tmux capture-pane -e  -t lgtm-test-x   # text plus SGR, which is the only way
+                                       # to see which row is highlighted
+tmux kill-session -t lgtm-test-x
+```
+
+Three things that have each cost a debugging cycle:
+
+- **`zig build check` and `zig build test` do not reinstall the binary.** Run
+  plain `zig build` before driving `zig-out/bin/lgtm`, or the session under
+  test is the previous build and the change appears not to work.
+- **`send-keys` bypasses tmux's own key table**, so it cannot reproduce a
+  binding the user's tmux swallows. That is why `<C-j>` passed every scripted
+  check and failed in a real pane.
+- **`capture-pane -p` strips colour**, and the popup's selected row and the
+  body's cursor line share a highlight, so grep for the description text rather
+  than for the escape sequence alone.
 
 ## Phase 6: Bridge
 

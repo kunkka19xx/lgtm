@@ -162,7 +162,9 @@ Shifted rather than `<C-j>`/`<C-k>`, deliberately. A Ctrl chord is the one thing
 
 Capitals cost nothing here: inside the popup every other key is filter text, and the filter matches case-insensitively, so `J` was never going to be typed as a query.
 
-The same reasoning applies to `<C-l>` for refresh, which that config also swallows - it wants a second, chord-free binding before v0.1, and the box's own footer is generated from those bindings: remap `<C-j>` and the label follows. Typing filters as you go, over the descriptions **and** the rendered keys, so `space` finds the leader bindings. Matching is a subsequence in two tiers - a run of the query as typed sorts above scattered letters, without which "file" surfaces "gg first line" next to "next file" and the list reads as noise.
+The same reasoning applies to `<C-l>` for refresh, which that config also swallows. **It is still bound only to a Ctrl chord, so under that config it cannot be reached at all** - it wants a second, chord-free binding before v0.1.
+
+Typing filters as you go, over the descriptions **and** the rendered keys, so `space` finds the leader bindings. Matching is a subsequence in two tiers - a run of the query as typed sorts above scattered letters, without which "file" surfaces "gg first line" next to "next file" and the list reads as noise.
 
 Every row is rendered from the bindings by `keymap.writeChords`, so a remapped key moves in the overlay too, and a test refuses a binding that is advertised in the hint strip but explains nothing in `?`. Two columns where the width allows, one where it does not, and the selected row marked the way the body marks its cursor line. The popup's own keys sit along the bottom border with the filter hint, and keys that share a description collapse into one label - four bindings become `H J K L move`, because four rows each saying "move" is the verbose spelling of the same thing. Sideways movement is by a whole column of the grid the last frame actually drew - the renderer writes its layout back, rather than the app guessing at a column height that depends on the pane, the filter and the widest description. A list too tall for the box scrolls a whole column at a time so the columns stay aligned, with `+N more` counting what is below, and "no key matches" when the filter excludes everything - a silently short key list is indistinguishable from a keymap that really is that small.
 
@@ -176,7 +178,7 @@ Every row is rendered from the bindings by `keymap.writeChords`, so a remapped k
 | "ask why" preset | **Move to `a`.** Free, mnemonic, one key. |
 | help popup | **Wins `?`.** Every TUI people already use (lazygit, k9s, btop) binds `?` to help. Discoverability beats a redundant vim binding. |
 
-`F1` and `g?` alias to the same popup.
+`F1` and `g?` are intended to alias the same popup; neither is bound yet.
 
 ### 4.5 Template strings - the sleeper feature
 
