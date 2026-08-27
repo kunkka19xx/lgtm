@@ -21,15 +21,13 @@ pub const max_bytes = 256;
 /// leading character is not part of the text.
 pub const Kind = enum {
     search_forward,
-    search_backward,
     command,
 
     /// Drawn at column 0, and the only thing that tells the user which of the
-    /// three they are in.
+    /// two they are in.
     pub fn prefix(self: Kind) []const u8 {
         return switch (self) {
             .search_forward => "/",
-            .search_backward => "?",
             .command => ":",
         };
     }
@@ -204,6 +202,8 @@ test "a full line drops keystrokes rather than splitting a codepoint" {
 
 test "each kind draws its own prefix" {
     try testing.expectEqualStrings("/", Kind.search_forward.prefix());
-    try testing.expectEqualStrings("?", Kind.search_backward.prefix());
     try testing.expectEqualStrings(":", Kind.command.prefix());
+    // No `?` kind: reverse search was dropped as redundant with `/` plus `N`,
+    // which is what frees the key for the help popup (FEATURES.md 4.4).
+    try testing.expectEqual(@as(usize, 2), @typeInfo(Kind).@"enum".fields.len);
 }

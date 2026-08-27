@@ -29,7 +29,6 @@ pub const Command = enum {
     /// only in visual so that a stray Escape in normal mode stays inert.
     visual_cancel,
     search_forward,
-    search_backward,
     search_next,
     search_prev,
     open_editor,
@@ -110,7 +109,6 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center },
     .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "/ search" },
-    .{ .chords = &.{c('?')}, .command = .search_backward },
     .{ .chords = &.{c('n')}, .command = .search_next },
     .{ .chords = &.{c('N')}, .command = .search_prev },
     .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "V select" },
@@ -269,6 +267,15 @@ test "ctrl is part of the match, not ignored" {
     try testing.expectEqual(Command.page_down, km.feed(ctrlTap('d'), .normal).command);
     // Plain 'd' is not bound, and must not fall through to Ctrl-d.
     try testing.expect(km.feed(tap('d'), .normal) == .none);
+}
+
+test "? is reserved for the help popup, not bound to anything" {
+    // FEATURES.md 4.4: reverse search was dropped as redundant with `/` plus
+    // `N`, so nothing may claim `?` before the help overlay does.
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap('?'), .normal) == .none);
+    km.reset();
+    try testing.expect(km.feed(tap('?'), .visual) == .none);
 }
 
 test "case is significant" {

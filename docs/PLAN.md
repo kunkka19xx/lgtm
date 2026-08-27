@@ -217,7 +217,7 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] Motions `j k`, `Ctrl-d/u`, `gg G`, `]h [h`, `]f [f`, `zz`, `q`
 - [x] `--once` renders a single frame and exits, which is what makes the render path testable without a human at a keyboard
 - [x] Walking skeleton `ui/smoke.zig` deleted, as its own header instructed
-- [ ] 5b: `V`, `/ n N`, `e $EDITOR`, `:q`, `Tab`
+- [x] 5b: `V`, `/ n N`, `e $EDITOR`, `:q`, `Tab` - shipped, with `ui/prompt.zig`, `ui/search.zig` and `ui/editor.zig` as their own modules. Beyond the checklist: a `<Space>` leader defined once as `keymap.leader` (FEATURES.md 4.3), `]f`/`[f` wrap at either end and announce it the way a wrapped search does (SPEC.md 6.2), and `?` freed for the help popup by dropping reverse search (FEATURES.md 4.4)
 - [ ] 5c: file list on `F`, `?` help, `theme.zig` + bundled themes, `config.zig`, SIGWINCH re-layout preserving cursor and scroll
 - [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
 - [ ] `diff_cache`: still unbuilt, and now measurable rather than hypothetical - see below
@@ -282,6 +282,27 @@ distribution build, a narrower panic handler, or raising the budget with a
 reason. Note also that phase 0's 653 KB was measured on macOS arm64, where
 debug info lives in a separate `.dSYM` - so that number and this one were never
 measuring the same thing, and the honest comparison is stripped-to-stripped.
+
+**Decided: `ReleaseSmall` for distribution builds.** Measured on Linux x86-64,
+stripped-to-stripped:
+
+| Build | Stripped |
+|---|---|
+| Debug | 4.15 MB |
+| ReleaseFast | 982 KB |
+| **ReleaseSmall** | **501 KB** |
+
+`ReleaseFast` has drifted to 98% of the 1 MB budget, so phase 0's trigger was
+real. But `ReleaseSmall` comes in at half the budget - under even phase 0's
+653 KB - which settles it without pulling any other lever: `uucode` stays,
+`gwidth` stays, the default panic handler stays, and no `-Dexternal_uucode`
+flag needs to exist. The 185 KB of Unicode tables and the DWARF unwinder are a
+*Debug*-build weight problem, not a distribution one.
+
+What this does **not** settle: the 5a gate table above was measured under
+`ReleaseFast`. Re-run `--profile` under `ReleaseSmall` before publishing those
+numbers. There is 47x headroom on the frame budget so the trade is almost
+certainly free, but almost certainly is not a measurement.
 
 **Gate for 5b/5c:** flawless at 80 columns in a split tmux pane; `--profile`
 shows keystroke-to-frame <= 8 ms, cold start <= 50 ms, re-diff <= 100 ms.

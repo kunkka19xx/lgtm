@@ -111,7 +111,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `h j k l` | move |
 | `Ctrl-d` / `Ctrl-u` | half page |
 | `gg` / `G` | top / bottom |
-| `/` `?` `n` `N` | search within the diff |
+| `/` `n` `N` | search within the diff; `N` runs it backwards |
 | `}` `{` | paragraph |
 | `]h` / `[h` | next / previous hunk |
 | `]f` / `[f` | next / previous file (wraps at either end) |
@@ -121,7 +121,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `e` | open current line in `$EDITOR` |
 | `q` | quit |
 
-No insert mode. No `:` command mode in v1, except `:q`.
+No insert mode. No `:` command mode in v1, except `:q`. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
 
 File stepping wraps: `]f` from the last file lands on the first, `[f` from the first lands on the last, and the wrap is announced in the status line the way a wrapped search is. A review is a ring; stopping dead at the end reads as a dropped keystroke.
 

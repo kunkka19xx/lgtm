@@ -361,7 +361,6 @@ pub const App = struct {
             .visual_toggle => if (self.mode == .visual) self.leaveVisual() else self.enterVisual(),
             .visual_cancel => self.leaveVisual(),
             .search_forward => self.openPrompt(.search_forward),
-            .search_backward => self.openPrompt(.search_backward),
             .search_next => try self.searchStep(self.finder.dir),
             .search_prev => try self.searchStep(self.finder.dir.flip()),
             .command_line => self.openPrompt(.command),
@@ -428,15 +427,15 @@ pub const App = struct {
                 self.closePrompt();
 
                 switch (kind) {
-                    .search_forward, .search_backward => {
+                    .search_forward => {
                         if (line.len == 0) {
                             // Bare Enter repeats the last query, as in vim.
                             try self.searchStep(self.finder.dir);
                         } else {
-                            const dir: search.Direction =
-                                if (kind == .search_forward) .forward else .backward;
-                            self.finder.set(line, dir);
-                            try self.searchStep(dir);
+                            // Every search starts forward; `N` is what runs it
+                            // backwards (FEATURES.md 4.4).
+                            self.finder.set(line, .forward);
+                            try self.searchStep(.forward);
                         }
                     },
                     .command => self.submitCommand(line),
