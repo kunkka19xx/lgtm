@@ -220,3 +220,52 @@ pub fn anchorLine(f: *const diff.FileDiff, h: hunk.Hunk) u32 {
     // the new file is the closest honest answer.
     return h.new_start;
 }
+
+const testing = std.testing;
+
+test "a hunk header names its first changed line, not its first line" {
+    const gpa = testing.allocator;
+    const n = 5;
+    var lines: hunk.DiffLines = .{
+        .kind = try gpa.alloc(hunk.LineKind, n),
+        .old_no = try gpa.alloc(u32, n),
+        .new_no = try gpa.alloc(u32, n),
+        .text = try gpa.alloc([]const u8, n),
+    };
+    defer lines.deinit(gpa);
+    // Three context lines, then the change: the shape that hid `hashHunk`.
+    for (0..n) |i| {
+        lines.kind[i] = if (i == 3) .add else .context;
+        lines.old_no[i] = @intCast(73 + i);
+        lines.new_no[i] = @intCast(73 + i);
+        lines.text[i] = "x";
+    }
+    var f: diff.FileDiff = .{
+        .old_path = "a.zig",
+        .new_path = "a.zig",
+        .status = .modified,
+        .lines = lines,
+    };
+    const h: hunk.Hunk = .{ .old_start = 73, .old_count = 5, .new_start = 73, .new_count = 5, .lo = 0, .hi = 5 };
+    try testing.expectEqual(@as(u32, 76), anchorLine(&f, h));
+}
+
+test "a pure deletion falls back to the hunk position" {
+    const gpa = testing.allocator;
+    var lines: hunk.DiffLines = .{
+        .kind = try gpa.alloc(hunk.LineKind, 2),
+        .old_no = try gpa.alloc(u32, 2),
+        .new_no = try gpa.alloc(u32, 2),
+        .text = try gpa.alloc([]const u8, 2),
+    };
+    defer lines.deinit(gpa);
+    for (0..2) |i| {
+        lines.kind[i] = .del;
+        lines.old_no[i] = @intCast(10 + i);
+        lines.new_no[i] = 0;
+        lines.text[i] = "gone";
+    }
+    var f: diff.FileDiff = .{ .old_path = "a", .new_path = "a", .status = .modified, .lines = lines };
+    const h: hunk.Hunk = .{ .old_start = 10, .old_count = 2, .new_start = 9, .new_count = 0, .lo = 0, .hi = 2 };
+    try testing.expectEqual(@as(u32, 9), anchorLine(&f, h));
+}

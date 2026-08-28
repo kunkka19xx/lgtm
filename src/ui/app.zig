@@ -230,7 +230,7 @@ pub const App = struct {
         return self.review.hunksBefore(self.file_index) + local + 1;
     }
 
-    // -- commands ----------------------------------------------------------
+    // -- commands ------------------------------------------------------------
 
     pub fn run(self: *App, cmd: keymap.Command, body: u16) !void {
         switch (cmd) {
@@ -266,7 +266,7 @@ pub const App = struct {
         self.clampScroll(body);
     }
 
-    // -- visual select -----------------------------------------------------
+    // -- visual select -------------------------------------------------------
 
     fn enterVisual(self: *App) void {
         self.mode = .visual;
@@ -290,7 +290,7 @@ pub const App = struct {
         };
     }
 
-    // -- prompt and search -------------------------------------------------
+    // -- prompt and search ---------------------------------------------------
 
     fn openPrompt(self: *App, kind: prompt_mod.Kind) void {
         self.prompt_return = self.mode;
@@ -431,7 +431,7 @@ pub const App = struct {
         self.notice.set("pattern not found: {s}", .{q});
     }
 
-    // -- $EDITOR -----------------------------------------------------------
+    // -- $EDITOR -------------------------------------------------------------
 
     pub const EditTarget = struct {
         path: []const u8,
@@ -604,11 +604,6 @@ pub const App = struct {
 /// file would be a parse plus an assignment, and this is that assignment.
 pub const Nav = config.Nav;
 
-/// Re-exported: the hunk-header tests below are about what a reader sees, and
-/// they read better next to the rest of the app's behaviour than beside the
-/// cache that computes it.
-pub const anchorLine = review_mod.anchorLine;
-
 /// Scroll offset that keeps `cursor` visible with a margin, given the current
 /// offset and the body height. Pure, so the awkward cases - a body shorter
 /// than twice the margin, a cursor past the end, a resize to one row - are
@@ -661,6 +656,8 @@ test {
     _ = theme_mod;
 }
 
+// -- pure arithmetic: no fixture, no rows, no terminal -------------------
+
 test "scrolling keeps the cursor inside the body with a margin" {
     // Cursor near the top pins the view to the top rather than showing rows
     // that do not exist above it.
@@ -692,52 +689,25 @@ test "degenerate sizes do not underflow" {
     _ = scrollFor(0, 9, 10, 2, 3);
 }
 
-test "a hunk header names its first changed line, not its first line" {
-    const gpa = testing.allocator;
-    const n = 5;
-    var lines: hunk.DiffLines = .{
-        .kind = try gpa.alloc(hunk.LineKind, n),
-        .old_no = try gpa.alloc(u32, n),
-        .new_no = try gpa.alloc(u32, n),
-        .text = try gpa.alloc([]const u8, n),
-    };
-    defer lines.deinit(gpa);
-    // Three context lines, then the change: the shape that hid `hashHunk`.
-    for (0..n) |i| {
-        lines.kind[i] = if (i == 3) .add else .context;
-        lines.old_no[i] = @intCast(73 + i);
-        lines.new_no[i] = @intCast(73 + i);
-        lines.text[i] = "x";
-    }
-    var f: diff.FileDiff = .{
-        .old_path = "a.zig",
-        .new_path = "a.zig",
-        .status = .modified,
-        .lines = lines,
-    };
-    const h: hunk.Hunk = .{ .old_start = 73, .old_count = 5, .new_start = 73, .new_count = 5, .lo = 0, .hi = 5 };
-    try testing.expectEqual(@as(u32, 76), anchorLine(&f, h));
+test "a ring step wraps at both ends and reports only the wrap" {
+    // The shared arithmetic behind `]f`, `]h` and the search's walk across
+    // files. Each of the three had its own copy, and the backward one is the
+    // half that is easy to get wrong: `@rem` leaves it negative.
+    try testing.expectEqual(@as(u32, 1), wrapIndex(1, 3).index);
+    try testing.expect(!wrapIndex(1, 3).wrapped);
+
+    try testing.expectEqual(@as(u32, 0), wrapIndex(3, 3).index);
+    try testing.expect(wrapIndex(3, 3).wrapped);
+
+    try testing.expectEqual(@as(u32, 2), wrapIndex(-1, 3).index);
+    try testing.expect(wrapIndex(-1, 3).wrapped);
+
+    // An empty ring has nowhere to step to, and must not divide by zero.
+    try testing.expectEqual(@as(u32, 0), wrapIndex(-1, 0).index);
+    try testing.expect(!wrapIndex(-1, 0).wrapped);
 }
 
-test "a pure deletion falls back to the hunk position" {
-    const gpa = testing.allocator;
-    var lines: hunk.DiffLines = .{
-        .kind = try gpa.alloc(hunk.LineKind, 2),
-        .old_no = try gpa.alloc(u32, 2),
-        .new_no = try gpa.alloc(u32, 2),
-        .text = try gpa.alloc([]const u8, 2),
-    };
-    defer lines.deinit(gpa);
-    for (0..2) |i| {
-        lines.kind[i] = .del;
-        lines.old_no[i] = @intCast(10 + i);
-        lines.new_no[i] = 0;
-        lines.text[i] = "gone";
-    }
-    var f: diff.FileDiff = .{ .old_path = "a", .new_path = "a", .status = .modified, .lines = lines };
-    const h: hunk.Hunk = .{ .old_start = 10, .old_count = 2, .new_start = 9, .new_count = 0, .lo = 0, .hi = 2 };
-    try testing.expectEqual(@as(u32, 9), anchorLine(&f, h));
-}
+// -- the fixture ---------------------------------------------------------
 
 /// A two-file review built in memory: enough for the command layer without a
 /// repository, a terminal or a subprocess. The lines are chosen so each token
@@ -772,7 +742,19 @@ const Fixture = struct {
         return l;
     }
 
-    fn init(gpa: Allocator, deleted_at: ?usize) !*Fixture {
+    /// The ordinary review: two files, three lines each, nothing deleted.
+    fn init(gpa: Allocator) !*Fixture {
+        return build(gpa, null);
+    }
+
+    /// The same, with one line of the first file deleted - the case `e` and
+    /// the bridge both have to handle, because a deleted line has no line in
+    /// the new file to point at.
+    fn withDeletion(gpa: Allocator, at: usize) !*Fixture {
+        return build(gpa, at);
+    }
+
+    fn build(gpa: Allocator, deleted_at: ?usize) !*Fixture {
         const self = try gpa.create(Fixture);
         self.* = .{
             .threaded = .init(gpa, .{}),
@@ -823,149 +805,168 @@ const Fixture = struct {
         gpa.destroy(self);
     }
 
-    fn key(self: *Fixture, cp: u21) !void {
-        try self.app.handle(.{ .key = .{ .codepoint = cp, .mods = .{} } }, 22);
+    /// A sequence, spelled the way the `?` popup prints it and the way a
+    /// config file writes it: `press("]f")`, `press("<Space>nf")`,
+    /// `press("<C-d>")`. Going through the same parser as `[keys]` is the
+    /// point - a test and a user's config cannot disagree about what `<Esc>`
+    /// means.
+    fn press(self: *Fixture, sequence: []const u8) !void {
+        var buf: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
+        for (try keytext.parseChords(sequence, &buf)) |ch| {
+            try self.app.handle(.{ .key = .{
+                .codepoint = ch.cp,
+                .mods = .{ .ctrl = ch.ctrl },
+            } }, body_rows);
+        }
     }
 
-    fn ctrlKey(self: *Fixture, cp: u21) !void {
-        try self.app.handle(.{ .key = .{ .codepoint = cp, .mods = .{ .ctrl = true } } }, 22);
-    }
-
+    /// Literal text, for a prompt that is collecting some. Spelled out rather
+    /// than routed through `press`, because inside a prompt these are letters
+    /// and not keys - which is the distinction half of these tests are about.
     fn typeIn(self: *Fixture, text: []const u8) !void {
-        for (text) |ch| try self.key(ch);
+        for (text) |ch| {
+            try self.app.handle(.{ .key = .{ .codepoint = ch, .mods = .{} } }, body_rows);
+        }
+    }
+
+    fn expectCursor(self: *Fixture, row: u32) !void {
+        try testing.expectEqual(row, self.app.cursor);
+    }
+
+    fn expectFile(self: *Fixture, index: u32) !void {
+        try testing.expectEqual(index, self.app.file_index);
+    }
+
+    fn expectMode(self: *Fixture, mode: event.Mode) !void {
+        try testing.expectEqual(mode, self.app.mode);
+    }
+
+    /// The notice says what it should, without pinning the exact wording: the
+    /// assertion is that the reader was told, not how it was phrased.
+    fn expectNotice(self: *Fixture, needle: []const u8) !void {
+        const text = self.app.notice.text();
+        if (std.mem.indexOf(u8, text, needle) == null) {
+            std.debug.print("notice was \"{s}\", expected it to mention \"{s}\"\n", .{ text, needle });
+            return error.TestExpectedNotice;
+        }
+    }
+
+    fn expectNoNotice(self: *Fixture) !void {
+        try testing.expectEqual(@as(usize, 0), self.app.notice.text().len);
     }
 };
 
+/// The body height every fixture test drives with: a 26-row pane, less chrome.
+const body_rows: u16 = 22;
+
+// -- visual select -------------------------------------------------------
+
 test "V anchors a selection and motions extend it in either direction" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // Rows: 0 header, 1..3 lines. The cursor opens on the first line.
-    try testing.expectEqual(@as(u32, 1), fx.app.cursor);
+    try fx.expectCursor(1);
     try testing.expect(fx.app.selection() == null);
 
-    try fx.key('V');
-    try testing.expectEqual(event.Mode.visual, fx.app.mode);
+    try fx.press("V");
+    try fx.expectMode(.visual);
     // A fresh selection is one row, not zero.
     try testing.expectEqual(@as(u32, 1), fx.app.selection().?.count());
 
-    try fx.key('j');
-    try fx.key('j');
+    try fx.press("j");
+    try fx.press("j");
     const down = fx.app.selection().?;
     try testing.expectEqual(@as(u32, 1), down.lo);
     try testing.expectEqual(@as(u32, 3), down.hi);
 
     // Selecting upwards puts the anchor below the cursor; the range must come
     // back normalised rather than inverted.
-    try fx.key('k');
-    try fx.key('k');
-    try fx.key('k');
+    try fx.press("k");
+    try fx.press("k");
+    try fx.press("k");
     const up = fx.app.selection().?;
     try testing.expect(up.lo <= up.hi);
     try testing.expectEqual(@as(u32, 1), up.hi);
 
-    try fx.key(event.code.escape);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
     try testing.expect(fx.app.selection() == null);
 }
 
 test "moving to another file drops the selection instead of re-pointing it" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('V');
-    try fx.key('j');
+    try fx.press("V");
+    try fx.press("j");
     try testing.expect(fx.app.selection() != null);
 
     // The rows the anchor described no longer exist. Keeping the indexes would
     // silently select whatever now sits at them.
-    try fx.key(']');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    try fx.press("]f");
+    try fx.expectFile(1);
     try testing.expect(fx.app.selection() == null);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try fx.expectMode(.normal);
 }
 
-test "search crosses into the next file and lands on the matching row" {
-    var fx = try Fixture.init(testing.allocator, null);
-    defer fx.deinit();
-
-    try fx.key('/');
-    try testing.expectEqual(event.Mode.command, fx.app.mode);
-    // Inside the prompt these are letters, not motions: `j` must not move.
-    try fx.typeIn("token");
-    try testing.expectEqual(@as(u32, 1), fx.app.cursor);
-    try fx.key(event.code.enter);
-
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
-    // Row 2 of b.zig: header, line 0, line 1.
-    try testing.expectEqual(@as(u32, 2), fx.app.cursor);
-    // Reaching the next file in order is not a wrap.
-    try testing.expect(!fx.app.finder.wrapped);
-}
+// -- motions across the review -------------------------------------------
 
 test "hunk stepping crosses into the next file by default" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
     try testing.expect(fx.app.nav.hunk_crosses_files);
     try testing.expect(fx.app.files().len > 1);
 
     // To the last hunk of the first file.
     while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < fx.app.rows.hunk_rows.len) {
-        try fx.key(']');
-        try fx.key('h');
+        try fx.press("]h");
     }
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try fx.expectFile(0);
 
     // One more leaves the file rather than looping inside it.
-    try fx.key(']');
-    try fx.key('h');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    try fx.press("]h");
+    try fx.expectFile(1);
     try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
     // Crossing a boundary mid-review is not a wrap and must not claim to be.
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped") == null);
+    try fx.expectNoNotice();
 
     // Backwards over the same boundary returns to the *last* hunk of file 0.
-    try fx.key('[');
-    try fx.key('h');
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try fx.press("[h");
+    try fx.expectFile(0);
     const hs = fx.app.rows.hunk_rows;
     try testing.expectEqual(hs[hs.len - 1] + 1, fx.app.cursor);
 }
 
 test "the whole review wraps at its far end, and says so" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // `[h` from the very first hunk of the first file has nowhere earlier to
     // go, so it wraps round to the last file - which `stepFile` announces.
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try fx.key('[');
-    try fx.key('h');
+    try fx.expectFile(0);
+    try fx.press("[h");
     try testing.expectEqual(@as(u32, @intCast(fx.app.files().len - 1)), fx.app.file_index);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to last file") != null);
+    try fx.expectNotice("wrapped to last file");
 }
 
 test "hunk stepping stays in the file when config says so" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
     // The flag a config file will set once `config.zig` lands.
     fx.app.nav.hunk_crosses_files = false;
 
     const in_file = fx.app.rows.hunk_rows.len;
     while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < in_file) {
-        try fx.key(']');
-        try fx.key('h');
+        try fx.press("]h");
     }
 
-    try fx.key(']');
-    try fx.key('h');
+    try fx.press("]h");
     // Same file, back at its first hunk.
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
+    try fx.expectFile(0);
     try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
     if (in_file > 1) {
-        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to first hunk") != null);
+        try fx.expectNotice("wrapped to first hunk");
     }
 }
 
@@ -974,237 +975,184 @@ test "prev hunk steps back a hunk rather than to the top of this one" {
     // The cursor always lands on `header + 1`, and the nearest header strictly
     // above that row is the one it just landed on, so `[h` returned to where
     // it already was - and the backward wrap could never be reached.
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     const hunks = fx.app.rows.hunk_rows.len;
     if (hunks < 2) return; // nothing to step between
 
-    try fx.key(']');
-    try fx.key('h');
+    try fx.press("]h");
     const second = fx.app.cursor;
     try testing.expectEqual(fx.app.rows.hunk_rows[1] + 1, second);
 
-    try fx.key('[');
-    try fx.key('h');
+    try fx.press("[h");
     try testing.expect(fx.app.cursor != second);
     try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
 }
 
-test "the leader reaches the hunk motions too" {
-    var fx = try Fixture.init(testing.allocator, null);
+test "file stepping wraps at both ends, and says so" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Two files in the fixture, so one step leaves us on the last. Landing on
+    // the last file is not itself a wrap.
+    try fx.press("]f");
+    try fx.expectFile(1);
+    try fx.expectNoNotice();
+
+    // A review is a ring: stopping dead at either end reads as a dropped
+    // keystroke, and moving further than one step has to be announced,
+    // because nothing else on screen says the file changed twice.
+    try fx.press("]f");
+    try fx.expectFile(0);
+    try fx.expectNotice("wrapped to first");
+
+    try fx.press("[f");
+    try fx.expectFile(1);
+    try fx.expectNotice("wrapped to last");
+}
+
+test "the leader forms reach the same commands as the bracket forms" {
+    // `<Space>nh` and `]h` are two rows in the table pointing at one command,
+    // which is what lets a remapping user rebind either independently. The
+    // assertion is that they land in the same place, not merely that they do
+    // something.
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     const start = fx.app.cursor;
-    try fx.key(' ');
-    try fx.key('n');
-    try fx.key('h');
-    const after_bracket = fx.app.cursor;
+    for ([_][2][]const u8{
+        .{ "<Space>nh", "]h" },
+        .{ "<Space>ph", "[h" },
+    }) |pair| {
+        fx.app.cursor = start;
+        try fx.press(pair[0]);
+        const by_leader = fx.app.cursor;
 
-    // Same command as `]h`, so the same landing row.
-    fx.app.cursor = start;
-    try fx.key(']');
-    try fx.key('h');
-    try testing.expectEqual(after_bracket, fx.app.cursor);
+        fx.app.cursor = start;
+        try fx.press(pair[1]);
+        try testing.expectEqual(by_leader, fx.app.cursor);
+    }
 
-    fx.app.cursor = start;
-    try fx.key(' ');
-    try fx.key('p');
-    try fx.key('h');
-    const leader_prev = fx.app.cursor;
-    fx.app.cursor = start;
-    try fx.key('[');
-    try fx.key('h');
-    try testing.expectEqual(leader_prev, fx.app.cursor);
+    // The file pair moves a file rather than a row, so it is checked by where
+    // it lands rather than against its bracket form.
+    try fx.press("<Space>nf");
+    try fx.expectFile(1);
+    try fx.press("<Space>pf");
+    try fx.expectFile(0);
 }
 
-test "stepping past the last file wraps to the first and says so" {
-    var fx = try Fixture.init(testing.allocator, null);
-    defer fx.deinit();
-
-    // Two files in the fixture, so one step leaves us on the last.
-    try fx.key(']');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
-    // Landing on the last file is not itself a wrap.
-    try testing.expectEqual(@as(usize, 0), fx.app.notice.len);
-
-    try fx.key(']');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to first") != null);
-}
-
-test "stepping back from the first file wraps to the last" {
-    var fx = try Fixture.init(testing.allocator, null);
-    defer fx.deinit();
-
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try fx.key('[');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped to last") != null);
-}
-
-test "the leader form steps files like the bracket form" {
-    var fx = try Fixture.init(testing.allocator, null);
-    defer fx.deinit();
-
-    try fx.key(' ');
-    try fx.key('n');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
-
-    try fx.key(' ');
-    try fx.key('p');
-    try fx.key('f');
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-}
+// -- the `?` overlay, as the app drives it -------------------------------
 
 test "? opens the overlay and returns to the mode it came from" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('?');
-    try testing.expectEqual(event.Mode.help, fx.app.mode);
-    try fx.key(event.code.escape);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try fx.press("?");
+    try fx.expectMode(.help);
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
 
     // Opened from visual, it goes back to visual rather than dumping the
     // selection the user was building.
-    try fx.key('V');
+    try fx.press("V");
     try testing.expect(fx.app.selection() != null);
-    try fx.key('?');
-    try testing.expectEqual(event.Mode.help, fx.app.mode);
-    try fx.key(event.code.escape);
-    try testing.expectEqual(event.Mode.visual, fx.app.mode);
+    try fx.press("?");
+    try fx.expectMode(.help);
+    try fx.press("<Esc>");
+    try fx.expectMode(.visual);
     try testing.expect(fx.app.selection() != null);
 }
 
 test "keys under the overlay do nothing while it is up" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('j');
+    try fx.press("j");
     const moved = fx.app.cursor;
     try testing.expect(moved > 0);
 
-    try fx.key('?');
-    try fx.key('j');
-    try fx.key('j');
+    try fx.press("?");
+    try fx.press("j");
+    try fx.press("j");
     try testing.expectEqual(moved, fx.app.cursor);
     // Those keys went into the filter instead, which is what makes the popup
     // searchable - and `q` types rather than quitting the app.
-    try fx.key('q');
+    try fx.press("q");
     try testing.expect(!fx.app.quit);
     try testing.expectEqualStrings("jjq", fx.app.help.filter.text());
 
-    try fx.key(event.code.escape);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
     // Closing clears the query, so `?` never reopens onto a stale filter.
     try testing.expectEqual(@as(usize, 0), fx.app.help.filter.text().len);
 }
 
-test "the popup selection moves with the arrows, and stops at both ends" {
-    var fx = try Fixture.init(testing.allocator, null);
+test "every key the popup advertises reaches its command" {
+    // What is being tested here is the wiring: that these keys are bindings
+    // live in `.help` and nowhere else. Where the selection lands - clamped at
+    // both ends, reset by a narrowing filter, a column at a time - belongs to
+    // `help.zig` and is tested there, against the rules rather than through
+    // three layers of dispatch.
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('?');
+    try fx.press("?");
     try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
-    // Already at the top: Up must not wrap round to the bottom, because a list
-    // you can scroll off the end of is one you can lose your place in.
-    try fx.key(event.code.up);
-    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-
-    try fx.key(event.code.down);
-    try fx.key(event.code.down);
-    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
-    try fx.key(event.code.up);
-    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
-    // `J`/`K` are the advertised pair and reach the same commands. A capital
-    // letter is navigation here, never filter text - which costs nothing,
-    // because the filter matches case-insensitively.
-    try fx.key('J');
-    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
-    try fx.key('K');
-    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
+    // Down, and the two aliases for it. `J` is navigation rather than filter
+    // text, which costs nothing because the filter matches case-insensitively.
+    for ([_][]const u8{ "<Down>", "J", "<C-n>" }, 1..) |k, want| {
+        try fx.press(k);
+        try testing.expectEqual(want, fx.app.help.index);
+    }
     try testing.expectEqual(@as(usize, 0), fx.app.help.filter.text().len);
-    // `<C-n>`/`<C-p>` reach the same commands.
-    try fx.ctrlKey('n');
-    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
-    try fx.ctrlKey('p');
-    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
 
-    // And it cannot walk past the last row.
-    const n = keytext.helpCount(fx.app.km.bindings, .normal, "");
-    var i: usize = 0;
-    while (i < n + 5) : (i += 1) try fx.key(event.code.down);
-    try testing.expectEqual(n - 1, fx.app.help.index);
-}
+    // And up.
+    for ([_][]const u8{ "<Up>", "K", "<C-p>" }, 0..) |k, i| {
+        try fx.press(k);
+        try testing.expectEqual(2 - i, fx.app.help.index);
+    }
 
-test "left and right move by a whole column of the grid the frame drew" {
-    var fx = try Fixture.init(testing.allocator, null);
-    defer fx.deinit();
-
-    try fx.key('?');
-    // Nothing has rendered in this fixture, so the layout is the one-column
-    // default: sideways is then the same as a single step, never a jump into
-    // an index the list does not have.
-    try fx.key(event.code.right);
-    try testing.expectEqual(fx.app.help.layout.per, fx.app.help.index);
-
-    // With the grid a real frame produces, one column is a real jump.
+    // Sideways moves by a whole column of the grid the last frame drew, which
+    // the app knows only because the renderer wrote it back.
     fx.app.help.layout = .{ .cols = 2, .per = 11 };
     fx.app.help.index = 0;
-    try fx.key(event.code.right);
-    try testing.expectEqual(@as(usize, 11), fx.app.help.index);
-    try fx.key('H');
-    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-    try fx.key('L');
-    try testing.expectEqual(@as(usize, 11), fx.app.help.index);
-    try fx.key(event.code.left);
-    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-
-    // Left from the first column stays put rather than wrapping.
-    try fx.key(event.code.left);
-    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-
-    // Right from the last column clamps to the final row instead of running
-    // off the end of the list.
-    const n = keytext.helpCount(fx.app.km.bindings, .normal, "");
-    fx.app.help.index = n - 1;
-    try fx.key(event.code.right);
-    try testing.expectEqual(n - 1, fx.app.help.index);
+    for ([_][]const u8{ "<Right>", "L" }) |k| {
+        fx.app.help.index = 0;
+        try fx.press(k);
+        try testing.expectEqual(@as(usize, 11), fx.app.help.index);
+    }
+    for ([_][]const u8{ "<Left>", "H" }) |k| {
+        fx.app.help.index = 11;
+        try fx.press(k);
+        try testing.expectEqual(@as(usize, 0), fx.app.help.index);
+    }
 }
 
-test "narrowing the filter puts the selection back at the top" {
-    var fx = try Fixture.init(testing.allocator, null);
+test "typing narrows the list the popup is showing" {
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('?');
-    try fx.key(event.code.down);
-    try fx.key(event.code.down);
+    try fx.press("?");
+    const all = keytext.helpCount(fx.app.km.bindings, .normal, "");
+    try fx.press("<Down>");
     try testing.expect(fx.app.help.index > 0);
 
-    // The list under the selection just changed; index 2 of the old list is a
-    // different row than index 2 of the new one.
-    try fx.key('f');
+    // The keys went into the filter rather than to dispatch, so the list is
+    // shorter and the selection is back at the top of the new one.
+    try fx.typeIn("file");
+    const narrowed = keytext.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text());
+    try testing.expect(narrowed > 0);
+    try testing.expect(narrowed < all);
     try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-
-    // A filter that matches nothing leaves nothing to select.
-    try fx.key('z');
-    try fx.key('z');
-    try fx.key(event.code.down);
-    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-    try testing.expectEqual(@as(usize, 0), keytext.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text()));
 }
 
 test "the popup is available when there is nothing to review" {
     // An empty review is drawn from a different branch than a diff is, and it
     // is exactly when a reader is most likely to want the key list: there is
     // nothing on screen to learn the keys from.
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -1217,109 +1165,132 @@ test "the popup is available when there is nothing to review" {
     fx.app.file_index = 99;
     try testing.expect(fx.app.view() == null);
 
-    try fx.key('?');
+    try fx.press("?");
     const hv = (try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena)).?;
     try testing.expect(hv.entries.len > 0);
     try testing.expect(hv.keys.len > 0);
 
     // And it still closes.
-    try fx.key(event.code.escape);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
     try testing.expect(try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena) == null);
 }
 
+// -- search and the prompt -----------------------------------------------
+
+test "search crosses into the next file and lands on the matching row" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("/");
+    try fx.expectMode(.command);
+    // Inside the prompt these are letters, not motions: `j` must not move.
+    try fx.typeIn("token");
+    try fx.expectCursor(1);
+    try fx.press("<CR>");
+
+    try fx.expectMode(.normal);
+    try fx.expectFile(1);
+    // Row 2 of b.zig: header, line 0, line 1.
+    try fx.expectCursor(2);
+    // Reaching the next file in order is not a wrap.
+    try testing.expect(!fx.app.finder.wrapped);
+}
+
 test "search wraps past the end of the review and says so" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     fx.app.file_index = 1;
     try fx.app.rebuildRows(.reset);
 
-    try fx.key('/');
+    try fx.press("/");
     try fx.typeIn("alpha");
-    try fx.key(event.code.enter);
+    try fx.press("<CR>");
 
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try testing.expectEqual(@as(u32, 1), fx.app.cursor);
+    try fx.expectFile(0);
+    try fx.expectCursor(1);
     try testing.expect(fx.app.finder.wrapped);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "wrapped") != null);
+    try fx.expectNotice("wrapped");
 }
 
 test "n repeats the search and N reverses it" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // `const` appears once per file, so stepping is observable.
-    try fx.key('/');
+    try fx.press("/");
     try fx.typeIn("const");
-    try fx.key(event.code.enter);
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try testing.expectEqual(@as(u32, 2), fx.app.cursor);
+    try fx.press("<CR>");
+    try fx.expectFile(0);
+    try fx.expectCursor(2);
 
-    try fx.key('n');
-    try testing.expectEqual(@as(u32, 1), fx.app.file_index);
+    try fx.press("n");
+    try fx.expectFile(1);
 
-    try fx.key('N');
-    try testing.expectEqual(@as(u32, 0), fx.app.file_index);
-    try testing.expectEqual(@as(u32, 2), fx.app.cursor);
+    try fx.press("N");
+    try fx.expectFile(0);
+    try fx.expectCursor(2);
 }
 
 test "a search that finds nothing leaves the cursor put and says why" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     const before = fx.app.cursor;
-    try fx.key('/');
+    try fx.press("/");
     try fx.typeIn("nowhere");
-    try fx.key(event.code.enter);
+    try fx.press("<CR>");
 
     try testing.expectEqual(before, fx.app.cursor);
     try testing.expect(fx.app.finder.failed);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not found") != null);
+    try fx.expectNotice("not found");
 }
 
 test "escaping a prompt returns to the mode it was opened from" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key('V');
-    try fx.key('/');
+    try fx.press("V");
+    try fx.press("/");
     try fx.typeIn("x");
-    try fx.key(event.code.escape);
+    try fx.press("<Esc>");
     // A search abandoned mid-selection must not also abandon the selection.
-    try testing.expectEqual(event.Mode.visual, fx.app.mode);
+    try fx.expectMode(.visual);
     try testing.expect(fx.app.selection() != null);
 }
 
 test ":q quits and anything else reports itself rather than vanishing" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key(':');
+    try fx.press(":");
     try fx.typeIn("wq");
-    try fx.key(event.code.enter);
+    try fx.press("<CR>");
     try testing.expect(!fx.app.quit);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), ":wq") != null);
+    try fx.expectNotice(":wq");
 
-    try fx.key(':');
+    try fx.press(":");
     try fx.typeIn("q");
-    try fx.key(event.code.enter);
+    try fx.press("<CR>");
     try testing.expect(fx.app.quit);
 }
 
+// -- zen, $EDITOR and notices --------------------------------------------
+
 test "Tab toggles the chrome away and back" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     try testing.expect(!fx.app.zen);
-    try fx.key(event.code.tab);
+    try fx.press("<Tab>");
     try testing.expect(fx.app.zen);
-    try fx.key(event.code.tab);
+    try fx.press("<Tab>");
     try testing.expect(!fx.app.zen);
 }
 
 test "e targets the new-file line, and the hunk position on a deleted one" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // Cursor on the first line of a.zig, which is new-file line 1.
@@ -1331,7 +1302,7 @@ test "e targets the new-file line, and the hunk position on a deleted one" {
     fx.app.cursor = 0;
     try testing.expectEqual(@as(u32, 0), fx.app.editTarget().?.line);
 
-    var del = try Fixture.init(testing.allocator, 1);
+    var del = try Fixture.withDeletion(testing.allocator, 1);
     defer del.deinit();
     del.app.cursor = 2; // the deleted line
     // It has no line in the file on disk; the hunk's position is where the
@@ -1340,25 +1311,25 @@ test "e targets the new-file line, and the hunk position on a deleted one" {
 }
 
 test "e sets a request rather than acting, because the loop owns the terminal" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     try testing.expect(!fx.app.want_editor);
-    try fx.key('e');
+    try fx.press("e");
     try testing.expect(fx.app.want_editor);
 }
 
 test "a notice lasts exactly one keystroke" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.key(':');
+    try fx.press(":");
     try fx.typeIn("nope");
-    try fx.key(event.code.enter);
+    try fx.press("<CR>");
     try testing.expect(fx.app.notice.text().len > 0);
 
-    try fx.key('j');
-    try testing.expectEqual(@as(usize, 0), fx.app.notice.text().len);
+    try fx.press("j");
+    try fx.expectNoNotice();
 }
 
 test "a notice too long to format is truncated rather than dropped" {
@@ -1370,8 +1341,10 @@ test "a notice too long to format is truncated rather than dropped" {
     try testing.expect(n.text().len <= n.buf.len);
 }
 
+// -- a new diff, and a new pane size -------------------------------------
+
 test "keeping the row across a re-diff never parks the cursor on chrome" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // Row 0 is the hunk header. A rebuild that keeps the row must not leave
@@ -1379,17 +1352,17 @@ test "keeping the row across a re-diff never parks the cursor on chrome" {
     // previous position and the kept row is 0.
     fx.app.cursor = 0;
     try fx.app.rebuildRows(.row);
-    try testing.expectEqual(@as(u32, 1), fx.app.cursor);
+    try fx.expectCursor(1);
     try testing.expect(fx.app.rows.lineAt(fx.app.cursor) != null);
 
     // A position further down is left exactly where it was.
     fx.app.cursor = 3;
     try fx.app.rebuildRows(.row);
-    try testing.expectEqual(@as(u32, 3), fx.app.cursor);
+    try fx.expectCursor(3);
 }
 
 test "a resize re-lays out rather than leaving the old scroll behind" {
-    var fx = try Fixture.init(testing.allocator, null);
+    var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // Four rows: header plus three lines. A pane that was tall enough to have
@@ -1410,23 +1383,5 @@ test "a resize re-lays out rather than leaving the old scroll behind" {
 
     // The cursor itself is the reader's place in the file and a resize is not
     // a motion: it does not move.
-    try testing.expectEqual(@as(u32, 3), fx.app.cursor);
-}
-
-test "a ring step wraps at both ends and reports only the wrap" {
-    // The shared arithmetic behind `]f`, `]h` and the search's walk across
-    // files. Each of the three had its own copy, and the backward one is the
-    // half that is easy to get wrong: `@rem` leaves it negative.
-    try testing.expectEqual(@as(u32, 1), wrapIndex(1, 3).index);
-    try testing.expect(!wrapIndex(1, 3).wrapped);
-
-    try testing.expectEqual(@as(u32, 0), wrapIndex(3, 3).index);
-    try testing.expect(wrapIndex(3, 3).wrapped);
-
-    try testing.expectEqual(@as(u32, 2), wrapIndex(-1, 3).index);
-    try testing.expect(wrapIndex(-1, 3).wrapped);
-
-    // An empty ring has nowhere to step to, and must not divide by zero.
-    try testing.expectEqual(@as(u32, 0), wrapIndex(-1, 0).index);
-    try testing.expect(!wrapIndex(-1, 0).wrapped);
+    try fx.expectCursor(3);
 }
