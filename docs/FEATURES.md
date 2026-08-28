@@ -115,16 +115,20 @@ Cost is low, because the rendering, lexing, and navigation already exist. What i
 
 Delight is real value, and for a keyboard tool it is also *retention*. But it is also the classic way a side project dies - so the rule here is: **customisation that costs a config file and no architecture is cheap; anything requiring a plugin runtime is not.**
 
-### 4.1 Themes
+### 4.1 Themes - shipped, bar live reload
 
-Share `look`'s themes so the two tools look like siblings - Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa.
+Share `look`'s themes so the two tools look like siblings - Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa. All six ship, alongside `terminal`, which is the default.
+
+**A theme is a `Palette` - a dozen colours - plus one shared mapping onto the semantic slots.** That mapping is written once, in `fromPalette`, which is what stops seven themes from becoming seven chances to get "the accent, recessed" subtly different, and makes adding a slot one edit rather than seven. The consistency is asserted rather than trusted: every bundled theme is checked for an accent distinguishable from its own greys, an add sign distinguishable from its delete sign, and text that survives being drawn on its cursor line.
+
+Rosé Pine is the case that justified the structure. It has no green, and picking one by eye is how a port ends up with an unreadable add sign, so it uses the palette's own published ANSI mapping instead.
 
 Beyond that:
-- **Custom themes in TOML.** Every semantic slot nameable: `added`, `removed`, `context`, `hunk_header`, `note_marker`, `risk_high`, `stale`, `line_number`, `cursor_line`, `accent`.
+- **Custom themes in TOML.** Every semantic slot nameable: `added`, `removed`, `context`, `hunk_header`, `note_marker`, `risk_high`, `stale`, `line_number`, `cursor_line`, `accent`. **Shipped**, over the top of a named theme: `[theme] name = "gruvbox"` then any slot. The slot names are the renderer's own, with aliases for the ones this list names differently; the slots for features that do not exist yet (`note_marker`, `risk_high`, `stale`) are reported as unknown rather than accepted and ignored. A style is a colour plus attributes in any order - `"#a6e3a1 bold"`, `"#1e1e2e on 3 underline"` - because a config file is typed by hand.
 - **One named primary.** `accent` is the theme's primary colour, set once rather than picked per call site - the `?` popup's key column is the first thing drawn in it, and `popup_border` is the same hue dimmed, so the box and its keys read as one object. A terminal has no opacity, so `dim` is what stands in for it; terminals that ignore the attribute simply get the undimmed hue, which is still correct. It exists because that column shared `hint`'s grey with `comment`, `punct` and `dim`, so the keys read as commented-out code instead of as keys. Any slot that ends up grey next to other greys is a bug in the palette, not in the drawing.
-- **Live reload.** Watching files is already core infrastructure - point it at the theme file too. Editing a theme and watching it apply instantly is genuinely fun, and costs almost nothing given the watcher exists.
-- **`lgtm --theme-preview`** renders a sample diff in every bundled theme so people can choose without restarting.
-- **Terminal-native mode** - use only the 16 ANSI colours, inheriting the user's terminal palette. A surprising number of people want exactly this.
+- **Live reload.** Watching files is already core infrastructure - point it at the theme file too. Editing a theme and watching it apply instantly is genuinely fun, and costs almost nothing given the watcher exists. Not built: the watcher follows the git worktree, and pointing it at a file outside the repo is a change to what it watches rather than a change to the theme.
+- **`lgtm --theme-preview`** renders a sample diff in every bundled theme so people can choose without restarting. **Shipped**, and `--theme <name>` tries one for a single run. It writes SGR straight to stdout rather than going through vaxis: it runs before any terminal setup, and a preview that needed the alt screen would have to tear it down once per theme. That encoder is the only hand-written escape sequence in the codebase.
+- **Terminal-native mode** - use only the 16 ANSI colours, inheriting the user's terminal palette. A surprising number of people want exactly this. **Shipped, and it is the default**: `terminal` is what `lgtm` opens in, so the tool arrives already matching the terminal around it and needs no configuration at all. It steps outside the 16 in exactly one place, the cursor-line background, which the 16 do not contain.
 
 ### 4.2 Fonts - an honest correction
 

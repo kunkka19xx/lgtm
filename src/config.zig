@@ -15,15 +15,18 @@
 // changing a single call site, because nothing outside this file knows the
 // format.
 //
-// No vaxis in here, which is what keeps a config test from needing a terminal:
-// `ui.icons` resolves to a named glyph set that `ui/app.zig` maps to
-// `theme.Glyphs`, rather than this file importing the theme.
+// `ui/theme.zig` is imported for `[theme]`, and it is a compile-time
+// dependency on vaxis's `Style` and `Color` types only - no terminal is
+// involved, so every rule below is still a unit test. `ui.icons` stays a named
+// enum resolved by `ui/app.zig`, because a glyph set is not a colour and the
+// mapping belongs where the drawing happens.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
+const theme = @import("ui/theme.zig");
 
 /// A config file larger than this is not a config file. Reading it is the one
 /// thing on the cold-start path that a user can make arbitrarily slow.
@@ -54,6 +57,10 @@ pub const Nav = struct {
 pub const Config = struct {
     nav: Nav = .{},
     ui: Ui = .{},
+    /// The resolved theme: a bundled palette, then whatever slots the file
+    /// overrode. Resolved here rather than carried as a name, so the app is
+    /// handed styles and never has to know a theme could have failed to load.
+    theme: theme.Theme = theme.default,
     /// The keymap after any `[keys]` overrides. Points straight at the
     /// defaults until something overrides them, so the ordinary run - no
     /// config file, or one that does not touch keys - allocates nothing.
@@ -68,7 +75,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, keys };
+const Section = enum { nav, ui, keys, theme };
 
 const Value = union(enum) {
     string: []const u8,
@@ -199,6 +206,7 @@ pub const Loader = struct {
             // `[keys]` keys are command names, so there is no fixed list to
             // check against - the `Command` enum is the list.
             .keys => self.applyKeys(src, line, key, value),
+            .theme => self.applyTheme(src, line, key, value),
         }
     }
 
@@ -293,6 +301,29 @@ pub const Loader = struct {
             return;
         }
         self.cfg.keys = next.items;
+    }
+
+    /// `name` picks a bundled palette; every other key is a slot, overriding
+    /// whatever the palette put there. In file order, so `name` after a slot
+    /// override discards it - which is the only reading that stays
+    /// predictable when two files each set both.
+    fn applyTheme(self: *Loader, src: []const u8, line: u32, key: []const u8, value: Value) void {
+        const spec = self.wantString(src, line, key, value) orelse return;
+        if (std.mem.eql(u8, key, "name")) {
+            self.cfg.theme = theme.byName(spec) orelse {
+                var buf: [256]u8 = undefined;
+                self.note(src, line, "no theme called \"{s}\" - try {s}", .{ spec, themeNames(&buf) });
+                return;
+            };
+            return;
+        }
+        const style = theme.parseStyle(spec) catch |err| {
+            self.note(src, line, "theme.{s}: cannot read \"{s}\" ({t})", .{ key, spec, err });
+            return;
+        };
+        if (!theme.setSlot(&self.cfg.theme, key, style)) {
+            self.note(src, line, "theme has no slot called '{s}'", .{key});
+        }
     }
 
     fn parseValue(self: *Loader, src: []const u8, line: u32, text: []const u8) ?Value {
@@ -438,6 +469,25 @@ pub const Loader = struct {
         return out catch buf[0..0];
     }
 };
+
+/// The bundled names, for the message a wrong one gets. A list of what does
+/// work beats "unknown theme" by exactly the amount of searching it saves.
+/// Public because `--theme` needs the same sentence.
+pub fn themeNames(buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (theme.bundled) |b| {
+        const sep: usize = if (n == 0) 0 else 2;
+        if (n + sep + b.name.len > buf.len) break;
+        if (sep != 0) {
+            buf[n] = ',';
+            buf[n + 1] = ' ';
+            n += 2;
+        }
+        @memcpy(buf[n..][0..b.name.len], b.name);
+        n += b.name.len;
+    }
+    return buf[0..n];
+}
 
 /// The binding a `[keys]` override inherits its mode, hint and description
 /// from - always the shipped default for that command, never whatever the
@@ -787,4 +837,54 @@ test "a file with nothing in it is a config that changes nothing" {
     try testing.expectEqual(@as(usize, 0), l.problems.items.len);
     try testing.expectEqual(keymap.default_bindings.ptr, l.cfg.keys.ptr);
     try testing.expect(std.meta.eql(l.cfg.nav, Nav{}));
+}
+
+test "a theme is picked by name and then adjusted by slot" {
+    var l = loadText(
+        \\[theme]
+        \\name = "gruvbox"
+        \\add_sign = "#00ff00 bold"
+        \\cursor_line = "on 236"
+    );
+    defer l.deinit();
+
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+    // The palette came from the named theme...
+    try testing.expectEqual(theme.byName("gruvbox").?.keyword, l.cfg.theme.keyword);
+    // ...and the two slots the file names came from the file.
+    try testing.expectEqual(theme.Color{ .rgb = .{ 0, 0xff, 0 } }, l.cfg.theme.add_sign.fg);
+    try testing.expect(l.cfg.theme.add_sign.bold);
+    try testing.expectEqual(theme.Color{ .index = 236 }, l.cfg.theme.cursor_line.bg);
+}
+
+test "a theme nobody has lists the ones that exist" {
+    var l = loadText(
+        \\[theme]
+        \\name = "solarized"
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 1), l.problems.items.len);
+    // "unknown theme" sends the user to the documentation; naming them saves
+    // the trip.
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[0].text, "catppuccin") != null);
+    // And the theme they had is the one they keep.
+    try testing.expectEqual(theme.default.accent, l.cfg.theme.accent);
+}
+
+test "a slot or a colour that cannot be read keeps the rest of the theme" {
+    var l = loadText(
+        \\[theme]
+        \\name = "dracula"
+        \\risk_high = "#ff0000"
+        \\add_sign = "chartreuse"
+    );
+    defer l.deinit();
+
+    try testing.expectEqual(@as(usize, 2), l.problems.items.len);
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[0].text, "risk_high") != null);
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[1].text, "chartreuse") != null);
+    // Everything the file got right still applied, including the slot the bad
+    // line was trying to change.
+    try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
+    try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
 }

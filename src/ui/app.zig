@@ -29,6 +29,7 @@ const watch = @import("../io/watch.zig");
 const config = @import("../config.zig");
 const editor = @import("editor.zig");
 const keymap = @import("keymap.zig");
+const preview = @import("preview.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
 const rows_mod = @import("rows.zig");
@@ -845,6 +846,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer app.deinit();
     app.nav = opts.cfg.nav;
     app.km.bindings = opts.cfg.keys;
+    app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
         .ascii => theme_mod.Glyphs.ascii,
@@ -1047,6 +1049,7 @@ const testing = std.testing;
 test {
     _ = editor;
     _ = keymap;
+    _ = preview;
     _ = prompt_mod;
     _ = render;
     _ = rows_mod;

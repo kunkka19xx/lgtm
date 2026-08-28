@@ -5,6 +5,8 @@ const builtin = @import("builtin");
 
 pub const lib = @import("lib.zig");
 pub const config = @import("config.zig");
+pub const theme = @import("ui/theme.zig");
+pub const preview = @import("ui/preview.zig");
 pub const tty = @import("io/tty.zig");
 pub const app = @import("ui/app.zig");
 const metrics = lib.metrics;
@@ -15,6 +17,8 @@ const usage =
     \\usage: lgtm [options]
     \\
     \\  --config <path>  read this file instead of the usual two
+    \\  --theme <name>   use this bundled theme for this run
+    \\  --theme-preview  draw every bundled theme and exit
     \\  --once           render one frame and exit, for screenshots and CI
     \\  --profile        print timing spans on exit (requires -Dprofile build)
     \\  --version        print version and exit
@@ -37,6 +41,8 @@ pub fn main(init: std.process.Init) !void {
     var want_profile = false;
     var want_once = false;
     var config_path: ?[]const u8 = null;
+    var theme_name: ?[]const u8 = null;
+    var want_preview = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
@@ -52,6 +58,14 @@ pub fn main(init: std.process.Init) !void {
             want_profile = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             want_once = true;
+        } else if (std.mem.eql(u8, arg, "--theme-preview")) {
+            want_preview = true;
+        } else if (std.mem.eql(u8, arg, "--theme")) {
+            theme_name = args.next() orelse {
+                try w.print("lgtm: --theme needs a name\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
         } else if (std.mem.eql(u8, arg, "--config")) {
             config_path = args.next() orelse {
                 try w.print("lgtm: --config needs a path\n\n{s}", .{usage});
@@ -74,6 +88,28 @@ pub fn main(init: std.process.Init) !void {
     var cfg = config.load(gpa, io, init.environ_map, config_path);
     defer cfg.deinit();
     var problem_buf: [192]u8 = undefined;
+
+    const glyphs = switch (cfg.cfg.ui.icons) {
+        .unicode => theme.Glyphs.unicode,
+        .ascii => theme.Glyphs.ascii,
+    };
+    if (want_preview) {
+        try preview.write(w, glyphs);
+        try w.flush();
+        return;
+    }
+
+    // A theme named on the command line beats the file, and a name that is
+    // not a theme is refused here rather than reported on the status line:
+    // this one was typed just now, and the user is watching.
+    if (theme_name) |name| {
+        cfg.cfg.theme = theme.byName(name) orelse {
+            var list: [256]u8 = undefined;
+            try w.print("lgtm: no theme called '{s}'\n\ntry: {s}\n", .{ name, config.themeNames(&list) });
+            try w.flush();
+            return;
+        };
+    }
 
     try app.run(gpa, io, init.environ_map, .{
         .once = want_once,

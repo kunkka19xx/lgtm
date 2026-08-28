@@ -86,6 +86,12 @@ overrides key by key rather than replacing the file. `--config <path>` reads
 one file instead of both.
 
 ```toml
+[theme]
+name = "catppuccin"        # terminal, catppuccin, tokyo-night, gruvbox,
+                           # dracula, rose-pine, kanagawa
+added = "#a6e3a1 bold"     # then any slot, over the top of the named theme
+cursor_line = "on #313244"
+
 [ui]
 icons = "unicode"          # or "ascii", for a terminal without the glyphs
 
@@ -106,6 +112,16 @@ default, the file and line are reported on the status line, and everything
 else in the file still applies. A remap that would make another binding
 unreachable - anything that is a prefix of a longer sequence, `<Space>` being
 the obvious one - is refused with the pair it would have shadowed.
+
+`lgtm --theme-preview` draws every bundled theme so you can pick one without
+restarting, and `lgtm --theme <name>` tries one for a single run. A style is
+written as a colour and any attributes - `"#a6e3a1"`, `"bright-blue bold"`,
+`"#1e1e2e on 3 underline"` - and the slot names are the ones the preview shows
+plus the obvious aliases (`added`, `removed`, `line_number`, `hunk_header`).
+
+The default theme is `terminal`: 16-colour indexes, so it inherits whatever
+palette your terminal already uses. The rest are true colour and assume a
+terminal that renders it.
 
 The file format is a small TOML subset: tables, `key = value`, strings,
 booleans, integers, and single-line arrays of strings.
