@@ -42,6 +42,10 @@ pub fn toKey(k: vaxis.Key) event.Key {
 pub const Reader = struct {
     tty: *tty_mod.Tty,
     queue: *event.Queue,
+    /// Optional: when set, the reader's existing wake is what converts a
+    /// SIGWINCH into an event, so no third thread exists to poll one flag.
+    /// Null in `--once`, where nothing is running to service it anyway.
+    winsize: ?*WinsizeNotifier = null,
     thread: ?std.Thread = null,
     running: std.atomic.Value(bool) = .init(false),
     /// Set at `start`, from whether the tty gave us something pollable. When
@@ -97,6 +101,9 @@ pub const Reader = struct {
         var carry: usize = 0;
 
         while (self.running.load(.acquire)) {
+            // Before the poll, so a resize that arrives while the pane is idle
+            // is serviced on the next tick rather than waiting for a keypress.
+            if (self.winsize) |wn| wn.take();
             if (!self.readable()) continue;
             const got = self.tty.read(buf[carry..]) catch break;
             if (got == 0) break;
@@ -125,30 +132,88 @@ pub const Reader = struct {
     }
 };
 
-/// Pushes a `resize` event when the terminal changes size.
+/// Turns SIGWINCH into a `resize` event on the queue.
 ///
-/// The callback runs inside vaxis's SIGWINCH handler, which already takes a
-/// mutex and is what `vaxis.Loop` does with its own queue - so this follows
-/// the library's established pattern rather than inventing a riskier one.
+/// The callback runs inside vaxis's signal handler, so it does exactly one
+/// thing: an atomic store. It does **not** measure the terminal or push, both
+/// of which were done here first and both of which are unsafe from a handler.
+/// `Queue.push` takes a mutex and allocates, and a signal is delivered on
+/// whichever thread happens not to be blocking it - so a SIGWINCH landing on a
+/// thread that already holds the queue mutex, or that is inside the allocator,
+/// hangs the process with no way out. It is a small window and a rare signal,
+/// which is exactly the kind of hang that survives a release.
+///
+/// `take` is the other half, called from an ordinary thread (the reader's
+/// 50 ms wake). Coalescing falls out of the flag: a drag across the screen is
+/// hundreds of signals and one `resize` carrying the size the pane settled at,
+/// rather than hundreds of screen reallocations.
 pub const WinsizeNotifier = struct {
     tty: *tty_mod.Tty,
     queue: *event.Queue,
+    /// Written by the signal handler, cleared by whoever services it.
+    pending: std.atomic.Value(bool) = .init(false),
 
     pub fn register(self: *WinsizeNotifier) !void {
-        try vaxis.tty.Tty.notifyWinsize(.{
-            .context = @ptrCast(self),
-            .callback = onWinch,
-        });
+        try vaxis.tty.Tty.notifyWinsize(self.handler());
+    }
+
+    /// Symmetry with `register`, and not only tidiness: the handler holds a
+    /// pointer to this struct, which lives on `app.run`'s stack. A SIGWINCH
+    /// arriving after that frame is gone would run against freed memory.
+    pub fn unregister(self: *WinsizeNotifier) void {
+        vaxis.tty.Tty.removeWinsize(self.handler());
+    }
+
+    fn handler(self: *WinsizeNotifier) vaxis.tty.Tty.SignalHandler {
+        return .{ .context = @ptrCast(self), .callback = onWinch };
+    }
+
+    /// Pushes one `resize` if a signal arrived since the last call. Safe to
+    /// call as often as the caller likes: with no signal outstanding it is one
+    /// uncontended atomic and nothing else.
+    pub fn take(self: *WinsizeNotifier) void {
+        if (!self.consume()) return;
+        // Measured here rather than in the handler, so the size reported is
+        // the one the terminal has now - the point of coalescing.
+        const ws = self.tty.winsize() catch return;
+        self.queue.push(.{ .resize = .{ .cols = ws.cols, .rows = ws.rows } }) catch {};
+    }
+
+    /// True once per burst of signals. Split out from `take` because it is the
+    /// part that has no terminal in it, and so the part a test can reach.
+    fn consume(self: *WinsizeNotifier) bool {
+        return self.pending.swap(false, .acq_rel);
     }
 
     fn onWinch(ctx: *anyopaque) void {
         const self: *WinsizeNotifier = @ptrCast(@alignCast(ctx));
-        const ws = self.tty.winsize() catch return;
-        self.queue.push(.{ .resize = .{ .cols = ws.cols, .rows = ws.rows } }) catch {};
+        self.pending.store(true, .release);
     }
 };
 
 const testing = std.testing;
+
+test "a burst of SIGWINCH collapses into one resize" {
+    // No terminal is touched on this path, so the tty pointer is never read.
+    var wn: WinsizeNotifier = .{ .tty = undefined, .queue = undefined };
+
+    // Idle: nothing to report, and reporting nothing must be cheap enough to
+    // sit in the reader's 50 ms wake.
+    try testing.expect(!wn.consume());
+
+    // Dragging a pane border delivers the signal over and over. What the main
+    // loop should see is one re-layout at the size it settled on, not one per
+    // signal - each of which reallocates both vaxis screen buffers.
+    WinsizeNotifier.onWinch(@ptrCast(&wn));
+    WinsizeNotifier.onWinch(@ptrCast(&wn));
+    WinsizeNotifier.onWinch(@ptrCast(&wn));
+    try testing.expect(wn.consume());
+    try testing.expect(!wn.consume());
+
+    // And a signal after the drain is a fresh resize, not a swallowed one.
+    WinsizeNotifier.onWinch(@ptrCast(&wn));
+    try testing.expect(wn.consume());
+}
 
 test "modifiers survive translation into the core key type" {
     const k = toKey(.{ .codepoint = 'd', .mods = .{ .ctrl = true } });

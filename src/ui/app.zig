@@ -26,6 +26,7 @@ const metrics = @import("../io/metrics.zig");
 const tty_mod = @import("../io/tty.zig");
 const watch = @import("../io/watch.zig");
 
+const config = @import("../config.zig");
 const editor = @import("editor.zig");
 const keymap = @import("keymap.zig");
 const prompt_mod = @import("prompt.zig");
@@ -34,9 +35,6 @@ const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
 const theme_mod = @import("theme.zig");
 const proc = @import("../io/proc.zig");
-
-/// Scroll margin kept between the cursor and the edge of the body.
-const scrolloff = 3;
 
 /// A one-line message on the mode row: a search that found nothing, a command
 /// that is not one, an editor that would not start. Fixed capacity and cleared
@@ -728,7 +726,7 @@ pub const App = struct {
     /// Keeps the cursor inside the body with a margin, and never scrolls past
     /// the end of the rows.
     pub fn clampScroll(self: *App, body: u16) void {
-        self.scroll = scrollFor(self.cursor, self.scroll, self.rows.len(), body);
+        self.scroll = scrollFor(self.cursor, self.scroll, self.rows.len(), body, self.nav.scrolloff);
     }
 
     pub fn handle(self: *App, ev: event.Event, body: u16) !void {
@@ -755,7 +753,13 @@ pub const App = struct {
                 try self.rediff();
                 self.clampScroll(body);
             },
-            .resize => {},
+            // The size itself belongs to the run loop, which owns `ws` and is
+            // what calls `vx.resize`. What is left for the app is the part
+            // that is its own: the body just changed height, so the scroll
+            // offset that kept the cursor on screen may no longer. Doing it
+            // here rather than only at the top of the loop is what makes a
+            // resize testable without a terminal.
+            .resize => self.clampScroll(body),
             .agent_quiescent, .snapshot_taken => {},
         }
     }
@@ -765,29 +769,31 @@ pub const Options = struct {
     /// Render one frame and exit. What CI and a screenshot need, and the only
     /// way to exercise the render path without a human at a keyboard.
     once: bool = false,
-    nav: Nav = .{},
+    /// Everything the config file decided. Defaults throughout when there is
+    /// no file, which is the case this has to stay fast for.
+    cfg: config.Config = .{},
+    /// The one line of the config's complaints the status row has space for,
+    /// or null when it had none. Shown as a notice on the first frame: a
+    /// config error belongs in the status line, never in a refusal to start
+    /// (FEATURES.md 4.9).
+    problems: ?[]const u8 = null,
 };
 
-/// Navigation behaviour a config file will own once `config.zig` lands
-/// (FEATURES.md 4.8). Declared as its own struct now so that landing it is a
-/// parse plus an assignment, not a hunt through dispatch for hardcoded
-/// policy - the same reasoning that put `Command` between keys and actions.
-/// Nothing reads a file yet; these are the shipped defaults.
-pub const Nav = struct {
-    /// `]h` walks the whole review, crossing into the next file at the end of
-    /// this one. Default true because the status line already counts hunks
-    /// across every file - "4 of 17" - so stopping at a file boundary leaves
-    /// the primary motion unable to reach most of what it advertises.
-    ///
-    /// False keeps hunk motions inside the current file, wrapping there.
-    hunk_crosses_files: bool = true,
-};
+/// Navigation behaviour, owned by `config.zig` and filled from `[nav]`. The
+/// alias is kept because the docs and dispatch both call it `app.Nav`: the
+/// point of declaring it before the config file existed was that landing the
+/// file would be a parse plus an assignment, and this is that assignment.
+pub const Nav = config.Nav;
 
 /// Scroll offset that keeps `cursor` visible with a margin, given the current
 /// offset and the body height. Pure, so the awkward cases - a body shorter
 /// than twice the margin, a cursor past the end, a resize to one row - are
 /// testable without a terminal.
-pub fn scrollFor(cursor: u32, scroll: u32, rows_len: u32, body: u16) u32 {
+///
+/// `scrolloff` is `nav.scrolloff`, clamped here to a third of the body rather
+/// than at the point it is read: a reader who sets 20 on a laptop should get a
+/// degraded margin in a four-row split, not a cursor welded to the middle.
+pub fn scrollFor(cursor: u32, scroll: u32, rows_len: u32, body: u16, scrolloff: u32) u32 {
     if (body == 0 or rows_len == 0) return 0;
     const margin: u32 = @min(scrolloff, body / 3);
     var out = scroll;
@@ -837,18 +843,35 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
     var app = App.init(gpa, io, &queue);
     defer app.deinit();
-    app.nav = opts.nav;
+    app.nav = opts.cfg.nav;
+    app.km.bindings = opts.cfg.keys;
+    app.glyphs = switch (opts.cfg.ui.icons) {
+        .unicode => theme_mod.Glyphs.unicode,
+        .ascii => theme_mod.Glyphs.ascii,
+    };
+    // Said once, on the first frame, and cleared by the first keystroke like
+    // any other notice - long enough to read, and not a modal the user has to
+    // dismiss before reviewing anything.
+    if (opts.problems) |p| app.notice.set("config: {s}", .{p});
 
     var reader = input.Reader.init(&term, &queue);
     var winsize: input.WinsizeNotifier = .{ .tty = &term, .queue = &queue };
+    // The reader services SIGWINCH on its own wake, because the handler is
+    // only allowed to set a flag - see `io/input.zig`.
+    reader.winsize = &winsize;
     var watcher = watch.Watcher.init(gpa, io, &queue, .{});
     if (!opts.once) {
-        try reader.start();
         winsize.register() catch {};
+        try reader.start();
         watcher.start() catch {};
     }
     defer {
-        if (!opts.once) reader.stop();
+        if (!opts.once) {
+            // Before the reader stops, so the last thing to touch the flag is
+            // gone by the time this frame is.
+            winsize.unregister();
+            reader.stop();
+        }
         // `deinit`, not `stop`: stopping only joins the thread. The poller
         // still holds a duped path per watched file in `prev` and `pending`,
         // and those are what a leak check sees on exit. Unconditional because
@@ -1034,32 +1057,32 @@ test {
 test "scrolling keeps the cursor inside the body with a margin" {
     // Cursor near the top pins the view to the top rather than showing rows
     // that do not exist above it.
-    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 100, 22));
-    try testing.expectEqual(@as(u32, 0), scrollFor(2, 0, 100, 22));
+    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(2, 0, 100, 22, 3));
 
     // Moving down past the bottom margin scrolls by exactly what is needed:
     // cursor 20 with a 3-row margin needs rows 21-23 visible, and 2+22-1 = 23.
-    try testing.expectEqual(@as(u32, 2), scrollFor(20, 0, 100, 22));
+    try testing.expectEqual(@as(u32, 2), scrollFor(20, 0, 100, 22, 3));
     // Moving back up above the top margin scrolls back.
-    try testing.expectEqual(@as(u32, 7), scrollFor(10, 20, 100, 22));
+    try testing.expectEqual(@as(u32, 7), scrollFor(10, 20, 100, 22, 3));
 }
 
 test "scrolling never runs past the last row" {
     // A cursor at the end still leaves a full body on screen, not a screen
     // half full of blanks.
-    try testing.expectEqual(@as(u32, 78), scrollFor(99, 90, 100, 22));
+    try testing.expectEqual(@as(u32, 78), scrollFor(99, 90, 100, 22, 3));
     // Fewer rows than the body means no scrolling at all.
-    try testing.expectEqual(@as(u32, 0), scrollFor(3, 0, 5, 22));
-    try testing.expectEqual(@as(u32, 0), scrollFor(4, 3, 5, 22));
+    try testing.expectEqual(@as(u32, 0), scrollFor(3, 0, 5, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(4, 3, 5, 22, 3));
 }
 
 test "degenerate sizes do not underflow" {
     // A one-row body has no room for a margin; the arithmetic must still hold.
-    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 0, 22));
-    try testing.expectEqual(@as(u32, 0), scrollFor(5, 0, 10, 0));
-    _ = scrollFor(0, 0, 1, 1);
-    _ = scrollFor(9, 0, 10, 1);
-    _ = scrollFor(0, 9, 10, 2);
+    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 0, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(5, 0, 10, 0, 3));
+    _ = scrollFor(0, 0, 1, 1, 3);
+    _ = scrollFor(9, 0, 10, 1, 3);
+    _ = scrollFor(0, 9, 10, 2, 3);
 }
 
 test "a hunk header names its first changed line, not its first line" {
@@ -1755,5 +1778,30 @@ test "keeping the row across a re-diff never parks the cursor on chrome" {
     // A position further down is left exactly where it was.
     fx.app.cursor = 3;
     try fx.app.rebuildRows(.row);
+    try testing.expectEqual(@as(u32, 3), fx.app.cursor);
+}
+
+test "a resize re-lays out rather than leaving the old scroll behind" {
+    var fx = try Fixture.init(testing.allocator, null);
+    defer fx.deinit();
+
+    // Four rows: header plus three lines. A pane that was tall enough to have
+    // scrolled, then grew, must not keep an offset that now hangs the body
+    // off the end of the review - the failure is a screen of blank rows with
+    // the cursor nowhere on it.
+    fx.app.cursor = 3;
+    fx.app.scroll = 3;
+    try fx.app.handle(.{ .resize = .{ .cols = 100, .rows = 40 } }, 22);
+    try testing.expectEqual(@as(u32, 0), fx.app.scroll);
+
+    // Shrinking to a body shorter than the review scrolls to keep the cursor
+    // visible, and never past the last row.
+    try fx.app.handle(.{ .resize = .{ .cols = 40, .rows = 6 } }, 2);
+    try testing.expectEqual(@as(u32, 2), fx.app.scroll);
+    try testing.expect(fx.app.cursor >= fx.app.scroll);
+    try testing.expect(fx.app.cursor < fx.app.scroll + 2);
+
+    // The cursor itself is the reader's place in the file and a resize is not
+    // a motion: it does not move.
     try testing.expectEqual(@as(u32, 3), fx.app.cursor);
 }

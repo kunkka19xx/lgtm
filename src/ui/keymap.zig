@@ -89,8 +89,15 @@ pub const Binding = struct {
     chords: []const Chord,
     command: Command,
     modes: Modes = Modes.both,
-    /// Shown in the status-line hint strip. Null keeps a binding working but
-    /// unadvertised, which is how aliases stay out of an already tight row.
+    /// The word the status-line strip puts after the keys - "move", "hunk",
+    /// "quit". A label rather than the finished text, so the strip renders the
+    /// keys from the chords and cannot advertise a key the user has remapped
+    /// away: `next_file = "]w"` in a config file turns `]f [f file` into
+    /// `]w [f file` with nothing to keep in step. Bindings sharing a label
+    /// share one entry, which is what collapses `]f` and `[f` into it.
+    ///
+    /// Null keeps a binding working but unadvertised, which is how aliases
+    /// stay out of an already tight row.
     hint: ?[]const u8 = null,
     /// One line in the `?` overlay. Null for aliases, for the same reason
     /// `hint` is: `[h` does not need its own row next to `]h`, and three ways
@@ -115,31 +122,31 @@ pub const leader: Chord = c(' ');
 /// The v0.1 set. Only bindings that do something are listed: a hint strip that
 /// advertises keys the build does not implement is worse than a shorter one.
 pub const default_bindings: []const Binding = &.{
-    .{ .chords = &.{c('j')}, .command = .line_down, .hint = "j k move", .desc = "down a line" },
-    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "up a line" },
+    .{ .chords = &.{c('j')}, .command = .line_down, .hint = "move", .desc = "down a line" },
+    .{ .chords = &.{c('k')}, .command = .line_up, .hint = "move", .desc = "up a line" },
     .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "down half a page" },
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page" },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line" },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
-    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .hint = "]h [h hunk", .desc = "next hunk (wraps)" },
-    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
+    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .hint = "hunk", .desc = "next hunk (wraps)" },
+    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .hint = "hunk", .desc = "previous hunk (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .desc = "next hunk" },
     .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .desc = "previous hunk" },
-    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "]f [f file", .desc = "next file (wraps)" },
-    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)" },
+    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "file", .desc = "next file (wraps)" },
+    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .hint = "file", .desc = "previous file (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .desc = "next file" },
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .desc = "previous file" },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line" },
-    .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "/ search", .desc = "search the review" },
+    .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "search", .desc = "search the review" },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match" },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match" },
-    .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "V select", .desc = "visual line select" },
-    .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "Esc cancel", .desc = "leave visual select" },
-    .{ .chords = &.{c('e')}, .command = .open_editor, .hint = "e edit", .desc = "open line in $EDITOR" },
+    .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "select", .desc = "visual line select" },
+    .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select" },
+    .{ .chords = &.{c('e')}, .command = .open_editor, .hint = "edit", .desc = "open line in $EDITOR" },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
     .{ .chords = &.{c(':')}, .command = .command_line, .desc = "command line (:q)" },
     .{ .chords = &.{ctrl('l')}, .command = .refresh, .desc = "re-run the diff" },
-    .{ .chords = &.{c('q')}, .command = .quit, .modes = Modes.normal_only, .hint = "q quit", .desc = "quit" },
+    .{ .chords = &.{c('q')}, .command = .quit, .modes = Modes.normal_only, .hint = "quit", .desc = "quit" },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .desc = "this help" },
@@ -222,25 +229,64 @@ pub const Keymap = struct {
     }
 };
 
-/// The hint strip, built from the bindings themselves so it cannot drift from
-/// what the keys actually do. Written into `buf`, which the caller owns - in
-/// practice the frame arena.
+/// The hint strip, rendered from the bindings themselves so it cannot drift
+/// from what the keys actually do - a remapped key moves here as well as in
+/// the `?` popup. Bindings that share a label share an entry, so `]f` and
+/// `[f` come out as one `]f [f file` rather than two entries saying the same
+/// word twice. Written into `buf`, which the caller owns - in practice the
+/// frame arena.
 pub fn hints(bindings: []const Binding, mode: event.Mode, buf: []u8) []const u8 {
     var n: usize = 0;
-    for (bindings) |b| {
+    for (bindings, 0..) |b, i| {
         if (!b.modes.has(mode)) continue;
-        const h = b.hint orelse continue;
+        const label = b.hint orelse continue;
+        // Each label is written once, at its first binding; the rest of the
+        // group is gathered below rather than starting an entry of its own.
+        if (firstWith(bindings[0..i], mode, label)) continue;
+
+        // Measured whole, then copied, so a strip that runs out of room ends
+        // on an entry boundary. "]f [f fi" advertises a key that does not
+        // exist, which is worse than one entry fewer.
+        var entry: [max_keys_bytes * 4 + 32]u8 = undefined;
+        var e: usize = 0;
+        for (bindings[i..]) |g| {
+            if (!g.modes.has(mode)) continue;
+            const gl = g.hint orelse continue;
+            if (!std.mem.eql(u8, gl, label)) continue;
+            if (e != 0 and e < entry.len) {
+                entry[e] = ' ';
+                e += 1;
+            }
+            const keys = bufWriteChords(g.chords, entry[e..]);
+            e += keys.len;
+        }
+        if (e + 1 + label.len > entry.len) continue;
+        entry[e] = ' ';
+        e += 1;
+        @memcpy(entry[e..][0..label.len], label);
+        e += label.len;
+
         const sep: usize = if (n == 0) 0 else 2;
-        if (n + sep + h.len > buf.len) break;
+        if (n + sep + e > buf.len) break;
         if (sep != 0) {
             buf[n] = ' ';
             buf[n + 1] = ' ';
             n += 2;
         }
-        @memcpy(buf[n .. n + h.len], h);
-        n += h.len;
+        @memcpy(buf[n..][0..e], entry[0..e]);
+        n += e;
     }
     return buf[0..n];
+}
+
+/// Whether `label` was already claimed by an earlier binding live in `mode`.
+fn firstWith(before: []const Binding, mode: event.Mode, label: []const u8) bool {
+    for (before) |p| {
+        if (!p.modes.has(mode)) continue;
+        const h = p.hint orelse continue;
+        if (std.mem.eql(u8, h, label)) return true;
+    }
+    return false;
 }
 
 /// One row of the `?` overlay: the keys as the user would type them, and what
@@ -291,6 +337,117 @@ pub fn bufWriteChords(chords: []const Chord, buf: []u8) []const u8 {
         n += piece.len;
     }
     return buf[0..n];
+}
+
+pub const KeyParseError = error{
+    /// `<`, with no `>` or no name inside it that means anything.
+    BadKeyName,
+    /// Longer than `Keymap.max_sequence`, which the matcher cannot hold.
+    TooManyChords,
+};
+
+/// The inverse of `bufWriteChords`: turns `gg`, `<C-d>` or `<Space>nf` back
+/// into chords, so a config file can name a key the same way the `?` popup
+/// prints it. Written next to its inverse, and pinned to it by a round-trip
+/// test over every default binding - the failure mode otherwise is a key the
+/// help advertises in a spelling the config refuses to read.
+///
+/// An empty sequence is not an error: it is how `[keys]` unbinds a command.
+pub fn parseChords(text: []const u8, out: []Chord) KeyParseError![]Chord {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (n == out.len) return error.TooManyChords;
+        if (text[i] == '<') {
+            const end = std.mem.indexOfScalarPos(u8, text, i, '>') orelse return error.BadKeyName;
+            out[n] = try namedChord(text[i + 1 .. end]);
+            i = end + 1;
+        } else {
+            const len = std.unicode.utf8ByteSequenceLength(text[i]) catch return error.BadKeyName;
+            if (i + len > text.len) return error.BadKeyName;
+            out[n] = .{ .cp = std.unicode.utf8Decode(text[i..][0..len]) catch return error.BadKeyName };
+            i += len;
+        }
+        n += 1;
+    }
+    return out[0..n];
+}
+
+/// The `<...>` names. Ctrl chords lower-case their letter, because that is
+/// what the terminal reports for `<C-D>` as well as `<C-d>`, and a binding
+/// that only matches the spelling it was written in is a trap.
+fn namedChord(name: []const u8) KeyParseError!Chord {
+    if (name.len == 3 and std.ascii.toLower(name[0]) == 'c' and name[1] == '-') {
+        return .{ .cp = std.ascii.toLower(name[2]), .ctrl = true };
+    }
+    const eq = std.ascii.eqlIgnoreCase;
+    if (eq(name, "Space")) return c(' ');
+    if (eq(name, "Esc") or eq(name, "Escape")) return c(event.code.escape);
+    if (eq(name, "Tab")) return c(event.code.tab);
+    if (eq(name, "CR") or eq(name, "Enter")) return c(event.code.enter);
+    if (eq(name, "BS") or eq(name, "Backspace")) return c(event.code.backspace);
+    if (eq(name, "Up")) return c(event.code.up);
+    if (eq(name, "Down")) return c(event.code.down);
+    if (eq(name, "Left")) return c(event.code.left);
+    if (eq(name, "Right")) return c(event.code.right);
+    if (eq(name, "lt")) return c('<');
+    return error.BadKeyName;
+}
+
+/// True when `short` is the opening of `long`. The matcher resolves an exact
+/// match as soon as it finds one, so a binding that is a prefix of another
+/// fires first and the longer sequence can never be typed - which is the
+/// general form of "never bind the leader on its own" (FEATURES.md 4.3).
+pub fn isPrefix(short: []const Chord, long: []const Chord) bool {
+    if (short.len == 0 or short.len >= long.len) return false;
+    for (short, long[0..short.len]) |a, b| {
+        if (a.cp != b.cp or a.ctrl != b.ctrl) return false;
+    }
+    return true;
+}
+
+/// Two ways a binding can be typed and never fire.
+pub const Conflict = struct {
+    first: Binding,
+    second: Binding,
+    kind: enum {
+        /// `first` is the opening of `second`, so it resolves first and
+        /// `second` can never be completed.
+        prefix,
+        /// The same sequence, twice, for different commands. `feed` returns
+        /// the first, so the second is dead.
+        duplicate,
+    },
+};
+
+/// The first binding rendered unreachable by another that shares a live mode,
+/// or null when every sequence can actually be typed. `config.zig` runs this
+/// over the table a `[keys]` override *would* produce and refuses the override
+/// rather than accepting a keymap with a silently dead binding in it.
+pub fn shadowed(bindings: []const Binding) ?Conflict {
+    for (bindings, 0..) |a, i| {
+        for (bindings[i + 1 ..]) |b| {
+            if (!modesOverlap(a.modes, b.modes)) continue;
+            if (isPrefix(a.chords, b.chords)) return .{ .first = a, .second = b, .kind = .prefix };
+            if (isPrefix(b.chords, a.chords)) return .{ .first = b, .second = a, .kind = .prefix };
+            if (a.command != b.command and sameChords(a.chords, b.chords)) {
+                return .{ .first = a, .second = b, .kind = .duplicate };
+            }
+        }
+    }
+    return null;
+}
+
+fn sameChords(a: []const Chord, b: []const Chord) bool {
+    if (a.len != b.len or a.len == 0) return false;
+    for (a, b) |x, y| {
+        if (x.cp != y.cp or x.ctrl != y.ctrl) return false;
+    }
+    return true;
+}
+
+fn modesOverlap(a: Modes, b: Modes) bool {
+    return (a.normal and b.normal) or (a.visual and b.visual) or (a.help and b.help);
 }
 
 /// Whether `b` belongs in the popup for `mode` under `filter`, and how well it
@@ -667,12 +824,105 @@ test "hints come from the bindings and fit the width given" {
 test "the hint strip advertises only what the current mode can do" {
     var buf: [160]u8 = undefined;
     const normal = hints(default_bindings, .normal, &buf);
-    try testing.expect(std.mem.indexOf(u8, normal, "Esc cancel") == null);
+    try testing.expect(std.mem.indexOf(u8, normal, "cancel") == null);
     try testing.expect(std.mem.indexOf(u8, normal, "q quit") != null);
 
     var buf2: [160]u8 = undefined;
     const visual = hints(default_bindings, .visual, &buf2);
-    try testing.expect(std.mem.indexOf(u8, visual, "Esc cancel") != null);
+    // Spelled the way the popup spells it, because both now render the same
+    // chords rather than each carrying its own hand-written text.
+    try testing.expect(std.mem.indexOf(u8, visual, "<Esc> cancel") != null);
     // `q` does not quit from visual mode, so the strip must not claim it does.
     try testing.expect(std.mem.indexOf(u8, visual, "q quit") == null);
+}
+
+test "every default binding parses back from the way the popup spells it" {
+    // `bufWriteChords` and `parseChords` are inverses, and a config file names
+    // keys in the spelling the `?` popup shows. If they ever disagree, the
+    // user reads a key off the overlay, puts it in `[keys]`, and it is
+    // rejected - which is the kind of thing that gets found by a user.
+    var buf: [max_keys_bytes]u8 = undefined;
+    var out: [Keymap.max_sequence]Chord = undefined;
+    for (default_bindings) |b| {
+        const text = bufWriteChords(b.chords, &buf);
+        const back = try parseChords(text, &out);
+        try testing.expectEqual(b.chords.len, back.len);
+        for (b.chords, back) |want, got| {
+            try testing.expectEqual(want.cp, got.cp);
+            try testing.expectEqual(want.ctrl, got.ctrl);
+        }
+    }
+}
+
+test "key names a user might reasonably write" {
+    var out: [Keymap.max_sequence]Chord = undefined;
+
+    // Case-insensitive names, and `<C-D>` is the same key the terminal sends
+    // for `<C-d>`.
+    const upper = try parseChords("<C-D>", &out);
+    try testing.expectEqual(@as(u21, 'd'), upper[0].cp);
+    try testing.expect(upper[0].ctrl);
+
+    var out2: [Keymap.max_sequence]Chord = undefined;
+    const seq = try parseChords("<space>nf", &out2);
+    try testing.expectEqual(@as(usize, 3), seq.len);
+    try testing.expectEqual(@as(u21, ' '), seq[0].cp);
+
+    // Empty is not an error: it is how a command is unbound.
+    var out3: [Keymap.max_sequence]Chord = undefined;
+    try testing.expectEqual(@as(usize, 0), (try parseChords("", &out3)).len);
+
+    // A name that means nothing, and a sequence longer than the matcher can
+    // hold, are both refused rather than silently truncated.
+    try testing.expectError(error.BadKeyName, parseChords("<Meta-x>", &out3));
+    try testing.expectError(error.BadKeyName, parseChords("<C-d", &out3));
+    try testing.expectError(error.TooManyChords, parseChords("abcde", &out3));
+}
+
+test "no default binding shadows another" {
+    // The general form of "never bind the leader on its own": `feed` returns
+    // on the first exact match, so a sequence that is a prefix of another
+    // fires first and the longer one can never be reached. Asserting it over
+    // the whole table catches the next `<Space>` as well as this one.
+    try testing.expect(shadowed(default_bindings) == null);
+
+    // And the check itself has teeth: a bare leader shadows every sequence
+    // behind it.
+    const bad: []const Binding = &.{
+        .{ .chords = &.{leader}, .command = .quit },
+        .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file },
+    };
+    const hit = shadowed(bad).?;
+    try testing.expectEqual(Command.quit, hit.first.command);
+    try testing.expectEqual(Command.next_file, hit.second.command);
+
+    // The same sequence twice is the other way a binding dies quietly: the
+    // matcher returns the first one it finds, so the second never fires.
+    const dup: []const Binding = &.{
+        .{ .chords = &.{c('q')}, .command = .quit },
+        .{ .chords = &.{c('q')}, .command = .refresh },
+    };
+    try testing.expect(shadowed(dup).?.kind == .duplicate);
+
+    // Modes that never overlap cannot shadow each other: `H` in the popup and
+    // a hypothetical `Hx` in the review are different keymaps.
+    const ok: []const Binding = &.{
+        .{ .chords = &.{c('H')}, .command = .help_left, .modes = Modes.help_only },
+        .{ .chords = &.{ c('H'), c('x') }, .command = .top, .modes = Modes.normal_only },
+    };
+    try testing.expect(shadowed(ok) == null);
+}
+
+test "a remapped key moves in the hint strip too" {
+    // The strip used to carry its own text - `"]f [f file"` written out beside
+    // the binding - so a config that rebound `next_file` left the status line
+    // advertising a key that no longer did anything. Rendering the chords is
+    // what makes that impossible.
+    const remapped: []const Binding = &.{
+        .{ .chords = &.{ c(']'), c('w') }, .command = .next_file, .hint = "file", .desc = "next file" },
+        .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .hint = "file", .desc = "previous file" },
+        .{ .chords = &.{c('Q')}, .command = .quit, .hint = "quit", .desc = "quit" },
+    };
+    var buf: [80]u8 = undefined;
+    try testing.expectEqualStrings("]w [f file  Q quit", hints(remapped, .normal, &buf));
 }

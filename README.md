@@ -78,6 +78,38 @@ zig build bench -- [dir]      # lexer benchmark, run under -Doptimize=ReleaseFas
 
 On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: run them as `nix run .#fhs -- -c "zig build check"`. The default shell warns about this.
 
+## Configuring
+
+`~/.config/lgtm/config.toml` (or `$XDG_CONFIG_HOME/lgtm/config.toml`), then
+`.lgtm/config.toml` in the repository, merged in that order - the repo file
+overrides key by key rather than replacing the file. `--config <path>` reads
+one file instead of both.
+
+```toml
+[ui]
+icons = "unicode"          # or "ascii", for a terminal without the glyphs
+
+[nav]
+hunk_crosses_files = true  # ]h walks the whole review, not just this file
+scrolloff = 3              # rows kept between the cursor and the edge
+
+[keys]
+# Command names come from the `?` popup; keys are spelled the way it spells
+# them. A list binds several, of which the first is the one advertised.
+next_file = ["]w", "<Space>nf"]
+refresh   = ["<C-l>", "<Space>r"]
+open_editor = []           # unbind: it stops being offered anywhere
+```
+
+**A bad config never stops `lgtm` starting.** The offending key keeps its
+default, the file and line are reported on the status line, and everything
+else in the file still applies. A remap that would make another binding
+unreachable - anything that is a prefix of a longer sequence, `<Space>` being
+the obvious one - is refused with the pair it would have shadowed.
+
+The file format is a small TOML subset: tables, `key = value`, strings,
+booleans, integers, and single-line arrays of strings.
+
 ## Documentation
 
 | File | Contains |

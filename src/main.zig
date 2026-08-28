@@ -4,6 +4,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 pub const lib = @import("lib.zig");
+pub const config = @import("config.zig");
 pub const tty = @import("io/tty.zig");
 pub const app = @import("ui/app.zig");
 const metrics = lib.metrics;
@@ -13,10 +14,11 @@ const usage =
     \\
     \\usage: lgtm [options]
     \\
-    \\  --once      render one frame and exit, for screenshots and CI
-    \\  --profile   print timing spans on exit (requires -Dprofile build)
-    \\  --version   print version and exit
-    \\  -h, --help  print this help and exit
+    \\  --config <path>  read this file instead of the usual two
+    \\  --once           render one frame and exit, for screenshots and CI
+    \\  --profile        print timing spans on exit (requires -Dprofile build)
+    \\  --version        print version and exit
+    \\  -h, --help       print this help and exit
     \\
 ;
 
@@ -34,6 +36,7 @@ pub fn main(init: std.process.Init) !void {
 
     var want_profile = false;
     var want_once = false;
+    var config_path: ?[]const u8 = null;
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
@@ -49,6 +52,12 @@ pub fn main(init: std.process.Init) !void {
             want_profile = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             want_once = true;
+        } else if (std.mem.eql(u8, arg, "--config")) {
+            config_path = args.next() orelse {
+                try w.print("lgtm: --config needs a path\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
         } else {
             try w.print("lgtm: unknown option '{s}'\n\n{s}", .{ arg, usage });
             try w.flush();
@@ -57,7 +66,20 @@ pub fn main(init: std.process.Init) !void {
     }
 
     try w.flush();
-    try app.run(gpa, io, init.environ_map, .{ .once = want_once });
+
+    // Read before the terminal is touched: a config error is a status-line
+    // notice on the first frame, never a reason not to start (FEATURES.md
+    // 4.9). The loader owns the bindings the keymap is about to point at, so
+    // it has to outlive the app.
+    var cfg = config.load(gpa, io, init.environ_map, config_path);
+    defer cfg.deinit();
+    var problem_buf: [192]u8 = undefined;
+
+    try app.run(gpa, io, init.environ_map, .{
+        .once = want_once,
+        .cfg = cfg.cfg,
+        .problems = cfg.summary(&problem_buf),
+    });
 
     if (want_profile) try metrics.report(w);
     try w.flush();
@@ -65,6 +87,7 @@ pub fn main(init: std.process.Init) !void {
 
 test {
     _ = lib;
+    _ = config;
     _ = tty;
     _ = app;
 }

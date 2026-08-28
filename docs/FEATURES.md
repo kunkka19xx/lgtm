@@ -130,7 +130,7 @@ Beyond that:
 
 **A TUI cannot set the font.** That is the terminal emulator's job, and `lgtm` should not pretend otherwise. What it *can* control:
 
-- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph.
+- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph. **`unicode` and `ascii` ship**; `nerd` waits for the glyph set it would name, and `ui.icons` refuses a value it does not have rather than falling back silently.
 - **Text attributes** - which semantic slots use bold, italic, underline, or dim. Some people want italic comments; some terminals render italics badly. Make it a choice.
 - **Box drawing style** - `ascii | light | heavy | rounded` for borders and separators.
 - **Sign column characters** - the `+`/`-`/`●` glyphs are configurable strings, not hardcoded.
@@ -138,6 +138,10 @@ Beyond that:
 ### 4.3 Keymaps - fully remappable
 
 Every action is a named command; the keymap is a table from key sequence to command name. No hardcoded keys anywhere in the dispatch path (this is why `Mode` is an enum, ARCHITECTURE.md §11.4).
+
+**Shipped, through `[keys]`:** a command is rebound by naming it and the keys, spelled the way the `?` popup spells them - `next_file = ["]w", "<Space>nf"]`, and `[]` to unbind. `keymap.parseChords` is the exact inverse of the popup's renderer, pinned by a round-trip test over every default binding, because a key read off `?` and pasted into a config that refuses it is a bug only a user would find. A list binds several; the first is the one advertised, the rest are aliases, exactly as `]f` and `<Space>nf` already were.
+
+Remapping is also what caught the status-line strip lying. It held finished text per binding (`"]f [f file"`), so rebinding `next_file` left it advertising a key that did nothing - the precise failure this section says the design prevents. The strip now holds the *label* (`"file"`), renders the keys from the chords, and gives bindings that share a label one entry.
 
 Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individual bindings without redefining the whole map.
 
@@ -240,15 +244,25 @@ Statusline as a format string, tmux/lualine style. People will spend an hour on 
 
 Motions that could reasonably go either way are settings rather than opinions baked into dispatch. The first is `nav.hunk_crosses_files` (default **true**): `]h` walks the whole review, carrying on into the next file rather than looping inside the current one. The default follows from the status line, which already counts hunks across every file - "4 of 17" describes a sequence, and the primary motion should be able to traverse it. Set it false to keep `]h` inside one file, wrapping at its ends.
 
-These live in an `app.Nav` struct declared now and read from a config file when `config.zig` lands, so adding the file is a parse plus an assignment rather than a hunt through dispatch for hardcoded policy - the same reasoning that put `Command` between keys and actions.
+These live in an `app.Nav` struct, which `config.zig` now owns and fills from `[nav]` - adding the file was a parse plus an assignment rather than a hunt through dispatch for hardcoded policy, which is what declaring the struct early bought. `nav.scrolloff` joined it as the last hardcoded policy constant in `app.zig`, clamped to a third of the body so a large value degrades on a short pane instead of welding the cursor to the middle.
 
-### 4.8 Per-repo config
+### 4.8 Per-repo config - shipped
 
-`.lgtm/config.toml` overrides `~/.config/lgtm/config.toml`. Different repos want different risk rules, different languages, different bridge targets. Merge, do not replace.
+`.lgtm/config.toml` overrides `~/.config/lgtm/config.toml` (or `$XDG_CONFIG_HOME/lgtm/config.toml`). Different repos want different risk rules, different languages, different bridge targets. Merge, do not replace: the repo file overrides the keys it names and leaves the rest of the global file standing, which is asserted rather than assumed.
 
-### 4.9 Config errors must be excellent
+`--config <path>` reads one file instead of both. It exists because a config feature that can only be exercised by editing the user's home directory is a config feature nobody tests.
+
+The format is a small TOML subset - tables, `key = value`, strings, booleans, integers, single-line arrays of strings - and nothing outside `config.zig` knows what the format is, so a real TOML dependency can replace the parser later without touching a call site. What is configurable today: `[nav]`, `[ui] icons`, and `[keys]`. Themes, templates (§4.5) and risk rules (§4.6) add their sections when they land.
+
+### 4.9 Config errors must be excellent - shipped
 
 A tool that fails to start because of a typo in a theme file is a tool people uninstall. Rules: never fail to start on a bad config. Report the file, line, and the offending key; fall back to defaults for that key only; show the error in the status line, not a crash.
+
+All four hold. A bad line costs that one key its value and nothing else - the line either side of it still applies - and the first problem plus a count of the rest goes to the status line on the first frame, cleared by the first keystroke like any other notice. Three refinements the rules did not anticipate, each from writing a wrong config on purpose:
+
+- **An unknown `[section]` is reported once, at its header.** Its keys are then skipped in silence. A `[templates]` block read by a binary too old to know it should cost one line of complaint, not one per setting.
+- **Out of range is a problem, not a clamp.** Silently clamping `scrolloff = 900` leaves the user reading a config that says one thing and watching a screen that does another.
+- **A remap that would shadow another binding is refused**, with the pair it would have shadowed. `quit = "<Space>"` is a prefix of every leader sequence, so accepting it would leave those bindings listed in `?` and silently dead - the failure this rule exists to prevent, one level up from a typo.
 
 ---
 
