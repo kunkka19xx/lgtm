@@ -86,6 +86,9 @@ pub const View = struct {
     zen: bool = false,
     /// The `?` popup. Non-null floats a box over the body.
     help: ?HelpView = null,
+    /// The `F` popup, the same way. Only one overlay is ever open, because
+    /// each is its own mode.
+    files: ?FilesView = null,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -177,6 +180,29 @@ pub const HelpView = struct {
     keys: []const keytext.HelpEntry = &.{},
     /// Written by the renderer with the grid it laid out, so the app can move
     /// the selection by a whole column without duplicating the layout maths.
+    layout: ?*HelpLayout = null,
+};
+
+/// One row of the `F` overlay: a changed file, as the reader picks it out.
+pub const FileEntry = struct {
+    path: []const u8,
+    added: u32,
+    removed: u32,
+    /// The file the review is currently on, marked so the list opens showing
+    /// the reader where they already are rather than at an arbitrary top.
+    current: bool = false,
+};
+
+/// Everything the `F` overlay draws. Its own view for the same reason
+/// `HelpView` is: it floats over the body and has to be drawable when there is
+/// no body at all.
+pub const FilesView = struct {
+    entries: []const FileEntry,
+    query: []const u8 = "",
+    /// Selected row, an index into `entries` after filtering.
+    index: usize = 0,
+    /// The popup's own keys, along its bottom border.
+    keys: []const keytext.HelpEntry = &.{},
     layout: ?*HelpLayout = null,
 };
 

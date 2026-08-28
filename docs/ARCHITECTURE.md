@@ -478,6 +478,8 @@ lgtm/
 │   │   ├── keymap.zig     # what keys mean: bindings, matcher, conflicts
 │   │   ├── keytext.zig    # how keys are written: chords, hints, help rows
 │   │   ├── help.zig       # the `?` overlay's filter and selection
+│   │   ├── files.zig      # the `F` overlay, over the changed files
+│   │   ├── fuzzy.zig      # the two tiers both overlays narrow with
 │   │   ├── prompt.zig     # the `/` and `:` input line
 │   │   ├── search.zig     # matching across the whole review
 │   │   ├── editor.zig     # $EDITOR argv, from $VISUAL/$EDITOR

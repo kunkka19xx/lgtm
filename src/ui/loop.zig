@@ -215,6 +215,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
+        shown.files = try app.file_list.view(app.mode, app.review.files(), app.file_index, app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
@@ -224,8 +225,14 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
         );
         // An empty review is exactly when a reader is most likely to want the
         // key list - there is nothing on screen to learn the keys from.
+        // Both overlays float over the empty screen too: a review with nothing
+        // in it is exactly when a reader wants to know what the keys are, and
+        // an empty file list still has to say that it is empty.
         if (try app.help.view(app.mode, app.km.bindings, arena)) |hv| {
             try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
+        }
+        if (try app.file_list.view(app.mode, app.review.files(), app.file_index, app.km.bindings, arena)) |fv| {
+            try render.drawFileList(frameOf(app, win, arena), fv, 0, win.height);
         }
     }
 

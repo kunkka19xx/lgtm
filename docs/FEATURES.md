@@ -230,6 +230,8 @@ file_list_size = 0.25
 statusline = "{mode} {file} {change_id} {notes} {risk}"
 ```
 
+**`F` ships as an overlay** rather than as any of the three panes: the same box the `?` popup uses, with the same filter, the same `H J K L`, and `Enter` to jump. It costs rows only while it is open, which is the argument that made `hidden` the default in the first place - a list is navigation, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain unbuilt.
+
 **The default changed to `hidden` after the mockups** (`lgtm TUI Mockups.dc.html`,
 option 2a). A persistent list costs about five of twenty-six rows permanently,
 and the list is navigation, which should not hold territory while you read.

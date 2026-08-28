@@ -37,13 +37,16 @@ pub const Command = enum {
     toggle_zen,
     /// Open the `?` overlay, and close it again from inside.
     help,
-    /// Move the popup's selection. Only live in `help`, so these keys stay
-    /// free for the review itself.
-    help_down,
-    help_up,
-    /// Sideways, by a whole column: the popup is a grid, not a list.
-    help_left,
-    help_right,
+    /// Open the file list.
+    file_list,
+    /// Move the selection in whichever overlay is open. Live only in the
+    /// overlay modes, so these keys stay free for the review itself.
+    list_down,
+    list_up,
+    /// Sideways: a whole column of the key grid, a whole page of the file
+    /// list, which is the same movement in a list one column wide.
+    list_left,
+    list_right,
 };
 
 /// Which modes a binding is live in. Motions are live in both, which is what
@@ -53,7 +56,10 @@ pub const Modes = packed struct(u8) {
     normal: bool = false,
     visual: bool = false,
     help: bool = false,
-    _pad: u5 = 0,
+    /// The `F` overlay. Same rule as `help`: inside it a keystroke is filter
+    /// text, so only the list's own navigation is bound.
+    finder: bool = false,
+    _pad: u4 = 0,
 
     pub const both: Modes = .{ .normal = true, .visual = true };
     pub const normal_only: Modes = .{ .normal = true };
@@ -62,12 +68,16 @@ pub const Modes = packed struct(u8) {
     /// filter text, so binding anything else would take a letter away from
     /// the search.
     pub const help_only: Modes = .{ .help = true };
+    /// Inside either overlay. The two lists move the same way on purpose -
+    /// two sets of navigation keys would be two things to learn.
+    pub const lists: Modes = .{ .help = true, .finder = true };
 
     pub fn has(self: Modes, mode: event.Mode) bool {
         return switch (mode) {
             .normal => self.normal,
             .visual => self.visual,
             .help => self.help,
+            .finder => self.finder,
             // The prompt modes never reach the keymap: `prompt.zig` takes the
             // keys, because they are text rather than actions.
             else => false,
@@ -152,6 +162,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(':')}, .command = .command_line, .desc = "command line (:q)" },
     .{ .chords = &.{ctrl('l')}, .command = .refresh, .desc = "re-run the diff" },
     .{ .chords = &.{c('q')}, .command = .quit, .modes = Modes.normal_only, .hint = "quit", .desc = "quit" },
+    .{ .chords = &.{c('F')}, .command = .file_list, .hint = "files", .desc = "list the changed files" },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .desc = "this help" },
@@ -167,18 +178,18 @@ pub const default_bindings: []const Binding = &.{
     // from the filter costs nothing, because matching is case-insensitive.
     // One shared description, which is what collapses them to `H J K L move`
     // in the footer instead of four rows of chrome.
-    .{ .chords = &.{c('H')}, .command = .help_left, .modes = Modes.help_only, .desc = "move" },
-    .{ .chords = &.{c('J')}, .command = .help_down, .modes = Modes.help_only, .desc = "move" },
-    .{ .chords = &.{c('K')}, .command = .help_up, .modes = Modes.help_only, .desc = "move" },
-    .{ .chords = &.{c('L')}, .command = .help_right, .modes = Modes.help_only, .desc = "move" },
+    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.lists, .desc = "move" },
+    .{ .chords = &.{c('J')}, .command = .list_down, .modes = Modes.lists, .desc = "move" },
+    .{ .chords = &.{c('K')}, .command = .list_up, .modes = Modes.lists, .desc = "move" },
+    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.lists, .desc = "move" },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
-    .{ .chords = &.{c(event.code.down)}, .command = .help_down, .modes = Modes.help_only },
-    .{ .chords = &.{c(event.code.up)}, .command = .help_up, .modes = Modes.help_only },
-    .{ .chords = &.{c(event.code.right)}, .command = .help_right, .modes = Modes.help_only },
-    .{ .chords = &.{c(event.code.left)}, .command = .help_left, .modes = Modes.help_only },
-    .{ .chords = &.{ctrl('n')}, .command = .help_down, .modes = Modes.help_only },
-    .{ .chords = &.{ctrl('p')}, .command = .help_up, .modes = Modes.help_only },
+    .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.lists },
+    .{ .chords = &.{c(event.code.up)}, .command = .list_up, .modes = Modes.lists },
+    .{ .chords = &.{c(event.code.right)}, .command = .list_right, .modes = Modes.lists },
+    .{ .chords = &.{c(event.code.left)}, .command = .list_left, .modes = Modes.lists },
+    .{ .chords = &.{ctrl('n')}, .command = .list_down, .modes = Modes.lists },
+    .{ .chords = &.{ctrl('p')}, .command = .list_up, .modes = Modes.lists },
 };
 
 pub const Match = union(enum) {
@@ -427,18 +438,18 @@ test "the popup navigates with its own bindings, live only inside it" {
     var km: Keymap = .{};
     // Shifted HJKL, the advertised set: vim's motions, and free where the Ctrl
     // pair is not.
-    try testing.expectEqual(Command.help_down, km.feed(tap('J'), .help).command);
-    try testing.expectEqual(Command.help_up, km.feed(tap('K'), .help).command);
-    try testing.expectEqual(Command.help_right, km.feed(tap('L'), .help).command);
-    try testing.expectEqual(Command.help_left, km.feed(tap('H'), .help).command);
+    try testing.expectEqual(Command.list_down, km.feed(tap('J'), .help).command);
+    try testing.expectEqual(Command.list_up, km.feed(tap('K'), .help).command);
+    try testing.expectEqual(Command.list_right, km.feed(tap('L'), .help).command);
+    try testing.expectEqual(Command.list_left, km.feed(tap('H'), .help).command);
     // Arrows, which no multiplexer takes, in both axes: the popup is a grid.
-    try testing.expectEqual(Command.help_down, km.feed(tap(event.code.down), .help).command);
-    try testing.expectEqual(Command.help_up, km.feed(tap(event.code.up), .help).command);
-    try testing.expectEqual(Command.help_right, km.feed(tap(event.code.right), .help).command);
-    try testing.expectEqual(Command.help_left, km.feed(tap(event.code.left), .help).command);
+    try testing.expectEqual(Command.list_down, km.feed(tap(event.code.down), .help).command);
+    try testing.expectEqual(Command.list_up, km.feed(tap(event.code.up), .help).command);
+    try testing.expectEqual(Command.list_right, km.feed(tap(event.code.right), .help).command);
+    try testing.expectEqual(Command.list_left, km.feed(tap(event.code.left), .help).command);
     // The finder aliases, for hands that learned them elsewhere.
-    try testing.expectEqual(Command.help_down, km.feed(ctrlTap('n'), .help).command);
-    try testing.expectEqual(Command.help_up, km.feed(ctrlTap('p'), .help).command);
+    try testing.expectEqual(Command.list_down, km.feed(ctrlTap('n'), .help).command);
+    try testing.expectEqual(Command.list_up, km.feed(ctrlTap('p'), .help).command);
 
     // `<C-j>`/`<C-k>` are bound nowhere: a multiplexer eats them before the
     // popup sees them, and a footer advertising a dead key is worse than one
@@ -488,7 +499,7 @@ test "no default binding shadows another" {
     // Modes that never overlap cannot shadow each other: `H` in the popup and
     // a hypothetical `Hx` in the review are different keymaps.
     const ok: []const Binding = &.{
-        .{ .chords = &.{c('H')}, .command = .help_left, .modes = Modes.help_only },
+        .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.lists },
         .{ .chords = &.{ c('H'), c('x') }, .command = .top, .modes = Modes.normal_only },
     };
     try testing.expect(shadowed(ok) == null);

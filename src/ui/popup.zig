@@ -23,43 +23,62 @@ const prompt_mod = @import("prompt.zig");
 /// A byte range inside a border label.
 const Span = struct { start: usize, len: usize };
 
-/// The popup's bottom label, and where the key names sit inside it so they can
-/// be repainted in the accent: a key is a key wherever it is drawn, and one
+/// A border label, and where the key names sit inside it so they can be
+/// repainted in the accent: a key is a key wherever it is drawn, and one
 /// colour in the list with another in the footer makes them look like two
 /// different things.
+const Footer = struct {
+    text: []const u8,
+    keys: []const Span,
+};
+
+/// The bottom label: what the overlay's own keys are, and where the key names
+/// sit inside the text so they can be repainted in the accent.
 ///
 /// Keys sharing a description collapse into one label - four bindings become
 /// `H J K L move`, because four rows each saying "move" is the verbose
-/// spelling of the same thing. `<Esc>` is written rather than generated
-/// because closing is `prompt.zig`'s hardcoded cancel, not a binding.
-fn helpFooter(arena: Allocator, keys: []const keytext.HelpEntry) Allocator.Error!struct {
-    text: []const u8,
-    keys: []const Span,
-} {
+/// spelling of the same thing. `tail` is for the keys that are not bindings:
+/// `<CR>` and `<Esc>` are `prompt.zig`'s submit and cancel, the same two every
+/// prompt has, so they are passed in rather than generated.
+fn footerOf(
+    arena: Allocator,
+    keys: []const keytext.HelpEntry,
+    tail: []const keytext.HelpEntry,
+) Allocator.Error!Footer {
     var out: std.ArrayList(u8) = .empty;
     var spans: std.ArrayList(Span) = .empty;
     try out.appendSlice(arena, " type to filter  ");
+
+    var all: std.ArrayList(keytext.HelpEntry) = .empty;
+    try all.appendSlice(arena, keys);
+    try all.appendSlice(arena, tail);
+
     var n: usize = 0;
-    while (n < keys.len) {
+    while (n < all.items.len) {
         var last = n;
-        while (last + 1 < keys.len and std.mem.eql(u8, keys[last + 1].desc, keys[n].desc)) last += 1;
-        for (keys[n .. last + 1]) |e| {
+        while (last + 1 < all.items.len and
+            std.mem.eql(u8, all.items[last + 1].desc, all.items[n].desc)) last += 1;
+        for (all.items[n .. last + 1]) |e| {
             try spans.append(arena, .{ .start = out.items.len, .len = e.keys.len });
             try out.appendSlice(arena, e.keys);
             try out.appendSlice(arena, " ");
         }
-        try out.appendSlice(arena, keys[n].desc);
+        try out.appendSlice(arena, all.items[n].desc);
         try out.appendSlice(arena, "  ");
         n = last + 1;
     }
-    try spans.append(arena, .{ .start = out.items.len, .len = "<Esc>".len });
-    try out.appendSlice(arena, "<Esc> close ");
-    return .{ .text = out.items, .keys = spans.items };
+    // Trailing separator trimmed: the label sits inside a border, and two
+    // spaces before the corner read as a gap in it.
+    return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
 }
 
-/// One horizontal border of the popup, with a label let into it.
+/// What closing an overlay is bound to, in both of them.
+const close_key: keytext.HelpEntry = .{ .keys = "<Esc>", .desc = "close" };
+
+/// The prefix drawn before the filter text, from the prompt that collects it.
 const prompt_filter_prefix = prompt_mod.Kind.help_filter.prefix();
 
+/// One horizontal border of the box, with a label let into it.
 fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []const u8, inner: u16) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(f.arena, corner_l);
@@ -73,6 +92,36 @@ fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []con
     return out.toOwnedSlice(f.arena);
 }
 
+/// Blanks the box, draws its borders and the two labels let into them, and
+/// returns a run of spaces as wide as the box - which the list then uses to
+/// paint a selected row. Shared by both overlays, because a box is a box: only
+/// what goes inside it differs.
+fn chromeOf(f: Frame, box: Box, title: []const u8, foot: Footer, footer_width: u16) Allocator.Error![]u8 {
+    const blank = try f.arena.alloc(u8, box.width);
+    @memset(blank, ' ');
+    var r: u16 = 0;
+    while (r < box.height) : (r += 1) f.put(box.top + r, box.col, blank, f.theme.text);
+
+    const border = f.theme.popup_border;
+    const inner = box.content + 2;
+    f.put(box.top, box.col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title, inner), border);
+    f.put(box.top + box.height - 1, box.col, try borderLine(f, f.glyphs.box_bl, f.glyphs.box_br, foot.text, inner), border);
+    // `borderLine` lays the label after a corner and one rule glyph, so the
+    // label starts two columns in. Key names are ASCII, so a byte offset into
+    // the label is also a column offset.
+    if (footer_width <= inner) {
+        for (foot.keys) |sp| {
+            f.put(box.top + box.height - 1, box.col + 2 + @as(u16, @intCast(sp.start)), foot.text[sp.start..][0..sp.len], f.theme.accent);
+        }
+    }
+    var body_row: u16 = 1;
+    while (body_row < box.height - 1) : (body_row += 1) {
+        f.put(box.top + body_row, box.col, f.glyphs.box_v, border);
+        f.put(box.top + body_row, box.col + box.width - 1, f.glyphs.box_v, border);
+    }
+    return blank;
+}
+
 /// What a box is laid out from: the widest key column and description in the
 /// list, how many rows there are, and the two labels let into the borders -
 /// all in display columns, measured by the caller because only it has a window
@@ -83,6 +132,10 @@ pub const Metrics = struct {
     entries: usize = 0,
     title: u16 = 0,
     footer: u16 = 0,
+    /// Most columns the grid may use. Two for the key list, which is short
+    /// rows and many of them; one for the file list, where a row is a path and
+    /// splitting them across columns costs the width they need.
+    max_cols: u16 = 2,
 };
 
 /// The space the box may float in: the body, or the whole pane in zen mode.
@@ -129,7 +182,7 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     const one = @max(m.keys + gap + m.desc, 12);
     const max_content = area.width -| 4;
 
-    var cols: u16 = if (one * 2 + gap <= max_content and m.entries > 6) 2 else 1;
+    var cols: u16 = if (m.max_cols > 1 and one * 2 + gap <= max_content and m.entries > 6) 2 else 1;
     var content = @min(max_content, @max(one * cols + (cols - 1) * gap, @max(m.title, m.footer)));
     // A second column that does not actually fit is worse than one: the list
     // would be laid out in a grid the box cannot show.
@@ -185,7 +238,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
     // The popup's own keys, along the bottom with the filter hint. `<Esc>` is
     // `prompt.zig`'s hardcoded cancel rather than a binding, which is why that
     // one is written out and the rest are generated.
-    const foot = try helpFooter(f.arena, v.keys);
+    const foot = try footerOf(f.arena, v.keys, &.{close_key});
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title);
     m.footer = f.win.gwidth(foot.text);
@@ -195,30 +248,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
 
     const text_col = box.col + 2;
     const sel = @min(v.index, entries.len -| 1);
-
-    // Blank the box first: the diff is underneath it, not behind it.
-    const blank = try f.arena.alloc(u8, box.width);
-    @memset(blank, ' ');
-    var r: u16 = 0;
-    while (r < box.height) : (r += 1) f.put(box.top + r, box.col, blank, f.theme.text);
-
-    const border = f.theme.popup_border;
-    const inner = box.content + 2;
-    f.put(box.top, box.col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title, inner), border);
-    f.put(box.top + box.height - 1, box.col, try borderLine(f, f.glyphs.box_bl, f.glyphs.box_br, foot.text, inner), border);
-    // `borderLine` lays the label after a corner and one rule glyph, so the
-    // label starts two columns in. Key names are ASCII, so a byte offset into
-    // the label is also a column offset.
-    if (m.footer <= inner) {
-        for (foot.keys) |sp| {
-            f.put(box.top + box.height - 1, box.col + 2 + @as(u16, @intCast(sp.start)), foot.text[sp.start..][0..sp.len], f.theme.accent);
-        }
-    }
-    var body_row: u16 = 1;
-    while (body_row < box.height - 1) : (body_row += 1) {
-        f.put(box.top + body_row, box.col, f.glyphs.box_v, border);
-        f.put(box.top + body_row, box.col + box.width - 1, f.glyphs.box_v, border);
-    }
+    const blank = try chromeOf(f, box, title, foot, m.footer);
 
     f.put(box.top + 1, text_col, query, f.theme.prompt);
 
@@ -270,7 +300,7 @@ test "the popup footer marks exactly its key names, and no other text" {
         .{ .keys = "J", .desc = "move" },
         .{ .keys = "<Right>", .desc = "column" },
     };
-    const foot = try helpFooter(arena, nav);
+    const foot = try footerOf(arena, nav, &.{close_key});
 
     // Same description, so `H` and `J` collapse under one label.
     try testing.expectEqualStrings(" type to filter  H J move  <Right> column  <Esc> close ", foot.text);
@@ -348,4 +378,94 @@ test "an empty list still draws a box to say so in" {
     try testing.expectEqual(@as(usize, 0), box.shown);
     try testing.expectEqual(@as(usize, 0), box.hidden);
     try testing.expect(box.height >= 4);
+}
+
+/// The `F` overlay: every changed file, filtered as you type, `Enter` to jump.
+/// One column always - a row is a path, and splitting paths across two columns
+/// costs each of them the width it needs.
+pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Allocator.Error!void {
+    const entries = v.entries;
+
+    var m: Metrics = .{ .entries = entries.len, .max_cols = 1 };
+    for (entries) |e| {
+        m.keys = @max(m.keys, f.win.gwidth(e.path));
+        m.desc = @max(m.desc, countsWidth(e));
+    }
+
+    const title = " files ";
+    const foot = try footerOf(f.arena, v.keys, &.{
+        .{ .keys = "<CR>", .desc = "open" },
+        close_key,
+    });
+    const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
+    m.title = f.win.gwidth(title);
+    m.footer = f.win.gwidth(foot.text);
+
+    const box = fit(m, v.index, .{ .width = f.width(), .top = top, .height = height }) orelse return;
+    if (v.layout) |hl| hl.* = .{ .cols = box.cols, .per = box.per };
+
+    const text_col = box.col + 2;
+    const sel = @min(v.index, entries.len -| 1);
+    const blank = try chromeOf(f, box, title, foot, m.footer);
+
+    f.put(box.top + 1, text_col, query, f.theme.prompt);
+
+    const list_top = box.top + 2;
+    var i: usize = 0;
+    while (i < box.shown) : (i += 1) {
+        const row = list_top + @as(u16, @intCast(i));
+        const e = entries[box.offset + i];
+        const on = box.offset + i == sel;
+        const bg = if (on) f.theme.cursor_line.bg else null;
+        if (on) f.put(row, text_col - 1, blank[0 .. box.content + 2], f.theme.cursor_line);
+
+        // The file the review is on is marked rather than merely selected:
+        // "where I am" and "what I am pointing at" are different questions,
+        // and the list is opened to answer the first.
+        const mark = if (e.current) f.glyphs.sep else " ";
+        f.put(row, text_col, mark, frame_mod.withBg(f.theme.accent, bg));
+        f.put(row, text_col + 1, e.path, frame_mod.withBg(if (e.current) f.theme.path else f.theme.text, bg));
+
+        // Counts right-aligned inside the box, so the paths stay readable as a
+        // column even when one of them is very long.
+        const counts_col = text_col + box.content - countsWidth(e);
+        if (counts_col > text_col + 1 + f.win.gwidth(e.path)) {
+            var col = counts_col;
+            col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
+            _ = try f.print(row, col, frame_mod.withBg(f.theme.removed_count, bg), "{s}{d}", .{ f.glyphs.del, e.removed });
+        }
+    }
+
+    if (box.hidden > 0) {
+        const more = try std.fmt.allocPrint(f.arena, "+{d} more", .{box.hidden});
+        f.put(list_top + @as(u16, @intCast(box.per)), text_col, more, f.theme.dim);
+    }
+    if (entries.len == 0) {
+        f.put(list_top, text_col, "no file matches", f.theme.dim);
+    }
+}
+
+/// Width of `+12 −4`, which the layout needs before anything is drawn.
+fn countsWidth(e: frame_mod.FileEntry) u16 {
+    return @intCast(2 + digits(e.added) + digits(e.removed) + 1);
+}
+
+fn digits(n: u32) usize {
+    var w: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) w += 1;
+    return w;
+}
+
+test "a file list is one column, however wide the pane" {
+    // Two columns of paths would give each of them half the width it needs,
+    // and a path truncated in the middle is not a path.
+    const m: Metrics = .{ .keys = 20, .desc = 8, .entries = 20, .title = 7, .footer = 50, .max_cols = 1 };
+    const wide = fit(m, 0, .{ .width = 200, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(@as(u16, 1), wide.cols);
+
+    // The key list, with the same measurements, does take the second column.
+    var keys = m;
+    keys.max_cols = 2;
+    try testing.expectEqual(@as(u16, 2), fit(keys, 0, .{ .width = 200, .top = 0, .height = 30 }).?.cols);
 }

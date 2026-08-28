@@ -28,6 +28,7 @@ pub const Glyphs = frame_mod.Glyphs;
 pub const chrome_rows = frame_mod.chrome_rows;
 pub const bodyHeight = frame_mod.bodyHeight;
 pub const drawHelpPopup = popup.draw;
+pub const drawFileList = popup.drawFiles;
 
 pub fn draw(f: Frame, v: View) Allocator.Error!void {
     f.win.clear();
@@ -40,6 +41,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         // drawing an input line with nothing to anchor it.
         try body_mod.draw(f, v, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
+        if (v.files) |fv| try popup.drawFiles(f, fv, 0, h);
         return;
     }
     if (h < chrome_rows + 1) return drawTooSmall(f);
@@ -50,8 +52,10 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
     if (v.prompt) |p| drawPrompt(f, p, h - 1) else try drawMode(f, v, h - 1);
 
-    // Last, and over everything: it is a layer, not a pane.
+    // Last, and over everything: an overlay is a layer, not a pane. Only one
+    // can be open, because each is its own mode.
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
+    if (v.files) |fv| try popup.drawFiles(f, fv, 2, bodyHeight(h, false));
 }
 
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.

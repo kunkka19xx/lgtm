@@ -87,7 +87,7 @@ Deliberately out of scope for v1. Written down so scope creep has something to b
 - **Change detection:** v0.1 polls every 500 ms; v0.2 replaces it with native filesystem events. Either way, **debounce 200 ms before re-diffing** - agents write in bursts and often leave a file half-written for a few milliseconds. Without debounce you render torn states and the screen flickers.
 - Only re-diff files that changed. Never re-diff the whole repo.
 - Hunk headers show the **enclosing function name** (from the lexer's brace-depth scan, not git's regex heuristic) plus a **change id** (`#3`) for referring to it in conversation. See §6.5 for how ids stay stable.
-- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `F`. Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain supported (options 1a and 1b). `Tab` toggles a full-screen diff.
+- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `F` - an overlay, not a pane, so it costs rows only while it is open (both shipped). Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain supported (options 1a and 1b). `Tab` toggles a full-screen diff.
 - Files with more than 5,000 changed lines render a summary; the diff loads lazily on open.
 
 **Unified vs side-by-side - responsive**

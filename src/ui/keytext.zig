@@ -12,6 +12,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const event = @import("../core/event.zig");
+const fuzzy = @import("fuzzy.zig");
 const keymap = @import("keymap.zig");
 
 const Binding = keymap.Binding;
@@ -194,17 +195,16 @@ pub const HelpEntry = struct {
 
 /// Whether `b` belongs in the popup for `mode` under `filter`, and how well it
 /// matched. One predicate, used by both `helpEntries` and `helpCount`.
-fn ranked(b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, run: bool } {
+fn ranked(b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, tier: fuzzy.Tier } {
     if (!b.modes.has(mode)) return null;
     const d = b.desc orelse return null;
     const keys = bufWriteChords(b.chords, kbuf);
-    if (filter.len == 0) return .{ .keys = keys, .desc = d, .run = true };
-
+    // The filter runs over the keys as well as the description, so `spc` finds
+    // the leader bindings and `ctrl` does not have to be spelled `<C-`.
     var hay: [max_keys_bytes + 128]u8 = undefined;
     const text = std.fmt.bufPrint(&hay, "{s} {s}", .{ keys, d }) catch keys;
-    if (containsIgnoreCase(text, filter)) return .{ .keys = keys, .desc = d, .run = true };
-    if (fuzzyMatch(text, filter)) return .{ .keys = keys, .desc = d, .run = false };
-    return null;
+    const tier = fuzzy.match(text, filter) orelse return null;
+    return .{ .keys = keys, .desc = d, .tier = tier };
 }
 
 /// How many rows the popup will have. Lets the selection be clamped without
@@ -218,26 +218,6 @@ pub fn helpCount(bindings: []const Binding, mode: event.Mode, filter: []const u8
     return n;
 }
 
-/// Subsequence match, case-insensitive: `nfl` finds "next file". The same
-/// shape of matching as every fuzzy finder the user already has, and enough
-/// for a list of two dozen rows - there is no ranking, because with a list
-/// this short the original order is more useful than a score.
-pub fn fuzzyMatch(text: []const u8, query: []const u8) bool {
-    if (query.len == 0) return true;
-    var qi: usize = 0;
-    for (text) |ch| {
-        if (std.ascii.toLower(ch) == std.ascii.toLower(query[qi])) {
-            qi += 1;
-            if (qi == query.len) return true;
-        }
-    }
-    return false;
-}
-
-/// The `?` overlay's contents for `mode`, narrowed by `filter`. Bindings with
-/// no `desc` are aliases and stay out, exactly as they stay out of the hint
-/// strip. The filter runs over the keys as well as the description, so `spc`
-/// finds the leader bindings and `ctrl` does not have to be spelled `<C-`.
 pub fn helpEntries(
     bindings: []const Binding,
     mode: event.Mode,
@@ -253,24 +233,13 @@ pub fn helpEntries(
         // Two tiers rather than a score: a run of the query as typed comes
         // first, scattered letters after. Without this, "file" pulls up
         // "gg first line" alongside "next file" and the list reads as noise.
-        if (r.run) try solid.append(arena, entry) else try loose.append(arena, entry);
+        switch (r.tier) {
+            .solid => try solid.append(arena, entry),
+            .loose => try loose.append(arena, entry),
+        }
     }
     try solid.appendSlice(arena, loose.items);
     return solid.toOwnedSlice(arena);
-}
-
-/// Case-insensitive substring, the stronger half of the match.
-pub fn containsIgnoreCase(text: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > text.len) return false;
-    var i: usize = 0;
-    outer: while (i + needle.len <= text.len) : (i += 1) {
-        for (needle, 0..) |ch, j| {
-            if (std.ascii.toLower(text[i + j]) != std.ascii.toLower(ch)) continue :outer;
-        }
-        return true;
-    }
-    return false;
 }
 
 const testing = std.testing;
@@ -449,18 +418,6 @@ test "the count and the list agree, whatever the filter" {
         const list = try helpEntries(default_bindings, .normal, q, arena);
         try testing.expectEqual(list.len, helpCount(default_bindings, .normal, q));
     }
-}
-
-test "fuzzy matching is subsequence, case-insensitive" {
-    try testing.expect(fuzzyMatch("next file", "nfl"));
-    try testing.expect(fuzzyMatch("next file", "NEXT"));
-    try testing.expect(fuzzyMatch("anything", ""));
-    try testing.expect(!fuzzyMatch("next file", "xn"));
-
-    try testing.expect(containsIgnoreCase("next file", "T FI"));
-    try testing.expect(!containsIgnoreCase("next file", "nfl"));
-    // A needle longer than the haystack must not read past the end.
-    try testing.expect(!containsIgnoreCase("ab", "abc"));
 }
 
 test "every advertised key also explains itself in the overlay" {

@@ -23,6 +23,7 @@ const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
 
 const config = @import("../config.zig");
+const files_mod = @import("files.zig");
 const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
 const keytext = @import("keytext.zig");
@@ -102,6 +103,11 @@ pub const App = struct {
     /// The `?` overlay: filter, selection and the grid the last frame drew.
     /// See `ui/help.zig` - the rules it follows are its own.
     help: help_mod.Help = .{},
+    /// The `F` overlay, which follows the same rules over a different list.
+    /// Named for the command that opens it, because `files()` is already the
+    /// review's own list and the two are one keystroke apart in the reader's
+    /// head as it is.
+    file_list: files_mod.Files = .{},
     /// Config-owned behaviour; see `Nav`.
     nav: Nav = .{},
     prompt: prompt_mod.Prompt = .{},
@@ -258,10 +264,13 @@ pub const App = struct {
             .open_editor => self.want_editor = true,
             .toggle_zen => self.zen = !self.zen,
             .help => self.toggleHelp(),
-            .help_down => self.help.move(self.km.bindings, 1),
-            .help_up => self.help.move(self.km.bindings, -1),
-            .help_right => self.help.moveColumn(self.km.bindings, 1),
-            .help_left => self.help.moveColumn(self.km.bindings, -1),
+            .file_list => self.toggleFiles(),
+            // One set of list keys, two overlays. Which one they move is the
+            // mode, because only one of them can be open.
+            .list_down => self.moveList(1),
+            .list_up => self.moveList(-1),
+            .list_right => self.pageList(1),
+            .list_left => self.pageList(-1),
         }
         self.clampScroll(body);
     }
@@ -316,6 +325,58 @@ pub const App = struct {
 
     /// Keys inside the popup are filter text, not commands - the same rule the
     /// bottom-line prompt follows, and why `help` is a mode the keymap ignores.
+    /// `F` opens the file list; `F`, `Esc` or backspacing out of an empty
+    /// filter closes it. One command for both, the way `?` and `V` are one.
+    fn toggleFiles(self: *App) void {
+        if (self.mode == .finder) {
+            self.file_list.close();
+            self.mode = .normal;
+        } else {
+            self.file_list.open(files_mod.rowOf(self.review.files(), self.file_index));
+            self.mode = .finder;
+        }
+    }
+
+    fn moveList(self: *App, delta: i32) void {
+        switch (self.mode) {
+            .help => self.help.move(self.km.bindings, delta),
+            .finder => self.file_list.move(self.review.files(), delta),
+            else => {},
+        }
+    }
+
+    fn pageList(self: *App, delta: i32) void {
+        switch (self.mode) {
+            .help => self.help.moveColumn(self.km.bindings, delta),
+            .finder => self.file_list.movePage(self.review.files(), delta),
+            else => {},
+        }
+    }
+
+    /// Keys inside the file list are filter text, exactly as in the `?`
+    /// overlay. `Enter` jumps to the selected file, which is the whole point
+    /// of the list and the one thing it does that `?` does not.
+    fn feedFiles(self: *App, key: event.Key, body: u16) !void {
+        switch (self.km.feed(key, .finder)) {
+            .command => |cmd| return self.run(cmd, body),
+            .pending, .none => {},
+        }
+        switch (self.file_list.feed(key)) {
+            .stay => {},
+            .close => self.toggleFiles(),
+            .open => {
+                if (self.file_list.selected(self.review.files())) |i| {
+                    if (i != self.file_index) {
+                        self.file_index = i;
+                        try self.rebuildRows(.reset);
+                    }
+                }
+                self.toggleFiles();
+                self.clampScroll(body);
+            },
+        }
+    }
+
     fn feedHelp(self: *App, key: event.Key, body: u16) !void {
         // Navigation is an action and stays in the keymap, so it is remappable
         // like everything else. Only bindings live in `.help` can match here,
@@ -570,6 +631,7 @@ pub const App = struct {
                 // they never reach the keymap.
                 if (self.mode == .command) return self.feedPrompt(k, body);
                 if (self.mode == .help) return self.feedHelp(k, body);
+                if (self.mode == .finder) return self.feedFiles(k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
@@ -645,6 +707,7 @@ const testing = std.testing;
 // module joins `zig build check` where it is used: the ones the run loop pulls
 // in are listed in `loop.zig`, and `main.zig` covers the rest.
 test {
+    _ = files_mod;
     _ = help_mod;
     _ = keymap;
     _ = keytext;
@@ -1174,6 +1237,89 @@ test "the popup is available when there is nothing to review" {
     try fx.press("<Esc>");
     try fx.expectMode(.normal);
     try testing.expect(try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena) == null);
+}
+
+// -- the file list, as the app drives it ---------------------------------
+
+test "F opens the file list on the file the review is showing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("]f");
+    try fx.expectFile(1);
+    try fx.press("F");
+    try fx.expectMode(.finder);
+    // Opened on the current file, so the list says where the reader is before
+    // it offers to move them.
+    try testing.expectEqual(@as(u32, 1), fx.app.file_list.selected(fx.app.files()).?);
+
+    // `F` does *not* close it: inside the overlay a keystroke is filter text,
+    // and `F` is a letter that appears in paths. Escape closes, the way it
+    // does in the `?` overlay and in every prompt.
+    try fx.press("F");
+    try fx.expectMode(.finder);
+    try testing.expectEqualStrings("F", fx.app.file_list.filter.text());
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
+    try fx.expectFile(1);
+}
+
+test "Enter jumps to the selected file, Escape leaves the review alone" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("F");
+    try fx.press("J");
+    try fx.press("<CR>");
+    try fx.expectMode(.normal);
+    try fx.expectFile(1);
+    // A jump is a move to a different file, so the cursor starts at the top of
+    // it rather than wherever the last file's cursor happened to be.
+    try fx.expectCursor(fx.app.rows.firstLineRow());
+
+    // Escape closes without moving.
+    try fx.press("F");
+    try fx.press("K");
+    try fx.press("<Esc>");
+    try fx.expectMode(.normal);
+    try fx.expectFile(1);
+}
+
+test "keys under the file list filter it rather than reaching the review" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    const moved = fx.app.cursor;
+    try fx.press("F");
+
+    // `j` and `q` are a motion and a quit in the review; in here they are
+    // letters, and the review must not move behind the overlay.
+    try fx.typeIn("jq");
+    try fx.expectCursor(moved);
+    try testing.expect(!fx.app.quit);
+    try testing.expectEqualStrings("jq", fx.app.file_list.filter.text());
+
+    // The filter narrows what Enter would open, and a filter matching nothing
+    // opens nothing rather than the wrong file.
+    try fx.press("<CR>");
+    try fx.expectFile(0);
+    try fx.expectMode(.normal);
+}
+
+test "the file list filters by path and opens what it is showing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("F");
+    try fx.typeIn("b.z");
+    try testing.expectEqual(@as(usize, 1), files_mod.count(fx.app.files(), fx.app.file_list.filter.text()));
+    try fx.press("<CR>");
+    try fx.expectFile(1);
+
+    // Closing cleared the query, so `F` never reopens onto a stale filter.
+    try fx.press("F");
+    try testing.expectEqual(@as(usize, 0), fx.app.file_list.filter.text().len);
 }
 
 // -- search and the prompt -----------------------------------------------
