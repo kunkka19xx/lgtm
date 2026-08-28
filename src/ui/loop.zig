@@ -24,7 +24,7 @@ const config = @import("../config.zig");
 const app_mod = @import("app.zig");
 const App = app_mod.App;
 const editor = @import("editor.zig");
-const keymap = @import("keymap.zig");
+const keytext = @import("keytext.zig");
 const render = @import("render.zig");
 const theme_mod = @import("theme.zig");
 
@@ -213,7 +213,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
     if (app.view()) |v| {
         var shown = v;
         var hint_buf: [256]u8 = undefined;
-        shown.hints = try arena.dupe(u8, keymap.hints(app.km.bindings, app.mode, &hint_buf));
+        shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {

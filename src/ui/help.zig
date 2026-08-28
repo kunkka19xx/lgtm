@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 
 const event = @import("../core/event.zig");
 const keymap = @import("keymap.zig");
+const keytext = @import("keytext.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
 
@@ -68,7 +69,7 @@ pub const Help = struct {
     /// Clamped against the same filter the popup is drawn from, so the
     /// selection can never sit past the end of what is on screen.
     pub fn move(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
-        const n = keymap.helpCount(bindings, self.from, self.filter.text());
+        const n = keytext.helpCount(bindings, self.from, self.filter.text());
         if (n == 0) {
             self.index = 0;
             return;
@@ -97,12 +98,12 @@ pub const Help = struct {
         if (mode != .help) return null;
         const filter = self.filter.text();
         return .{
-            .entries = try keymap.helpEntries(bindings, self.from, filter, arena),
+            .entries = try keytext.helpEntries(bindings, self.from, filter, arena),
             .query = filter,
             .index = self.index,
             // The popup's own keys, along the bottom border: those live in
             // `.help`, not in the mode being described.
-            .keys = try keymap.helpEntries(bindings, .help, "", arena),
+            .keys = try keytext.helpEntries(bindings, .help, "", arena),
             .layout = &self.layout,
         };
     }
@@ -116,7 +117,7 @@ test "a selection is clamped against the list the filter leaves" {
 
     // Past the end stops at the last row rather than running off it.
     h.move(keymap.default_bindings, 1000);
-    const n = keymap.helpCount(keymap.default_bindings, .normal, "");
+    const n = keytext.helpCount(keymap.default_bindings, .normal, "");
     try testing.expectEqual(n - 1, h.index);
 
     // And past the start stops at the first.
@@ -130,7 +131,7 @@ test "a filter that matches nothing leaves nothing to select" {
     _ = h.feed(.{ .codepoint = 'z', .mods = .{} });
     _ = h.feed(.{ .codepoint = 'z', .mods = .{} });
     _ = h.feed(.{ .codepoint = 'q', .mods = .{} });
-    try testing.expectEqual(@as(usize, 0), keymap.helpCount(keymap.default_bindings, .normal, h.filter.text()));
+    try testing.expectEqual(@as(usize, 0), keytext.helpCount(keymap.default_bindings, .normal, h.filter.text()));
     h.move(keymap.default_bindings, 1);
     try testing.expectEqual(@as(usize, 0), h.index);
 }

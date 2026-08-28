@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 
 const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
+const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
 
 /// A config file larger than this is not a config file. Reading it is the one
@@ -237,7 +238,7 @@ pub const Loader = struct {
         const proto = protoFor(cmd);
         for (seqs, 0..) |seq, i| {
             var buf: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
-            const chords = keymap.parseChords(seq, &buf) catch |err| {
+            const chords = keytext.parseChords(seq, &buf) catch |err| {
                 self.note(src, line, "keys.{s}: cannot read \"{s}\" ({t})", .{ key, seq, err });
                 return;
             };
@@ -280,10 +281,10 @@ pub const Loader = struct {
         // previous keymap is what FEATURES.md 4.9 asks for: fall back for
         // that key only, and say why.
         if (keymap.shadowed(next.items)) |hit| {
-            var fbuf: [keymap.max_keys_bytes]u8 = undefined;
-            var sbuf: [keymap.max_keys_bytes]u8 = undefined;
-            const first = keymap.bufWriteChords(hit.first.chords, &fbuf);
-            const second = keymap.bufWriteChords(hit.second.chords, &sbuf);
+            var fbuf: [keytext.max_keys_bytes]u8 = undefined;
+            var sbuf: [keytext.max_keys_bytes]u8 = undefined;
+            const first = keytext.bufWriteChords(hit.first.chords, &fbuf);
+            const second = keytext.bufWriteChords(hit.second.chords, &sbuf);
             switch (hit.kind) {
                 .prefix => self.note(src, line, "keys.{s}: {s} shadows {s} ({s}), which could then never fire", .{
                     key, first, second, @tagName(hit.second.command),
@@ -697,7 +698,7 @@ test "an empty list unbinds and stops advertising" {
     // The hint strip is generated from the bindings, so an unbound command
     // simply stops being offered rather than advertising a dead key.
     var buf: [256]u8 = undefined;
-    const strip = keymap.hints(l.cfg.keys, .normal, &buf);
+    const strip = keytext.hints(l.cfg.keys, .normal, &buf);
     try testing.expect(std.mem.indexOf(u8, strip, "e edit") == null);
 }
 

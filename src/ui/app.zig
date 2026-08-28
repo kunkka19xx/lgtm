@@ -25,6 +25,7 @@ const metrics = @import("../io/metrics.zig");
 const config = @import("../config.zig");
 const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
+const keytext = @import("keytext.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
 const review_mod = @import("review.zig");
@@ -651,6 +652,7 @@ const testing = std.testing;
 test {
     _ = help_mod;
     _ = keymap;
+    _ = keytext;
     _ = prompt_mod;
     _ = render;
     _ = review_mod;
@@ -1135,7 +1137,7 @@ test "the popup selection moves with the arrows, and stops at both ends" {
     try testing.expectEqual(@as(usize, 1), fx.app.help.index);
 
     // And it cannot walk past the last row.
-    const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
+    const n = keytext.helpCount(fx.app.km.bindings, .normal, "");
     var i: usize = 0;
     while (i < n + 5) : (i += 1) try fx.key(event.code.down);
     try testing.expectEqual(n - 1, fx.app.help.index);
@@ -1170,7 +1172,7 @@ test "left and right move by a whole column of the grid the frame drew" {
 
     // Right from the last column clamps to the final row instead of running
     // off the end of the list.
-    const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
+    const n = keytext.helpCount(fx.app.km.bindings, .normal, "");
     fx.app.help.index = n - 1;
     try fx.key(event.code.right);
     try testing.expectEqual(n - 1, fx.app.help.index);
@@ -1195,7 +1197,7 @@ test "narrowing the filter puts the selection back at the top" {
     try fx.key('z');
     try fx.key(event.code.down);
     try testing.expectEqual(@as(usize, 0), fx.app.help.index);
-    try testing.expectEqual(@as(usize, 0), keymap.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text()));
+    try testing.expectEqual(@as(usize, 0), keytext.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text()));
 }
 
 test "the popup is available when there is nothing to review" {

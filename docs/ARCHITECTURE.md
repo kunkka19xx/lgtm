@@ -469,8 +469,12 @@ lgtm/
 │   │   ├── app.zig        # state, command dispatch, motions
 │   │   ├── review.zig     # one diff generation: git, buffers, ids, lex cache
 │   │   ├── rows.zig       # the row model, vaxis-free and headless-testable
-│   │   ├── render.zig     # one frame: status, body, mode line
-│   │   ├── keymap.zig     # key sequences to command names
+│   │   ├── frame.zig      # what a frame is drawn onto, and from
+│   │   ├── render.zig     # the chrome, and the order things are drawn in
+│   │   ├── body.zig       # the diff itself, one screen row at a time
+│   │   ├── popup.zig      # the `?` overlay: geometry, then drawing
+│   │   ├── keymap.zig     # what keys mean: bindings, matcher, conflicts
+│   │   ├── keytext.zig    # how keys are written: chords, hints, help rows
 │   │   ├── help.zig       # the `?` overlay's filter and selection
 │   │   ├── prompt.zig     # the `/` and `:` input line
 │   │   ├── search.zig     # matching across the whole review
