@@ -1,5 +1,17 @@
 # lgtm
 
+
+```
+██╗      ██████╗ ████████╗███╗   ███╗  
+██║     ██╔════╝ ╚══██╔══╝████╗ ████║
+██║     ██║  ███╗   ██║   ██╔████╔██║ 👍
+██║     ██║   ██║   ██║   ██║╚██╔╝██║
+███████╗╚██████╔╝   ██║   ██║ ╚═╝ ██║
+╚══════╝ ╚═════╝    ╚═╝   ╚═╝     ╚═╝
+```
+
+
+
 **Read what your agent wrote - before you say LGTM.**
 
 A terminal diff reviewer built for agentic coding. Runs in a pane beside your agent CLI, shows what it changed as it changes, and lets you point at exact lines when you reply.

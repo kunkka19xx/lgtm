@@ -28,12 +28,12 @@ No product code until the skeleton builds, tests, and measures.
 
 ReleaseFast, macOS arm64, with vaxis, zigimg and uucode linked:
 
-| Metric | Budget | Measured |
-|---|---|---|
-| Binary size | under 1 MB (reference: zide) | 653 KB |
-| Peak RSS | 40 MB | 1.6 MB |
-| Cold start (warm cache) | 50 ms | under 10 ms |
-| Frame render, 80x24 | 8 ms | 0.29 ms (render alone 0.21 ms) |
+| Metric                  | Budget                       | Measured                       |
+| ----------------------- | ---------------------------- | ------------------------------ |
+| Binary size             | under 1 MB (reference: zide) | 653 KB                         |
+| Peak RSS                | 40 MB                        | 1.6 MB                         |
+| Cold start (warm cache) | 50 ms                        | under 10 ms                    |
+| Frame render, 80x24     | 8 ms                         | 0.29 ms (render alone 0.21 ms) |
 
 The `zigimg` question from ARCHITECTURE.md 5c is answered: it is fetched and compiled, but dead-code elimination keeps it out of the binary. 653 KB and 1.6 MB RSS leave ample headroom. No action needed; recheck if binary size ever approaches 1 MB.
 
@@ -56,9 +56,9 @@ Standalone, no terminal. This decides whether review notes are viable (docs esti
 
 **Gate: PASSED.** ReleaseFast, all eight fixtures:
 
-| Metric | Gate | Measured |
-|---|---|---|
-| Hit rate | >= ~90% | **100%** (24/24) |
+| Metric              | Gate    | Measured                                        |
+| ------------------- | ------- | ----------------------------------------------- |
+| Hit rate            | >= ~90% | **100%** (24/24)                                |
 | Re-anchor, 50 notes | <= 5 ms | **0.117 ms**, including lazy index construction |
 
 Resolved by: `mapped` 22, `normalised_hash` 1, `stale` 1. The harness prints
@@ -152,7 +152,7 @@ a timing-dependent test in CI.
 - [x] `lang/zig.zig` first, then `rust.zig`, `go.zig`, `python.zig`; everything else renders plain without crashing
 - [x] `Highlighter` union `{lexer, tree_sitter, plain}` with `tree_sitter` unimplemented (ARCHITECTURE.md 5). `.plain` emits one `.text` run per line rather than nothing, so callers have no special case
 - [x] Guard rails: over 500 KB or 10k lines falls to plain; LRU cache of ~32 files keyed by content hash
-- [ ] Checkpoint invalidation from the first changed line: **not built, with evidence.** The whole-file pass costs 0.5 ms over a 6.4k-line corpus against a 100 ms re-diff budget, so a partial rebuild would save half a millisecond and cost a second code path that can disagree with the first. PERFORMANCE.md 6.2 makes the *data structure* T0 and that is what shipped; the incremental rebuild waits for a profile that wants it
+- [ ] Checkpoint invalidation from the first changed line: **not built, with evidence.** The whole-file pass costs 0.5 ms over a 6.4k-line corpus against a 100 ms re-diff budget, so a partial rebuild would save half a millisecond and cost a second code path that can disagree with the first. PERFORMANCE.md 6.2 makes the _data structure_ T0 and that is what shipped; the incremental rebuild waits for a profile that wants it
 - [ ] "Lex the visible range plus a margin": the API takes `(from, to, state)` and the benchmark measures it at 4.5 us per 50-line screen, but nothing calls it that way until the renderer exists. Phase 5 owes the caller, not phase 4
 
 **Zig first rather than Rust.** The plan said Rust first. Every fixture, every recorded session and every file in this repository is Zig, so a Rust-first order would have meant testing the first language against no real code. Rust, Go and Python all landed in the same phase anyway, and all four are exercised against real files through `zig build lex`.
@@ -168,12 +168,12 @@ Two harnesses, matching the pattern of earlier phases:
 
 ReleaseFast, 27 Zig files under `src/`, 6453 lines, 227 KB.
 
-| | first working version | after the optimisation pass |
-|---|---|---|
-| Structure pass | 148 ns/line | **77 ns/line** (0.50 ms for the corpus) |
-| Full lex | 208 MB/s | **378 MB/s** (0.57 ms for the corpus) |
-| One 50-line screen | 7.0 us | **4.5 us** |
-| Cache hit | 5149 ns | **20 ns** |
+|                    | first working version | after the optimisation pass             |
+| ------------------ | --------------------- | --------------------------------------- |
+| Structure pass     | 148 ns/line           | **77 ns/line** (0.50 ms for the corpus) |
+| Full lex           | 208 MB/s              | **378 MB/s** (0.57 ms for the corpus)   |
+| One 50-line screen | 7.0 us                | **4.5 us**                              |
+| Cache hit          | 5149 ns               | **20 ns**                               |
 
 Nothing here was optimised on a hunch; the benchmark was written first and each change was kept only because it moved a number.
 
@@ -209,7 +209,7 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] Diff arena resets per re-diff, frame arena per render - and the frame arena resets **after** render and flush, never before (ARCHITECTURE.md 5c)
 - [x] Rendering via the libvaxis low-level API only; `vxfw` is not imported
 - [x] Output through the `io/tty.zig` buffered writer, one flush per frame
-- [x] **`vx.resize` only on an actual resize event.** Found by using it: `j`/`k` flickered. `resize` reallocates both screen buffers and discards `screen_last`, which *is* the damage-tracking baseline - vaxis's own source says "this has the effect of redrawing every cell" - so calling it per frame repainted all 2080 cells per keystroke. Measured with `tmux pipe-pane`: **3949 bytes per keypress before, 248 after**. The winsize ioctl is gone from the frame path too; `WinsizeNotifier` already delivered resizes as events
+- [x] **`vx.resize` only on an actual resize event.** Found by using it: `j`/`k` flickered. `resize` reallocates both screen buffers and discards `screen_last`, which _is_ the damage-tracking baseline - vaxis's own source says "this has the effect of redrawing every cell" - so calling it per frame repainted all 2080 cells per keystroke. Measured with `tmux pipe-pane`: **3949 bytes per keypress before, 248 after**. The winsize ioctl is gone from the frame path too; `WinsizeNotifier` already delivered resizes as events
 - [x] `Window.gwidth()` for display width everywhere a field is right-aligned
 - [x] Hunk headers: `@@ #<id> ▏ <enclosing fn> ▏ <range> @@`, the name coming from phase 4's brace-depth scan
 - [x] Syntax highlighting per row, from whole-file runs cached on the blob hash
@@ -231,12 +231,12 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] 5c, part: the consistency between themes is asserted, not trusted. Every bundled palette is checked for an accent distinguishable from its own greys, an add sign distinguishable from its delete sign, and text that survives being drawn on its cursor line. **Rosé Pine is why**: it has no green, and choosing one by eye is how a port ends up with an unreadable add sign, so it uses the palette's own published ANSI mapping
 - [x] 5c, part: `config.zig`. A TOML subset parsed in one pass - tables, `key = value`, strings, booleans, integers, single-line string arrays - read from `~/.config/lgtm/config.toml` (or `$XDG_CONFIG_HOME`) and then `.lgtm/config.toml`, merged key by key rather than file by file (FEATURES.md 4.8). `--config <path>` reads one file instead, which is also how it is driven in a test. The surface is what exists to configure today: `[nav] hunk_crosses_files` and `scrolloff` (the last hardcoded policy constant in `app.zig`), `[ui] icons`, and `[keys]` remapping any command by the spelling the `?` popup prints. Themes, templates and risk rules add sections when they land; nothing outside `config.zig` knows the file format, so a real TOML dependency could replace the parser without touching a call site
 - [x] 5c, part: **never fatal, and specific about why** (FEATURES.md 4.9). A bad line costs that one key its value and nothing else: the key keeps its default, the file, line and key are reported, and the rest of the file still applies. The first problem and a count of the others go to the status line on the first frame - `config: config.toml:2: unknown key 'nav.scroloff' (+1 more)` - and are cleared by the first keystroke like any other notice. An unknown `[section]` is reported once at its header rather than once per key inside it, so a `[templates]` block read by an older binary costs one line of complaint
-- [x] 5c, part: a remap that would shadow another binding is refused rather than accepted. `feed` returns on the first exact match, so a sequence that is a prefix of a longer one fires first and makes it unreachable - `quit = "<Space>"` would leave every leader binding listed in `?` and silently dead. `keymap.shadowed` is the general form of the "never bind the leader on its own" rule, is run over the table an override *would* produce, and reports the pair; the previous keymap stands. It catches the duplicate as well as the prefix - the same sequence bound to two commands leaves the second dead for the same reason - and names the *other* command, not the one being edited It also asserts the shipped defaults, so the next `<Space>x` cannot regress it
+- [x] 5c, part: a remap that would shadow another binding is refused rather than accepted. `feed` returns on the first exact match, so a sequence that is a prefix of a longer one fires first and makes it unreachable - `quit = "<Space>"` would leave every leader binding listed in `?` and silently dead. `keymap.shadowed` is the general form of the "never bind the leader on its own" rule, is run over the table an override _would_ produce, and reports the pair; the previous keymap stands. It catches the duplicate as well as the prefix - the same sequence bound to two commands leaves the second dead for the same reason - and names the _other_ command, not the one being edited It also asserts the shipped defaults, so the next `<Space>x` cannot regress it
 - [x] 5c, part: **the hint strip carried its own text, and remapping exposed it.** Each binding held a finished string - `"]f [f file"` - so `next_file = "]w"` in a config left the status line advertising a key that no longer did anything, which is exactly what FEATURES.md 4.3 says the generated strip cannot do. `Binding.hint` is now the label alone (`"file"`), the keys are rendered from the chords, and bindings sharing a label share an entry. `keymap.parseChords` is the inverse of the popup's `bufWriteChords`, pinned to it by a round-trip test over every default binding - a key read off `?` and pasted into `[keys]` has to parse, or the two spellings drift and only a user finds out
 - [x] 5c, part: SIGWINCH re-layout, preserving cursor and scroll - **and the bug this item named was not the bug**. The empty `.resize` arm looked like a re-layout that never happened; driving it proved otherwise, because the run loop owns `ws`, calls `vx.resize` on the event and clamps the scroll at the top of every iteration. Re-checked at 100x30, 70x14, 110x36, 40x6 and 20x4 ("window too small"), with the cursor at the end of the review, in visual mode, with a `/` prompt open and with the help popup up: every one re-lays out, keeps the cursor and re-windows the popup around its selection. The arm now clamps the scroll itself anyway - not because the loop misses it, but because a resize that a unit test can assert against beats one that only a terminal can
 - [x] 5c, part: **what was actually wrong was the signal handler.** `WinsizeNotifier.onWinch` ran `Queue.push` - a mutex and an allocation - from inside vaxis's SIGWINCH handler. SIGWINCH is delivered to whichever thread is not blocking it, so a signal landing on a thread already holding the queue mutex, or inside the allocator, hangs the process outright: rare, unreproducible and exactly the kind of hang that ships. The handler now does one atomic store and nothing else; the reader thread's existing 50 ms wake turns the flag into an event, measures the terminal there, and coalesces a whole drag into one `resize` at the size the pane settled on. No third thread, and a resize is still on screen within 150 ms of the drag stopping. `register` gained a matching `unregister`, since the handler holds a pointer into `app.run`'s stack frame
 - [ ] `<C-l>` needs a second, chord-free binding. vim-tmux-navigator binds `C-h`/`C-j`/`C-k`/`C-l` at the tmux **root** table and forwards them only to processes matching its vim pattern, which `lgtm` does not match - so refresh is unreachable under a very common config (FEATURES.md 4.4)
-- [x] 5c, part: `]h`/`[h` walk the whole review, crossing files, wrapping only at its far end; `<Space>nh`/`<Space>ph` alias them. Stepping is by hunk *index*, not by row - by row, `[h` could never move, because the cursor lands on `header + 1` and the nearest header above it is the one it just landed on. The policy sits in an `app.Nav` struct (`hunk_crosses_files`, default true) for `config.zig` to fill in (FEATURES.md 4.7b)
+- [x] 5c, part: `]h`/`[h` walk the whole review, crossing files, wrapping only at its far end; `<Space>nh`/`<Space>ph` alias them. Stepping is by hunk _index_, not by row - by row, `[h` could never move, because the cursor lands on `header + 1` and the nearest header above it is the one it just landed on. The policy sits in an `app.Nav` struct (`hunk_crosses_files`, default true) for `config.zig` to fill in (FEATURES.md 4.7b)
 - [x] 5c, part: `?` help popup. A box floating over the diff, sized to content and centred, with a fuzzy filter over both descriptions and rendered keys and an `HJKL` selection moving by row and by column, arrows aliasing it. Shifted rather than `<C-j>`/`<C-k>`, which vim-tmux-navigator takes at the tmux root table before the app sees them. Its own `Mode`, in which the keymap serves navigation only and every other key is filter text, so nothing fires behind it. Rows come from the bindings, so a remapped keymap documents itself; two columns where the width allows, `+N more` rather than a silently truncated list (FEATURES.md 4.4). Grouping by category is not built
 - [x] 5c, part: `app.zig` split, after it reached 1,800 lines and three jobs. `ui/loop.zig` takes the run loop and everything that owns a terminal - the vaxis screen, the input and watch threads, the `$EDITOR` handover - and has no unit tests by construction. `ui/review.zig` takes one diff generation: git, the buffers it overlays, the change ids and the lexer cache. `ui/help.zig` takes the `?` overlay's filter, selection and grid. What is left in `app.zig` is the state a reader has - which file, which row, which mode - and what a key means, which is what all the tests were about anyway. 650 lines of code where there were 1,040, and `rediff` is eight lines instead of eighty
 - [x] 5c, part: three motions had each spelled the same ring arithmetic differently - `]f`, `]h`, and the search's walk across files, the last of it a seventeen-line switch. One `wrapIndex` now answers "where does this step land, and did it come round the end", with the backward case - `@mod`, not `@rem` - pinned by a test. `Rows.empty`, one `EditTarget` for "the file, no line", and the prompt's submit path as its own function are the rest of the sweep
@@ -246,7 +246,7 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] 5c, part: the split cost nothing again, same protocol as the last one - 91 frames of the same fixed repo: frame 0.132 ms → 0.124, render 0.057 → 0.053. `Frame.print` collapsed the format-draw-measure dance the status and mode rows repeated at six call sites, and `Frame`'s methods are `pub` now that two other files call them - they were private and reachable anyway, which is the kind of thing that is true until it is not
 - [x] 5c, part: the `app.zig` tests, which were 60% of what was left of the file. Every test drove the app one codepoint at a time - `fx.key(']'); fx.key('f');` - so `fx.press("]f")`, `press("<Space>nf")`, `press("<Esc>")` now spell a sequence the way the `?` popup prints it and a `[keys]` config writes it, **through the same parser as the config**, so a test and a user's config cannot disagree about what `<Esc>` means. 108 hand-typed keys became 90 sequences. `expectCursor`/`expectFile`/`expectMode`/`expectNotice` replaced 71 `expectEqual(@as(u32, ...))` mouthfuls, and the notice helper asserts what the reader was told rather than pinning the wording
 - [x] 5c, part: tests moved to what they are about and merged where they said it twice. The `anchorLine` pair went with the function to `review.zig` (and took its re-export with it); the popup's clamping, column arithmetic and filter reset now live once, in `help.zig`, leaving the app-level tests to assert the wiring they are actually about - that these keys are bindings live in `.help` and nowhere else. Two pairs of near-identical tests became one each: the file ring wraps at both ends in one test, and the leader forms are checked against their bracket forms in one. 246 tests to 244, with nothing uncovered; the file is 638 lines of code and 749 of tests, grouped under eight banners instead of running in the order they were written
-- [x] 5c, part: the same pass over the rest of the tree, splitting only where a file was doing two jobs and leaving the rest alone. `config.zig` gave up its parser to `toml.zig`, which makes the header's claim - that a real TOML dependency could replace it without touching a call site - literally true: the parser reports *faults* and `config.zig` writes the sentences, because what to tell a user about a bad line depends on what the key meant. `lexer.zig` gave up `token.zig` (kinds and runs) and `langdef.zig` (the vocabulary a language is described in), which also fixes the dependency direction - `lang/zig.zig` described a language by importing the scanner that reads it. `anchor.zig` gave up `linemap.zig`: matching two versions line to line is most of the code, and the tiers that were the point of the file were buried under it. `theme.zig` gave up its seven palettes to `palette.zig`, so adding a theme is adding data
+- [x] 5c, part: the same pass over the rest of the tree, splitting only where a file was doing two jobs and leaving the rest alone. `config.zig` gave up its parser to `toml.zig`, which makes the header's claim - that a real TOML dependency could replace it without touching a call site - literally true: the parser reports _faults_ and `config.zig` writes the sentences, because what to tell a user about a bad line depends on what the key meant. `lexer.zig` gave up `token.zig` (kinds and runs) and `langdef.zig` (the vocabulary a language is described in), which also fixes the dependency direction - `lang/zig.zig` described a language by importing the scanner that reads it. `anchor.zig` gave up `linemap.zig`: matching two versions line to line is most of the code, and the tiers that were the point of the file were buried under it. `theme.zig` gave up its seven palettes to `palette.zig`, so adding a theme is adding data
 - [x] 5c, part: **left alone, deliberately.** `core/diff.zig` parses a unified diff and does nothing else; `syntax/highlight.zig` is choosing a highlighter and memoising it; `io/watch.zig` already separates the pure poller from the thread inside one 267-line file; the five harnesses share about fifteen lines of stdout-and-argv boilerplate, which is less than a module to share it would cost. Splitting those would be motion, not cleaning
 - [x] 5c, part: the seven `test { _ = other_module; }` blocks are not ceremony. The render split lost five tests silently - a module nothing references runs nowhere - and the loss showed up only as a test count dropping from 241 to 236. Every module introduced by these splits is referenced from one, and the count is now part of what a split is checked against
 - [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
@@ -255,13 +255,13 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 **5a gate: PASSED.** ReleaseFast, `-Dprofile`, rendering this repository's own
 working tree in an 80x26 tmux pane.
 
-| Metric | Budget | Measured |
-|---|---|---|
-| Cold start | 50 ms | **under 10 ms** |
-| Frame (keystroke to flush) | 8 ms | **0.171 ms** (render alone 0.071 ms) |
-| Re-diff, whole tree | 100 ms | **3.13 ms** (git subprocess 2.24 ms of it) |
-| Peak RSS | 40 MB | **6.3 MB** |
-| Binary, stripped | under 1 MB | **957 KB - see below** |
+| Metric                     | Budget     | Measured                                   |
+| -------------------------- | ---------- | ------------------------------------------ |
+| Cold start                 | 50 ms      | **under 10 ms**                            |
+| Frame (keystroke to flush) | 8 ms       | **0.171 ms** (render alone 0.071 ms)       |
+| Re-diff, whole tree        | 100 ms     | **3.13 ms** (git subprocess 2.24 ms of it) |
+| Peak RSS                   | 40 MB      | **6.3 MB**                                 |
+| Binary, stripped           | under 1 MB | **957 KB - see below**                     |
 
 Three things the measurement settled:
 
@@ -272,7 +272,7 @@ Three things the measurement settled:
 - **The frame budget is not close to being a constraint.** 0.171 ms against 8 ms
   means the over-draw strategy is fine and row-level dirty tracking stays
   unbuilt, exactly as ARCHITECTURE.md 5c asks. Note what this measurement does
-  *not* cover: app-side frame cost was well inside budget while the terminal
+  _not_ cover: app-side frame cost was well inside budget while the terminal
   was being repainted whole. A profile span cannot see bytes on the wire, so
   the flicker above was invisible to it.
 
@@ -288,6 +288,7 @@ tmux pipe-pane -o -t x 'cat >> /tmp/pty.raw'
 A healthy frame is a few hundred bytes, wrapped in synchronized-output markers
 (`?2026h`/`?2026l`), with the cursor hidden and no `2J`. Thousands of bytes, or
 a `2J`, means the damage tracking has been defeated again.
+
 - **Binary size has reached the trigger phase 0 set for it.** That table said
   "recheck if binary size ever approaches 1 MB". It has: 957 KB stripped, 96%
   of budget, with themes, help, config, notes, the finder and the bridge all
@@ -316,10 +317,10 @@ measuring the same thing, and the honest comparison is stripped-to-stripped.
 **Decided: `ReleaseSmall` for distribution builds.** Measured on Linux x86-64,
 stripped-to-stripped:
 
-| Build | Stripped |
-|---|---|
-| Debug | 4.15 MB |
-| ReleaseFast | 982 KB |
+| Build            | Stripped   |
+| ---------------- | ---------- |
+| Debug            | 4.15 MB    |
+| ReleaseFast      | 982 KB     |
 | **ReleaseSmall** | **501 KB** |
 
 `ReleaseFast` has drifted to 98% of the 1 MB budget, so phase 0's trigger was
@@ -327,7 +328,7 @@ real. But `ReleaseSmall` comes in at half the budget - under even phase 0's
 653 KB - which settles it without pulling any other lever: `uucode` stays,
 `gwidth` stays, the default panic handler stays, and no `-Dexternal_uucode`
 flag needs to exist. The 185 KB of Unicode tables and the DWARF unwinder are a
-*Debug*-build weight problem, not a distribution one.
+_Debug_-build weight problem, not a distribution one.
 
 What this does **not** settle: the 5a gate table above was measured under
 `ReleaseFast`. Re-run `--profile` under `ReleaseSmall` before publishing those
@@ -339,11 +340,11 @@ at 62 and 40 with the overlays open; below that it says "window too small"
 rather than drawing a corrupted layout. `--profile` over 91 frames of real
 keystrokes against a fixed repo, ReleaseFast:
 
-| Metric | Budget | Measured |
-|---|---|---|
-| Frame, keystroke to flush | 8 ms | **0.114 ms** |
-| Re-diff, whole tree | 100 ms | **2.4 ms** |
-| Binary, stripped | under 1 MB | **778 KB** (1077 KB with `-Dtraces`) |
+| Metric                    | Budget     | Measured                             |
+| ------------------------- | ---------- | ------------------------------------ |
+| Frame, keystroke to flush | 8 ms       | **0.114 ms**                         |
+| Re-diff, whole tree       | 100 ms     | **2.4 ms**                           |
+| Binary, stripped          | under 1 MB | **778 KB** (1077 KB with `-Dtraces`) |
 
 The binary is the one that needed work rather than luck; see the entry above.
 
@@ -433,25 +434,25 @@ does not exist yet, and nothing can be dogfooded until the TUI does.
 
 The hard rules in CLAUDE.md apply to every line written. The ones easiest to violate accidentally while implementing:
 
-| Rule | Where it bites |
-| --- | --- |
-| Byte offsets everywhere | Phases 1, 2, 4; UTF-16 exists only in a future `lsp/position.zig` |
-| Notes own their bytes, never arena pointers | Phase 2 onward; v0.2 notes |
-| `core/` imports no `ui/`/`bridge/`/terminal | Phases 1, 2 |
-| Only `io/fs.zig`/`io/proc.zig` import `std.fs`/`std.process` | Every phase |
-| `std.Io.Writer` construction stays in `io/tty.zig`; `ui/` receives it | Phases 0, 5 |
-| No `\n` through the bridge, no Enter, trailing space | Phase 6 |
-| `Wyhash` only, never cryptographic | Phases 1, 2, 4 |
-| Instrument before optimising | T1/T2 items wait for `--profile` evidence |
+| Rule                                                                  | Where it bites                                                    |
+| --------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Byte offsets everywhere                                               | Phases 1, 2, 4; UTF-16 exists only in a future `lsp/position.zig` |
+| Notes own their bytes, never arena pointers                           | Phase 2 onward; v0.2 notes                                        |
+| `core/` imports no `ui/`/`bridge/`/terminal                           | Phases 1, 2                                                       |
+| Only `io/fs.zig`/`io/proc.zig` import `std.fs`/`std.process`          | Every phase                                                       |
+| `std.Io.Writer` construction stays in `io/tty.zig`; `ui/` receives it | Phases 0, 5                                                       |
+| No `\n` through the bridge, no Enter, trailing space                  | Phase 6                                                           |
+| `Wyhash` only, never cryptographic                                    | Phases 1, 2, 4                                                    |
+| Instrument before optimising                                          | T1/T2 items wait for `--profile` evidence                         |
 
 ## Open questions mapped to phases
 
 Raise these when the phase touches them; do not silently pick an answer.
 
-| Question (source) | Surfaces in |
-| --- | --- |
-| New files: full contents or summary (SPEC OQ2) | Phase 2 |
-| jj support (SPEC OQ1), multi-repo/worktrees (OQ3) | Phase 2 |
-| ~~Where the enclosing-function scan runs (ARCH OQ5)~~ | **Answered in phase 4:** whole file, eagerly, per changed file. 0.5 ms for 6.4k lines |
-| Reviewed-hunks persistence (SPEC OQ4), auto-`addressed` (OQ5), note categories (OQ6) | v0.2 notes |
-| Windows target (ARCH OQ4) | Pre-1.0 |
+| Question (source)                                                                    | Surfaces in                                                                           |
+| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
+| New files: full contents or summary (SPEC OQ2)                                       | Phase 2                                                                               |
+| jj support (SPEC OQ1), multi-repo/worktrees (OQ3)                                    | Phase 2                                                                               |
+| ~~Where the enclosing-function scan runs (ARCH OQ5)~~                                | **Answered in phase 4:** whole file, eagerly, per changed file. 0.5 ms for 6.4k lines |
+| Reviewed-hunks persistence (SPEC OQ4), auto-`addressed` (OQ5), note categories (OQ6) | v0.2 notes                                                                            |
+| Windows target (ARCH OQ4)                                                            | Pre-1.0                                                                               |
