@@ -25,6 +25,14 @@ pub const Direction = enum {
             .backward => .forward,
         };
     }
+
+    /// As a step, for walking a list of files in either direction.
+    pub fn delta(self: Direction) i32 {
+        return switch (self) {
+            .forward => 1,
+            .backward => -1,
+        };
+    }
 };
 
 /// Vim's smart case: an all-lowercase query matches either case, and the

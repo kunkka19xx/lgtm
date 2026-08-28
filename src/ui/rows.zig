@@ -28,6 +28,10 @@ pub const Row = union(enum) {
 };
 
 pub const Rows = struct {
+    /// No file, or no file yet. Spelled once so the callers that reset a
+    /// generation do not each have to know the shape of an empty one.
+    pub const empty: Rows = .{ .items = &.{}, .hunk_rows = &.{} };
+
     items: []Row,
     /// Row index of each hunk's header, in file order. What `]h` and `[h` step
     /// through, and what turns a cursor row into "#3 of 9".

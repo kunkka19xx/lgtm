@@ -46,7 +46,7 @@ graph TD
     main["main.zig<br/>args, config, event loop"]
 
     subgraph ui["ui/"]
-        app["app.zig - state machine"]
+        app["app.zig - state machine<br/>loop.zig drives it"]
         motion["motion.zig - vim motions"]
         vdiff["view/diff.zig"]
         vfiles["view/filelist.zig"]
@@ -465,11 +465,18 @@ lgtm/
 │   │   ├── proc.zig
 │   │   └── watch.zig
 │   ├── ui/
-│   │   ├── app.zig        # main loop, state, command dispatch
-│   │   ├── keymap.zig     # key sequences to command names
-│   │   ├── render.zig     # one frame: status, body, mode line
+│   │   ├── loop.zig       # the run loop: terminal, threads, $EDITOR handover
+│   │   ├── app.zig        # state, command dispatch, motions
+│   │   ├── review.zig     # one diff generation: git, buffers, ids, lex cache
 │   │   ├── rows.zig       # the row model, vaxis-free and headless-testable
-│   │   └── theme.zig      # styles and glyph sets
+│   │   ├── render.zig     # one frame: status, body, mode line
+│   │   ├── keymap.zig     # key sequences to command names
+│   │   ├── help.zig       # the `?` overlay's filter and selection
+│   │   ├── prompt.zig     # the `/` and `:` input line
+│   │   ├── search.zig     # matching across the whole review
+│   │   ├── editor.zig     # $EDITOR argv, from $VISUAL/$EDITOR
+│   │   ├── theme.zig      # palettes, styles and glyph sets
+│   │   └── preview.zig    # --theme-preview
 │   ├── bridge/
 │   ├── search/
 │   └── syntax/

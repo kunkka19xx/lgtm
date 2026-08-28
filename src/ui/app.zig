@@ -1,41 +1,36 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The main loop. Drains the event queue, re-diffs only what changed, inherits
-// change ids, then renders - the order is fixed by ARCHITECTURE.md 3 and not
-// an implementation detail: id inheritance runs before anything that keys off
-// a hunk's identity.
+// What a key means. The reader's position - which file, which row, which mode
+// - and the command dispatch that moves it.
 //
-// Two arenas, per ARCHITECTURE.md 4. The diff arena holds a whole diff
-// generation and is reset on every re-diff. The frame arena holds the strings
-// a single frame draws and is reset *after* render and flush, because vaxis
-// cells reference that text rather than copying it.
+// Three things it deliberately is not, each of which used to live here and now
+// has a file of its own. `ui/loop.zig` owns the terminal, the threads and the
+// frame. `ui/review.zig` owns one diff generation: git, the buffers it is an
+// overlay on, the ids and the lexer cache. `ui/help.zig` owns the `?` overlay's
+// filter and selection. The split is what leaves this file testable with no
+// terminal at all - which every test below is.
+//
+// The frame arena stays here because the state is what fills it: it holds the
+// strings a single frame draws and is reset *after* render and flush, because
+// vaxis cells reference that text rather than copying it (ARCHITECTURE.md 4).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const vaxis = @import("vaxis");
 
 const diff = @import("../core/diff.zig");
 const event = @import("../core/event.zig");
-const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
-const source = @import("../core/source.zig");
-const highlight = @import("../syntax/highlight.zig");
-const lexer = @import("../syntax/lexer.zig");
-const input = @import("../io/input.zig");
 const metrics = @import("../io/metrics.zig");
-const tty_mod = @import("../io/tty.zig");
-const watch = @import("../io/watch.zig");
 
 const config = @import("../config.zig");
-const editor = @import("editor.zig");
+const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
-const preview = @import("preview.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
+const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
 const theme_mod = @import("theme.zig");
-const proc = @import("../io/proc.zig");
 
 /// A one-line message on the mode row: a search that found nothing, a command
 /// that is not one, an editor that would not start. Fixed capacity and cleared
@@ -72,20 +67,22 @@ pub const App = struct {
     gpa: Allocator,
     io: std.Io,
 
-    diff_arena: std.heap.ArenaAllocator,
+    /// One diff generation and everything derived from it. The reader's
+    /// position - which file, which row - is here; what changed is there.
+    review: review_mod.Review,
+    /// The strings one frame draws. Reset *after* render and flush, never
+    /// before: vaxis cells reference this text rather than copying it
+    /// (ARCHITECTURE.md 5c).
     frame_arena: std.heap.ArenaAllocator,
 
     queue: *event.Queue,
-    ids: hunk.IdTable = .{},
-    cache: highlight.Cache = .{},
     km: keymap.Keymap = .{},
     theme: theme_mod.Theme = theme_mod.default,
     glyphs: theme_mod.Glyphs = theme_mod.Glyphs.unicode,
 
-    /// Current diff generation. Everything in here belongs to `diff_arena`.
-    parsed: ?git.Parsed = null,
-    sources: ?source.Sources = null,
-    rows: rows_mod.Rows = .{ .items = &.{}, .hunk_rows = &.{} },
+    /// The current file, laid out. Rebuilt whenever the file or the diff
+    /// changes, and owned by the review's arena.
+    rows: rows_mod.Rows = rows_mod.Rows.empty,
     fn_names: [][]const u8 = &.{},
     /// Previous generation's hunks for the current file, so ids carry across.
     prev_hunks: []hunk.Hunk = &.{},
@@ -93,7 +90,6 @@ pub const App = struct {
     file_index: u32 = 0,
     cursor: u32 = 0,
     scroll: u32 = 0,
-    torn: bool = false,
     quit: bool = false,
 
     mode: event.Mode = .normal,
@@ -102,20 +98,9 @@ pub const App = struct {
     /// The mode to return to when the prompt closes, so `/` from a selection
     /// does not silently drop it.
     prompt_return: event.Mode = .normal,
-    /// The mode `?` was opened from, so closing the overlay puts the user
-    /// back where they were rather than always in normal.
-    help_return: event.Mode = .normal,
-    /// The popup's filter line. Its own prompt rather than the bottom-line
-    /// one, so opening `?` cannot disturb a `/` query the user still wants.
-    help_filter: prompt_mod.Prompt = .{},
-    /// Which popup row is selected. An index into the *filtered* list, reset
-    /// whenever the filter changes - a selection that survives a narrowing
-    /// points at a different row than the one the user was looking at.
-    help_index: usize = 0,
-    /// The grid the last frame actually drew. Sideways movement is by a whole
-    /// column, and only the renderer knows how tall a column came out - it
-    /// depends on the pane, the filter and the widest description.
-    help_layout: render.HelpLayout = .{},
+    /// The `?` overlay: filter, selection and the grid the last frame drew.
+    /// See `ui/help.zig` - the rules it follows are its own.
+    help: help_mod.Help = .{},
     /// Config-owned behaviour; see `Nav`.
     nav: Nav = .{},
     prompt: prompt_mod.Prompt = .{},
@@ -132,87 +117,39 @@ pub const App = struct {
             .gpa = gpa,
             .io = io,
             .queue = queue,
-            .diff_arena = .init(gpa),
+            .review = .init(gpa, io),
             .frame_arena = .init(gpa),
         };
     }
 
     pub fn deinit(self: *App) void {
-        self.ids.deinit(self.gpa);
-        self.cache.deinit(self.gpa);
-        self.diff_arena.deinit();
+        self.review.deinit();
         self.frame_arena.deinit();
         self.* = undefined;
     }
 
     fn files(self: *App) []diff.FileDiff {
-        const p = self.parsed orelse return &.{};
-        return p.diff.files;
+        return self.review.files();
     }
 
     fn current(self: *App) ?*diff.FileDiff {
-        const fs = self.files();
-        if (self.file_index >= fs.len) return null;
-        return &fs[self.file_index];
+        return self.review.fileAt(self.file_index);
     }
 
-    /// One diff generation: git, buffers, ids, rows. Everything allocated here
-    /// dies at the next reset, which is the whole point of the arena.
+    /// A new generation, and the reader put back where they were. The work
+    /// is `review.regenerate`; what is left here is the part that is about a
+    /// reader rather than a diff.
     pub fn rediff(self: *App) !void {
         const span = metrics.span(.diff_parse);
         defer span.end();
 
-        // Carry the current file's hunks across so ids survive. They live in
-        // the arena about to be reset, so copy them to the gpa first.
-        const carried = try self.gpa.alloc(hunk.Hunk, self.prev_hunks.len);
-        defer self.gpa.free(carried);
-        @memcpy(carried, self.prev_hunks);
-
-        const keep_path = if (self.current()) |f| try self.gpa.dupe(u8, f.path()) else null;
-        defer if (keep_path) |p| self.gpa.free(p);
-
-        _ = self.diff_arena.reset(.retain_capacity);
-        const arena = self.diff_arena.allocator();
-        self.parsed = null;
-        self.sources = null;
-        self.rows = .{ .items = &.{}, .hunk_rows = &.{} };
+        self.file_index = try self.review.regenerate(.{
+            .path = if (self.current()) |f| f.path() else null,
+            .hunks = self.prev_hunks,
+        });
+        self.rows = rows_mod.Rows.empty;
         self.fn_names = &.{};
         self.prev_hunks = &.{};
-
-        const git_span = metrics.span(.git_subprocess);
-        const parsed = try git.diffPathsIn(arena, self.io, null, &.{});
-        git_span.end();
-        self.parsed = parsed;
-
-        // Buffers are the source of truth; the diff is an overlay on them.
-        self.sources = source.load(arena, self.io, null, parsed.diff) catch null;
-        self.torn = false;
-        if (self.sources) |srcs| {
-            for (parsed.diff.files) |*f| {
-                const s = srcs.find(f.path()) orelse continue;
-                source.attach(f, s.*) catch |err| switch (err) {
-                    // The file changed between git running and our read. Say
-                    // so and re-diff, rather than render a blend of two states
-                    // (SPEC.md 9).
-                    error.ContentMismatch => self.torn = true,
-                    else => return err,
-                };
-            }
-        }
-
-        // Keep looking at the same file across a re-diff where possible.
-        if (keep_path) |p| {
-            for (parsed.diff.files, 0..) |*f, i| {
-                if (std.mem.eql(u8, f.path(), p)) self.file_index = @intCast(i);
-            }
-        }
-        if (self.file_index >= parsed.diff.files.len) self.file_index = 0;
-
-        // Ids before anything that reads them (ARCHITECTURE.md 3, rule 3).
-        for (parsed.diff.files, 0..) |*f, i| {
-            const prev: []const hunk.Hunk = if (i == self.file_index) carried else &.{};
-            try self.ids.inherit(arena, prev, f.hunks);
-        }
 
         // The agent writing a file must not send the reader back to the top of
         // it, so the row index survives a re-diff. This is a stopgap, not the
@@ -223,18 +160,17 @@ pub const App = struct {
     }
 
     fn rebuildRows(self: *App, keep: Keep) !void {
-        const arena = self.diff_arena.allocator();
         const f = self.current() orelse {
-            self.rows = .{ .items = &.{}, .hunk_rows = &.{} };
+            self.rows = rows_mod.Rows.empty;
             self.fn_names = &.{};
             self.cursor = 0;
             self.scroll = 0;
             return;
         };
 
-        self.rows = try rows_mod.build(arena, f);
+        self.rows = try rows_mod.build(self.review.allocator(), f);
         self.prev_hunks = f.hunks;
-        self.fn_names = try self.enclosingNames(arena, f);
+        self.fn_names = try self.review.enclosingNames(f);
         switch (keep) {
             .reset => {
                 self.cursor = self.rows.firstLineRow();
@@ -257,61 +193,9 @@ pub const App = struct {
         if (self.mode == .visual) self.leaveVisual();
     }
 
-    /// Enclosing function name per hunk, from the lexer's whole-file scan.
-    /// Names are copied into the arena: the cache owns its own copies and may
-    /// evict them, and a dangling name renders as garbage rather than failing.
-    fn enclosingNames(self: *App, arena: Allocator, f: *diff.FileDiff) ![][]const u8 {
-        const out = try arena.alloc([]const u8, f.hunks.len);
-        @memset(out, "");
-
-        const srcs = self.sources orelse return out;
-        const s = srcs.find(f.path()) orelse return out;
-        const work = s.work orelse return out;
-
-        const hl = highlight.Highlighter.choose(f.path(), work.bytes.len, work.lineCount());
-        const key = self.blobKey(f.new_blob, work.bytes);
-        const st = self.cache.structureFor(self.gpa, hl, key, work.bytes) catch return out;
-
-        for (f.hunks, 0..) |h, i| {
-            const at = anchorLine(f, h);
-            if (at == 0) continue;
-            if (st.enclosingFn(at - 1)) |fd| {
-                out[i] = arena.dupe(u8, fd.name) catch "";
-            }
-        }
-        return out;
-    }
-
-    /// git already hashed this content; re-hashing the file on every lookup
-    /// costs more than the miss it avoids (PERFORMANCE.md 7.2).
-    fn blobKey(self: *App, blob: []const u8, bytes: []const u8) u64 {
-        _ = self;
-        if (blob.len == 0) return highlight.hashContent(bytes);
-        return std.hash.Wyhash.hash(0, blob);
-    }
-
-    fn runsFor(self: *App, blob: []const u8, buf: anytype) []const lexer.Run {
-        const b = buf orelse return &.{};
-        const hl = highlight.Highlighter.choose(
-            if (self.current()) |f| f.path() else "",
-            b.bytes.len,
-            b.lineCount(),
-        );
-        if (hl == .plain) return &.{};
-        const key = self.blobKey(blob, b.bytes);
-        return self.cache.runsFor(self.gpa, hl, key, b.bytes) catch &.{};
-    }
-
     pub fn view(self: *App) ?render.View {
         const f = self.current() orelse return null;
-        var work: ?@TypeOf((self.sources.?.files[0]).work.?) = null;
-        var head = work;
-        if (self.sources) |srcs| {
-            if (srcs.find(f.path())) |s| {
-                work = s.work;
-                head = s.head;
-            }
-        }
+        const bufs = self.review.buffersFor(f.path());
         return .{
             .file = f,
             .rows = self.rows,
@@ -320,13 +204,13 @@ pub const App = struct {
             .cursor = self.cursor,
             .scroll = self.scroll,
             .fn_names = self.fn_names,
-            .total_hunks = self.totalHunks(),
+            .total_hunks = self.review.totalHunks(),
             .hunk_ordinal = self.hunkOrdinal(),
-            .work = work,
-            .head = head,
-            .work_runs = self.runsFor(f.new_blob, work),
-            .head_runs = self.runsFor(f.old_blob, head),
-            .torn = self.torn,
+            .work = bufs.work,
+            .head = bufs.head,
+            .work_runs = self.review.runsFor(f.path(), f.new_blob, bufs.work),
+            .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
+            .torn = self.review.torn,
             .mode = self.mode,
             .zen = self.zen,
             .selection = self.selection(),
@@ -341,19 +225,8 @@ pub const App = struct {
 
     /// 1-based position of the cursor's hunk across the whole review.
     fn hunkOrdinal(self: *App) u32 {
-        var before: u32 = 0;
-        for (self.files(), 0..) |f, i| {
-            if (i >= self.file_index) break;
-            before += @intCast(f.hunks.len);
-        }
         const local = self.rows.hunkAt(self.cursor) orelse return 0;
-        return before + local + 1;
-    }
-
-    fn totalHunks(self: *App) u32 {
-        var n: u32 = 0;
-        for (self.files()) |f| n += @intCast(f.hunks.len);
-        return n;
+        return self.review.hunksBefore(self.file_index) + local + 1;
     }
 
     // -- commands ----------------------------------------------------------
@@ -384,10 +257,10 @@ pub const App = struct {
             .open_editor => self.want_editor = true,
             .toggle_zen => self.zen = !self.zen,
             .help => self.toggleHelp(),
-            .help_down => self.moveHelp(1),
-            .help_up => self.moveHelp(-1),
-            .help_right => self.moveHelpColumn(1),
-            .help_left => self.moveHelpColumn(-1),
+            .help_down => self.help.move(self.km.bindings, 1),
+            .help_up => self.help.move(self.km.bindings, -1),
+            .help_right => self.help.moveColumn(self.km.bindings, 1),
+            .help_left => self.help.moveColumn(self.km.bindings, -1),
         }
         self.clampScroll(body);
     }
@@ -432,45 +305,16 @@ pub const App = struct {
     /// so nothing fires behind the overlay.
     fn toggleHelp(self: *App) void {
         if (self.mode == .help) {
-            self.help_filter.close();
-            self.mode = self.help_return;
+            self.help.close();
+            self.mode = self.help.from;
         } else {
-            self.help_return = self.mode;
-            self.help_filter.start(.help_filter);
-            self.help_index = 0;
+            self.help.open(self.mode);
             self.mode = .help;
         }
     }
 
-    /// One column sideways. Clamping rather than wrapping at the edges: the
-    /// last column is usually short, so wrapping would land on a different row
-    /// than the one the eye came from.
-    fn moveHelpColumn(self: *App, delta: i32) void {
-        const per: i32 = @intCast(@min(@max(self.help_layout.per, 1), 1000));
-        self.moveHelp(delta * per);
-    }
-
-    /// Clamped against the same filter the popup is drawn from, so the
-    /// selection can never sit past the end of what is on screen.
-    fn moveHelp(self: *App, delta: i32) void {
-        const n = keymap.helpCount(self.km.bindings, self.help_return, self.help_filter.text());
-        if (n == 0) {
-            self.help_index = 0;
-            return;
-        }
-        const i = @as(i64, @intCast(self.help_index)) + delta;
-        self.help_index = if (i < 0)
-            0
-        else if (i >= @as(i64, @intCast(n)))
-            n - 1
-        else
-            @intCast(i);
-    }
-
     /// Keys inside the popup are filter text, not commands - the same rule the
     /// bottom-line prompt follows, and why `help` is a mode the keymap ignores.
-    /// Escape closes, and so does backspacing past the start of an empty
-    /// query, which is what `prompt.zig` already means by cancel.
     fn feedHelp(self: *App, key: event.Key, body: u16) !void {
         // Navigation is an action and stays in the keymap, so it is remappable
         // like everything else. Only bindings live in `.help` can match here,
@@ -479,10 +323,9 @@ pub const App = struct {
             .command => |cmd| return self.run(cmd, body),
             .pending, .none => {},
         }
-        switch (self.help_filter.feed(key)) {
-            // A narrowed list is a different list: start at the top of it.
-            .typing => self.help_index = 0,
-            .submit, .cancel => self.toggleHelp(),
+        switch (self.help.feed(key)) {
+            .stay => {},
+            .close => self.toggleHelp(),
         }
     }
 
@@ -499,33 +342,31 @@ pub const App = struct {
             .cancel => self.closePrompt(),
             .submit => {
                 // Copied out before closing: the prompt's buffer is about to
-                // be declared empty, and `submitCommand` can re-enter it.
+                // be declared empty, and submitting can re-enter it.
                 var buf: [prompt_mod.max_bytes]u8 = undefined;
                 const text = self.prompt.text();
                 @memcpy(buf[0..text.len], text);
-                const line = buf[0..text.len];
                 const kind = self.prompt.kind;
                 self.closePrompt();
-
-                switch (kind) {
-                    .search_forward => {
-                        if (line.len == 0) {
-                            // Bare Enter repeats the last query, as in vim.
-                            try self.searchStep(self.finder.dir);
-                        } else {
-                            // Every search starts forward; `N` is what runs it
-                            // backwards (FEATURES.md 4.4).
-                            self.finder.set(line, .forward);
-                            try self.searchStep(.forward);
-                        }
-                    },
-                    .command => self.submitCommand(line),
-                    // The popup's filter is its own `Prompt` and is fed by
-                    // `feedHelp`, so it never arrives here.
-                    .help_filter => {},
-                }
+                try self.submitPrompt(kind, buf[0..text.len]);
                 self.clampScroll(body);
             },
+        }
+    }
+
+    fn submitPrompt(self: *App, kind: prompt_mod.Kind, line: []const u8) !void {
+        switch (kind) {
+            .search_forward => {
+                // Bare Enter repeats the last query, as in vim. Every search
+                // starts forward; `N` is what runs it backwards
+                // (FEATURES.md 4.4).
+                if (line.len != 0) self.finder.set(line, .forward);
+                try self.searchStep(if (line.len == 0) self.finder.dir else .forward);
+            },
+            .command => self.submitCommand(line),
+            // The popup's filter is its own `Prompt`, fed by `feedHelp`, so it
+            // never arrives here.
+            .help_filter => {},
         }
     }
 
@@ -560,7 +401,7 @@ pub const App = struct {
         self.finder.failed = false;
 
         const start_file = self.file_index;
-        var fi: usize = start_file;
+        var fi: u32 = start_file;
         var from: ?u32 = self.rows.lineAt(self.cursor);
         var wrapped = false;
 
@@ -568,7 +409,7 @@ pub const App = struct {
         while (step <= fs.len) : (step += 1) {
             if (search.findLine(fs[fi].lines, from, dir, q)) |li| {
                 if (fi != self.file_index) {
-                    self.file_index = @intCast(fi);
+                    self.file_index = fi;
                     try self.rebuildRows(.reset);
                 }
                 if (self.rows.rowForLine(li)) |row| self.moveTo(row);
@@ -578,21 +419,9 @@ pub const App = struct {
             }
             // Step to the neighbouring file, noting when that crossed the end
             // of the review - which is the only thing that counts as a wrap.
-            switch (dir) {
-                .forward => {
-                    fi += 1;
-                    if (fi >= fs.len) {
-                        fi = 0;
-                        wrapped = true;
-                    }
-                },
-                .backward => {
-                    if (fi == 0) {
-                        fi = fs.len - 1;
-                        wrapped = true;
-                    } else fi -= 1;
-                },
-            }
+            const next = wrapIndex(@as(i64, @intCast(fi)) + dir.delta(), fs.len);
+            fi = next.index;
+            wrapped = wrapped or next.wrapped;
             // A file entered from outside has no cursor to start after.
             from = null;
         }
@@ -616,14 +445,16 @@ pub const App = struct {
     pub fn editTarget(self: *App) ?EditTarget {
         const f = self.current() orelse return null;
         if (f.status == .deleted) return null;
-        const li = self.rows.lineAt(self.cursor) orelse
-            return .{ .path = f.path(), .line = 0 };
-        if (li >= f.lines.len()) return .{ .path = f.path(), .line = 0 };
-        if (f.lines.kind[li] != .del) {
-            return .{ .path = f.path(), .line = f.lines.new_no[li] };
-        }
-        const hi = self.rows.hunkAt(self.cursor) orelse return .{ .path = f.path(), .line = 0 };
-        if (hi >= f.hunks.len) return .{ .path = f.path(), .line = 0 };
+        // Every failure below means the same thing - open the file, at no
+        // particular line - so it is written once and returned from.
+        const top: EditTarget = .{ .path = f.path(), .line = 0 };
+
+        const li = self.rows.lineAt(self.cursor) orelse return top;
+        if (li >= f.lines.len()) return top;
+        if (f.lines.kind[li] != .del) return .{ .path = f.path(), .line = f.lines.new_no[li] };
+
+        const hi = self.rows.hunkAt(self.cursor) orelse return top;
+        if (hi >= f.hunks.len) return top;
         return .{ .path = f.path(), .line = f.hunks[hi].new_start };
     }
 
@@ -669,12 +500,9 @@ pub const App = struct {
         // Off the end of the file's hunks.
         if (self.nav.hunk_crosses_files and try self.crossToHunk(delta)) return;
 
-        const idx = @mod(raw, n);
-        const target = hs[@intCast(idx)] + 1;
+        const target = hs[wrapIndex(raw, hs.len).index] + 1;
         // One hunk wraps onto itself; saying so every time would be noise.
-        if (target != self.cursor) {
-            self.notice.set("wrapped to {s} hunk", .{if (delta > 0) "first" else "last"});
-        }
+        if (target != self.cursor) self.noteWrap(delta, "hunk");
         self.moveTo(target);
     }
 
@@ -707,16 +535,19 @@ pub const App = struct {
     /// reads as a dropped keystroke. Announced for the same reason the search
     /// announces its wrap - the file under you changed further than one step.
     fn stepFile(self: *App, delta: i32) !void {
-        const n: i64 = @intCast(self.files().len);
+        const n = self.files().len;
         if (n == 0) return;
-        const raw: i64 = @as(i64, self.file_index) + delta;
-        // `@mod`, not `@rem`: a negative step has to land at the far end
-        // rather than staying negative.
-        const i = @mod(raw, n);
-        if (i == self.file_index) return;
-        if (raw != i) self.notice.set("wrapped to {s} file", .{if (delta > 0) "first" else "last"});
-        self.file_index = @intCast(i);
+        const step = wrapIndex(@as(i64, self.file_index) + delta, n);
+        if (step.index == self.file_index) return;
+        if (step.wrapped) self.noteWrap(delta, "file");
+        self.file_index = step.index;
         try self.rebuildRows(.reset);
+    }
+
+    /// Both ring motions say the same thing when they come round: the cursor
+    /// moved further than one step and nothing else on screen would show it.
+    fn noteWrap(self: *App, delta: i32, what: []const u8) void {
+        self.notice.set("wrapped to {s} {s}", .{ if (delta > 0) "first" else "last", what });
     }
 
     fn centerCursor(self: *App, body: u16) void {
@@ -766,25 +597,16 @@ pub const App = struct {
     }
 };
 
-pub const Options = struct {
-    /// Render one frame and exit. What CI and a screenshot need, and the only
-    /// way to exercise the render path without a human at a keyboard.
-    once: bool = false,
-    /// Everything the config file decided. Defaults throughout when there is
-    /// no file, which is the case this has to stay fast for.
-    cfg: config.Config = .{},
-    /// The one line of the config's complaints the status row has space for,
-    /// or null when it had none. Shown as a notice on the first frame: a
-    /// config error belongs in the status line, never in a refusal to start
-    /// (FEATURES.md 4.9).
-    problems: ?[]const u8 = null,
-};
-
 /// Navigation behaviour, owned by `config.zig` and filled from `[nav]`. The
 /// alias is kept because the docs and dispatch both call it `app.Nav`: the
 /// point of declaring it before the config file existed was that landing the
 /// file would be a parse plus an assignment, and this is that assignment.
 pub const Nav = config.Nav;
+
+/// Re-exported: the hunk-header tests below are about what a reader sees, and
+/// they read better next to the rest of the app's behaviour than beside the
+/// cache that computes it.
+pub const anchorLine = review_mod.anchorLine;
 
 /// Scroll offset that keeps `cursor` visible with a margin, given the current
 /// offset and the body height. Pure, so the awkward cases - a body shorter
@@ -794,6 +616,17 @@ pub const Nav = config.Nav;
 /// `scrolloff` is `nav.scrolloff`, clamped here to a third of the body rather
 /// than at the point it is read: a reader who sets 20 on a laptop should get a
 /// degraded margin in a four-row split, not a cursor welded to the middle.
+/// One step around a ring, and whether that step came round the end. `@mod`
+/// rather than `@rem`: a negative step has to land at the far end rather than
+/// staying negative. Three motions - files, hunks and the search's file walk -
+/// each spelled this out before, and each spelled it slightly differently.
+pub fn wrapIndex(raw: i64, len: usize) struct { index: u32, wrapped: bool } {
+    if (len == 0) return .{ .index = 0, .wrapped = false };
+    const n: i64 = @intCast(len);
+    const i = @mod(raw, n);
+    return .{ .index = @intCast(i), .wrapped = i != raw };
+}
+
 pub fn scrollFor(cursor: u32, scroll: u32, rows_len: u32, body: u16, scrolloff: u32) u32 {
     if (body == 0 or rows_len == 0) return 0;
     const margin: u32 = @min(scrolloff, body / 3);
@@ -807,251 +640,20 @@ pub fn scrollFor(cursor: u32, scroll: u32, rows_len: u32, body: u16, scrolloff: 
     return out;
 }
 
-/// The line a hunk's header should name: its first changed line, not its first
-/// line. A hunk opens on context, and for a change near the top of a function
-/// that context sits above the declaration - which is how a hunk squarely
-/// inside `hashHunk` came out with no name at all.
-pub fn anchorLine(f: *const diff.FileDiff, h: hunk.Hunk) u32 {
-    var i = h.lo;
-    while (i < h.hi and i < f.lines.len()) : (i += 1) {
-        if (f.lines.kind[i] == .context) continue;
-        const n = f.lines.new_no[i];
-        if (n != 0) return n;
-    }
-    // A pure deletion has no new-file line of its own; the hunk's position in
-    // the new file is the closest honest answer.
-    return h.new_start;
-}
-
-/// Runs the review UI until the user quits.
-pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: Options) !void {
-    var term = try tty_mod.Tty.init(gpa, io, tty_mod.default_buffer_bytes);
-    defer term.deinit();
-    const w = term.writer();
-
-    var vx = try vaxis.Vaxis.init(io, gpa, environ, .{ .kitty_keyboard_flags = .{} });
-    defer vx.deinit(gpa, w);
-
-    try vx.enterAltScreen(w);
-    try w.flush();
-    defer {
-        vx.exitAltScreen(w) catch {};
-        w.flush() catch {};
-    }
-
-    var queue = event.Queue.init(gpa, io);
-    defer queue.deinit();
-
-    var app = App.init(gpa, io, &queue);
-    defer app.deinit();
-    app.nav = opts.cfg.nav;
-    app.km.bindings = opts.cfg.keys;
-    app.theme = opts.cfg.theme;
-    app.glyphs = switch (opts.cfg.ui.icons) {
-        .unicode => theme_mod.Glyphs.unicode,
-        .ascii => theme_mod.Glyphs.ascii,
-    };
-    // Said once, on the first frame, and cleared by the first keystroke like
-    // any other notice - long enough to read, and not a modal the user has to
-    // dismiss before reviewing anything.
-    if (opts.problems) |p| app.notice.set("config: {s}", .{p});
-
-    var reader = input.Reader.init(&term, &queue);
-    var winsize: input.WinsizeNotifier = .{ .tty = &term, .queue = &queue };
-    // The reader services SIGWINCH on its own wake, because the handler is
-    // only allowed to set a flag - see `io/input.zig`.
-    reader.winsize = &winsize;
-    var watcher = watch.Watcher.init(gpa, io, &queue, .{});
-    if (!opts.once) {
-        winsize.register() catch {};
-        try reader.start();
-        watcher.start() catch {};
-    }
-    defer {
-        if (!opts.once) {
-            // Before the reader stops, so the last thing to touch the flag is
-            // gone by the time this frame is.
-            winsize.unregister();
-            reader.stop();
-        }
-        // `deinit`, not `stop`: stopping only joins the thread. The poller
-        // still holds a duped path per watched file in `prev` and `pending`,
-        // and those are what a leak check sees on exit. Unconditional because
-        // deinit of a watcher that never started is a no-op.
-        watcher.deinit();
-    }
-
-    // Sized once here and again only when a resize event says so. Calling
-    // `vx.resize` per frame reallocates both screen buffers and throws away
-    // `screen_last` - which is the damage-tracking baseline - so every
-    // keystroke repainted every cell. That is what a flickering terminal is.
-    var ws = term.winsize() catch tty_mod.Winsize{ .cols = 80, .rows = 26, .x_pixel = 0, .y_pixel = 0 };
-    try vx.resize(gpa, w, ws);
-
-    try app.rediff();
-
-    while (!app.quit) {
-        app.clampScroll(render.bodyHeight(ws.rows, app.zen));
-
-        try drawFrame(&app, &vx, w);
-        if (opts.once) break;
-
-        const events = try queue.drain(gpa);
-        defer gpa.free(events);
-        if (events.len == 0) break; // queue closed
-
-        for (events) |ev| {
-            if (ev == .resize) {
-                ws = .{ .cols = ev.resize.cols, .rows = ev.resize.rows, .x_pixel = 0, .y_pixel = 0 };
-                try vx.resize(gpa, w, ws);
-            }
-            try app.handle(ev, render.bodyHeight(ws.rows, app.zen));
-        }
-
-        if (app.want_editor) {
-            app.want_editor = false;
-            try openEditor(&app, &vx, &term, w, environ, &reader, opts);
-            // The screen belongs to the editor until it exits; nothing vaxis
-            // drew is still on it, so the damage baseline is a lie.
-            vx.queueRefresh();
-        }
-    }
-}
-
-/// Hands the terminal to `$EDITOR` and takes it back.
-///
-/// Order matters in both directions and every step has a failure that looks
-/// like a hang if it is skipped: stop reading input (or the reader and the
-/// editor race for keystrokes), leave the alt screen (or the editor draws over
-/// the diff), restore the shell's termios (or the editor starts with no echo).
-/// Coming back is the same list reversed, and it runs even when the spawn
-/// failed - a `lgtm` that returns to a raw terminal is one the user has to
-/// `reset`.
-fn openEditor(
-    app: *App,
-    vx: *vaxis.Vaxis,
-    term: *tty_mod.Tty,
-    w: *std.Io.Writer,
-    environ: *std.process.Environ.Map,
-    reader: *input.Reader,
-    opts: Options,
-) !void {
-    const target = app.editTarget() orelse {
-        app.notice.set("nothing here to open", .{});
-        return;
-    };
-
-    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
-    defer scratch.deinit();
-    const spec = editor.specFrom(environ);
-    const argv = try editor.argv(scratch.allocator(), spec, target.path, target.line) orelse {
-        app.notice.set("$EDITOR is empty", .{});
-        return;
-    };
-
-    // Where the read cannot be interrupted, the reader would keep the tty and
-    // eat the editor's input. Refusing is the honest outcome; silently opening
-    // an editor that ignores half the keystrokes is not.
-    if (!opts.once and !reader.pollable) {
-        app.notice.set("cannot suspend input on this terminal", .{});
-        return;
-    }
-
-    if (!opts.once) reader.stop();
-    vx.exitAltScreen(w) catch {};
-    w.flush() catch {};
-    term.suspendRaw();
-
-    const code = proc.runInherit(app.io, argv) catch |err| blk: {
-        app.notice.set("{s}: {t}", .{ spec, err });
-        break :blk @as(u8, 0);
-    };
-
-    term.resumeRaw();
-    vx.enterAltScreen(w) catch {};
-    w.flush() catch {};
-    if (!opts.once) try reader.start();
-
-    if (code != 0 and app.notice.len == 0) {
-        app.notice.set("{s} exited with {d}", .{ spec, code });
-    }
-    // The user very likely changed the file, and the watcher may or may not
-    // have seen it while we were not draining events.
-    try app.rediff();
-}
-
-fn frameOf(app: *App, win: vaxis.Window, arena: Allocator) render.Frame {
-    return .{ .win = win, .arena = arena, .theme = app.theme, .glyphs = app.glyphs };
-}
-
-/// The popup's contents, or null when it is not open. Built here rather than in
-/// `view()` because it needs the frame arena, and drawn from both the review
-/// and the empty screen.
-fn helpView(app: *App, arena: Allocator) !?render.HelpView {
-    if (app.mode != .help) return null;
-    // The keys for the mode `?` was opened from, not for `.help` - the overlay
-    // describes the review, not itself.
-    const filter = app.help_filter.text();
-    return .{
-        .entries = try keymap.helpEntries(app.km.bindings, app.help_return, filter, arena),
-        .query = filter,
-        .index = app.help_index,
-        .keys = try keymap.helpEntries(app.km.bindings, .help, "", arena),
-        // Written back by the renderer: the next keypress moves through the
-        // grid this frame drew, not one the app guessed at.
-        .layout = &app.help_layout,
-    };
-}
-
-fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
-    const frame = metrics.span(.frame);
-    defer frame.end();
-
-    const arena = app.frame_arena.allocator();
-    const win = vx.window();
-
-    if (app.view()) |v| {
-        var shown = v;
-        var hint_buf: [256]u8 = undefined;
-        shown.hints = try arena.dupe(u8, keymap.hints(app.km.bindings, app.mode, &hint_buf));
-        shown.help = try helpView(app, arena);
-        try render.draw(frameOf(app, win, arena), shown);
-    } else {
-        win.clear();
-        _ = win.printSegment(
-            .{ .text = " lgtm: no changes against HEAD", .style = app.theme.dim },
-            .{ .row_offset = 0, .wrap = .none },
-        );
-        // An empty review is exactly when a reader is most likely to want the
-        // key list - there is nothing on screen to learn the keys from.
-        if (try helpView(app, arena)) |hv| {
-            try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
-        }
-    }
-
-    const render_span = metrics.span(.render);
-    try vx.render(w);
-    render_span.end();
-    try w.flush();
-
-    // After render and flush, never before: the cells above point into this
-    // arena (ARCHITECTURE.md 5c).
-    _ = app.frame_arena.reset(.retain_capacity);
-}
-
 const testing = std.testing;
 
-// `ui/` is reachable from main.zig only through this file, and Zig collects
-// tests from a file only when a `test` block references it. Without this list
-// every test under `ui/` compiled in the binary but ran nowhere - which is how
-// a render test with the wrong arity sat green through a whole phase. Adding a
-// module here is what makes its tests part of `zig build check`.
+// Zig collects tests from a file only when a `test` block references it.
+// Without a list like this one, every test under `ui/` compiled into the
+// binary but ran nowhere - which is how a render test with the wrong arity sat
+// green through a whole phase. Each module lists what it imports, so a new
+// module joins `zig build check` where it is used: the ones the run loop pulls
+// in are listed in `loop.zig`, and `main.zig` covers the rest.
 test {
-    _ = editor;
+    _ = help_mod;
     _ = keymap;
-    _ = preview;
     _ = prompt_mod;
     _ = render;
+    _ = review_mod;
     _ = rows_mod;
     _ = search;
     _ = theme_mod;
@@ -1200,7 +802,7 @@ const Fixture = struct {
             .hunks = hunks_b,
             .lines = try linesOf(gpa, &b_text, null),
         };
-        self.app.parsed = .{ .diff = .{ .files = self.files }, .raw = &.{}, .stderr = &.{} };
+        self.app.review.parsed = .{ .diff = .{ .files = self.files }, .raw = &.{}, .stderr = &.{} };
         try self.app.rebuildRows(.reset);
         return self;
     }
@@ -1212,7 +814,7 @@ const Fixture = struct {
             f.lines.deinit(gpa);
         }
         gpa.free(self.files);
-        self.app.parsed = null;
+        self.app.review.parsed = null;
         self.app.deinit();
         self.queue.deinit();
         self.threaded.deinit();
@@ -1493,12 +1095,12 @@ test "keys under the overlay do nothing while it is up" {
     // searchable - and `q` types rather than quitting the app.
     try fx.key('q');
     try testing.expect(!fx.app.quit);
-    try testing.expectEqualStrings("jjq", fx.app.help_filter.text());
+    try testing.expectEqualStrings("jjq", fx.app.help.filter.text());
 
     try fx.key(event.code.escape);
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
     // Closing clears the query, so `?` never reopens onto a stale filter.
-    try testing.expectEqual(@as(usize, 0), fx.app.help_filter.text().len);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.filter.text().len);
 }
 
 test "the popup selection moves with the arrows, and stops at both ends" {
@@ -1506,37 +1108,37 @@ test "the popup selection moves with the arrows, and stops at both ends" {
     defer fx.deinit();
 
     try fx.key('?');
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
     // Already at the top: Up must not wrap round to the bottom, because a list
     // you can scroll off the end of is one you can lose your place in.
     try fx.key(event.code.up);
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
     try fx.key(event.code.down);
     try fx.key(event.code.down);
-    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
     try fx.key(event.code.up);
-    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
     // `J`/`K` are the advertised pair and reach the same commands. A capital
     // letter is navigation here, never filter text - which costs nothing,
     // because the filter matches case-insensitively.
     try fx.key('J');
-    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
     try fx.key('K');
-    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
-    try testing.expectEqual(@as(usize, 0), fx.app.help_filter.text().len);
+    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.filter.text().len);
     // `<C-n>`/`<C-p>` reach the same commands.
     try fx.ctrlKey('n');
-    try testing.expectEqual(@as(usize, 2), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 2), fx.app.help.index);
     try fx.ctrlKey('p');
-    try testing.expectEqual(@as(usize, 1), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 1), fx.app.help.index);
 
     // And it cannot walk past the last row.
     const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
     var i: usize = 0;
     while (i < n + 5) : (i += 1) try fx.key(event.code.down);
-    try testing.expectEqual(n - 1, fx.app.help_index);
+    try testing.expectEqual(n - 1, fx.app.help.index);
 }
 
 test "left and right move by a whole column of the grid the frame drew" {
@@ -1548,30 +1150,30 @@ test "left and right move by a whole column of the grid the frame drew" {
     // default: sideways is then the same as a single step, never a jump into
     // an index the list does not have.
     try fx.key(event.code.right);
-    try testing.expectEqual(fx.app.help_layout.per, fx.app.help_index);
+    try testing.expectEqual(fx.app.help.layout.per, fx.app.help.index);
 
     // With the grid a real frame produces, one column is a real jump.
-    fx.app.help_layout = .{ .cols = 2, .per = 11 };
-    fx.app.help_index = 0;
+    fx.app.help.layout = .{ .cols = 2, .per = 11 };
+    fx.app.help.index = 0;
     try fx.key(event.code.right);
-    try testing.expectEqual(@as(usize, 11), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 11), fx.app.help.index);
     try fx.key('H');
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
     try fx.key('L');
-    try testing.expectEqual(@as(usize, 11), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 11), fx.app.help.index);
     try fx.key(event.code.left);
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
     // Left from the first column stays put rather than wrapping.
     try fx.key(event.code.left);
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
     // Right from the last column clamps to the final row instead of running
     // off the end of the list.
     const n = keymap.helpCount(fx.app.km.bindings, .normal, "");
-    fx.app.help_index = n - 1;
+    fx.app.help.index = n - 1;
     try fx.key(event.code.right);
-    try testing.expectEqual(n - 1, fx.app.help_index);
+    try testing.expectEqual(n - 1, fx.app.help.index);
 }
 
 test "narrowing the filter puts the selection back at the top" {
@@ -1581,19 +1183,19 @@ test "narrowing the filter puts the selection back at the top" {
     try fx.key('?');
     try fx.key(event.code.down);
     try fx.key(event.code.down);
-    try testing.expect(fx.app.help_index > 0);
+    try testing.expect(fx.app.help.index > 0);
 
     // The list under the selection just changed; index 2 of the old list is a
     // different row than index 2 of the new one.
     try fx.key('f');
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
 
     // A filter that matches nothing leaves nothing to select.
     try fx.key('z');
     try fx.key('z');
     try fx.key(event.code.down);
-    try testing.expectEqual(@as(usize, 0), fx.app.help_index);
-    try testing.expectEqual(@as(usize, 0), keymap.helpCount(fx.app.km.bindings, .normal, fx.app.help_filter.text()));
+    try testing.expectEqual(@as(usize, 0), fx.app.help.index);
+    try testing.expectEqual(@as(usize, 0), keymap.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text()));
 }
 
 test "the popup is available when there is nothing to review" {
@@ -1607,21 +1209,21 @@ test "the popup is available when there is nothing to review" {
     defer a.deinit();
     const arena = a.allocator();
 
-    try testing.expect(try helpView(&fx.app, arena) == null);
+    try testing.expect(try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena) == null);
 
     // No current file, so `view()` is null and the review branch never runs.
     fx.app.file_index = 99;
     try testing.expect(fx.app.view() == null);
 
     try fx.key('?');
-    const hv = (try helpView(&fx.app, arena)).?;
+    const hv = (try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena)).?;
     try testing.expect(hv.entries.len > 0);
     try testing.expect(hv.keys.len > 0);
 
     // And it still closes.
     try fx.key(event.code.escape);
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
-    try testing.expect(try helpView(&fx.app, arena) == null);
+    try testing.expect(try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena) == null);
 }
 
 test "search wraps past the end of the review and says so" {
@@ -1807,4 +1409,22 @@ test "a resize re-lays out rather than leaving the old scroll behind" {
     // The cursor itself is the reader's place in the file and a resize is not
     // a motion: it does not move.
     try testing.expectEqual(@as(u32, 3), fx.app.cursor);
+}
+
+test "a ring step wraps at both ends and reports only the wrap" {
+    // The shared arithmetic behind `]f`, `]h` and the search's walk across
+    // files. Each of the three had its own copy, and the backward one is the
+    // half that is easy to get wrong: `@rem` leaves it negative.
+    try testing.expectEqual(@as(u32, 1), wrapIndex(1, 3).index);
+    try testing.expect(!wrapIndex(1, 3).wrapped);
+
+    try testing.expectEqual(@as(u32, 0), wrapIndex(3, 3).index);
+    try testing.expect(wrapIndex(3, 3).wrapped);
+
+    try testing.expectEqual(@as(u32, 2), wrapIndex(-1, 3).index);
+    try testing.expect(wrapIndex(-1, 3).wrapped);
+
+    // An empty ring has nowhere to step to, and must not divide by zero.
+    try testing.expectEqual(@as(u32, 0), wrapIndex(-1, 0).index);
+    try testing.expect(!wrapIndex(-1, 0).wrapped);
 }

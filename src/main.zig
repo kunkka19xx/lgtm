@@ -9,6 +9,7 @@ pub const theme = @import("ui/theme.zig");
 pub const preview = @import("ui/preview.zig");
 pub const tty = @import("io/tty.zig");
 pub const app = @import("ui/app.zig");
+pub const loop = @import("ui/loop.zig");
 const metrics = lib.metrics;
 
 const usage =
@@ -111,7 +112,7 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    try app.run(gpa, io, init.environ_map, .{
+    try loop.run(gpa, io, init.environ_map, .{
         .once = want_once,
         .cfg = cfg.cfg,
         .problems = cfg.summary(&problem_buf),
@@ -124,6 +125,9 @@ pub fn main(init: std.process.Init) !void {
 test {
     _ = lib;
     _ = config;
+    _ = loop;
+    _ = preview;
+    _ = theme;
     _ = tty;
     _ = app;
 }
