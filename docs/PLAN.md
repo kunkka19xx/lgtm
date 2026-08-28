@@ -186,7 +186,7 @@ Nothing here was optimised on a hunch; the benchmark was written first and each 
 
 One caveat. Every number above is Zig source measured on Zig-heavy input. Rust, Go and Python are correct on real files but were not the corpus, and Python in particular does more work per line, since indentation is inspected at every line start. Re-run `zig build bench -- <dir> <ext>` before trusting the figures for another language.
 
-## Phase 5: TUI - PARTIAL (5a done)
+## Phase 5: TUI - DONE
 
 `ui/` with libvaxis. First phase that needs a terminal. Test at 80 columns from
 day one.
@@ -334,8 +334,18 @@ What this does **not** settle: the 5a gate table above was measured under
 numbers. There is 47x headroom on the frame budget so the trade is almost
 certainly free, but almost certainly is not a measurement.
 
-**Gate for 5b/5c:** flawless at 80 columns in a split tmux pane; `--profile`
-shows keystroke-to-frame <= 8 ms, cold start <= 50 ms, re-diff <= 100 ms.
+**Gate for 5b/5c: PASSED.** Flawless at 80 columns in a split tmux pane, and
+at 62 and 40 with the overlays open; below that it says "window too small"
+rather than drawing a corrupted layout. `--profile` over 91 frames of real
+keystrokes against a fixed repo, ReleaseFast:
+
+| Metric | Budget | Measured |
+|---|---|---|
+| Frame, keystroke to flush | 8 ms | **0.114 ms** |
+| Re-diff, whole tree | 100 ms | **2.4 ms** |
+| Binary, stripped | under 1 MB | **778 KB** (1077 KB with `-Dtraces`) |
+
+The binary is the one that needed work rather than luck; see the entry above.
 
 **Verifying the TUI without a human at the keyboard.** `--once` covers the
 render path; anything interactive is driven through a throwaway tmux session:
