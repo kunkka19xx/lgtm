@@ -127,6 +127,7 @@ pub fn entries(
             .path = f.path(),
             .added = f.added,
             .removed = f.removed,
+            .status = f.status,
             .current = i == current,
         });
     }
@@ -182,6 +183,11 @@ test "the list is every changed file, in the review's own order" {
     }
     try testing.expectEqual(@as(usize, 1), marked);
     try testing.expect(rows[1].current);
+
+    // Status rides along, because a deleted file looks like every other row
+    // without it - `+0 −99` is a hint, not a statement.
+    try testing.expectEqual(diff.Status.deleted, rows[3].status);
+    try testing.expectEqual(diff.Status.modified, rows[0].status);
 }
 
 test "typing narrows the list, and the count agrees with it" {

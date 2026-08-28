@@ -17,6 +17,7 @@ const Allocator = std.mem.Allocator;
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
 const HelpView = frame_mod.HelpView;
+const devicon = @import("devicon.zig");
 const keytext = @import("keytext.zig");
 const prompt_mod = @import("prompt.zig");
 
@@ -386,9 +387,16 @@ test "an empty list still draws a box to say so in" {
 pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Allocator.Error!void {
     const entries = v.entries;
 
+    // Fixed cells before the path: the "you are here" mark and a space, plus
+    // the icon and another space when the glyph set has icons. Fixed, because
+    // a slot that is only sometimes there steps every path beside it one
+    // column sideways.
+    const icons = f.glyphs.file_icons;
+    const lead: u16 = 2 + @as(u16, if (icons) 2 else 0);
+
     var m: Metrics = .{ .entries = entries.len, .max_cols = 1 };
     for (entries) |e| {
-        m.keys = @max(m.keys, f.win.gwidth(e.path));
+        m.keys = @max(m.keys, lead + f.win.gwidth(e.path));
         m.desc = @max(m.desc, countsWidth(e));
     }
 
@@ -422,14 +430,46 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // The file the review is on is marked rather than merely selected:
         // "where I am" and "what I am pointing at" are different questions,
         // and the list is opened to answer the first.
-        const mark = if (e.current) f.glyphs.sep else " ";
-        f.put(row, text_col, mark, frame_mod.withBg(f.theme.accent, bg));
-        f.put(row, text_col + 1, e.path, frame_mod.withBg(if (e.current) f.theme.path else f.theme.text, bg));
+        const here = if (e.current) f.glyphs.sep else " ";
+        f.put(row, text_col, here, frame_mod.withBg(f.theme.accent, bg));
+
+        // The row carries its status in one colour: green arrived, red left,
+        // amber changed, blue moved, grey cannot be read. One colour and not
+        // two, so a row reads as one thing rather than as an icon and a path
+        // that happen to be adjacent. The current file is bold on top of
+        // whichever colour it is, so "where I am" survives.
+        var style = switch (e.status) {
+            .added => f.theme.file_added,
+            .deleted => f.theme.file_deleted,
+            .modified => f.theme.file_modified,
+            .renamed => f.theme.file_renamed,
+            .binary => f.theme.file_binary,
+        };
+        style.bold = e.current;
+        const on_row = frame_mod.withBg(style, bg);
+
+        // The icon takes its filetype colour, the way oil.nvim and neo-tree
+        // draw it: the shape and the hue together are what let a reader find
+        // the Zig file without reading a name. The path keeps the status
+        // colour, so the row still says what happened to it.
+        if (devicon.forPath(e.path, icons)) |icon| {
+            const hue = switch (icon.hue) {
+                .red => f.theme.hues.red,
+                .green => f.theme.hues.green,
+                .yellow => f.theme.hues.yellow,
+                .blue => f.theme.hues.blue,
+                .magenta => f.theme.hues.magenta,
+                .cyan => f.theme.hues.cyan,
+                .muted => f.theme.hues.muted,
+            };
+            f.put(row, text_col + 2, icon.glyph, frame_mod.withBg(.{ .fg = hue }, bg));
+        }
+        f.put(row, text_col + lead, e.path, on_row);
 
         // Counts right-aligned inside the box, so the paths stay readable as a
         // column even when one of them is very long.
         const counts_col = text_col + box.content - countsWidth(e);
-        if (counts_col > text_col + 1 + f.win.gwidth(e.path)) {
+        if (counts_col > text_col + lead + f.win.gwidth(e.path)) {
             var col = counts_col;
             col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
             _ = try f.print(row, col, frame_mod.withBg(f.theme.removed_count, bg), "{s}{d}", .{ f.glyphs.del, e.removed });

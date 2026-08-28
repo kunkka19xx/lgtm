@@ -93,7 +93,8 @@ added = "#a6e3a1 bold"     # then any slot, over the top of the named theme
 cursor_line = "on #313244"
 
 [ui]
-icons = "unicode"          # or "ascii", for a terminal without the glyphs
+icons = "unicode"          # "ascii" for a terminal without the glyphs,
+                           # "nerd" for file-type icons in the F list
 
 [nav]
 hunk_crosses_files = true  # ]h walks the whole review, not just this file

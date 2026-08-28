@@ -23,6 +23,7 @@ const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
 
 const config = @import("../config.zig");
+const devicon = @import("devicon.zig");
 const files_mod = @import("files.zig");
 const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
@@ -707,6 +708,7 @@ const testing = std.testing;
 // module joins `zig build check` where it is used: the ones the run loop pulls
 // in are listed in `loop.zig`, and `main.zig` covers the rest.
 test {
+    _ = devicon;
     _ = files_mod;
     _ = help_mod;
     _ = keymap;

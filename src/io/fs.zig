@@ -34,7 +34,7 @@ pub fn listDir(io: Io, gpa: Allocator, path: []const u8) ![][]u8 {
         try names.append(gpa, try gpa.dupe(u8, entry.name));
     }
     const out = try names.toOwnedSlice(gpa);
-    std.mem.sort([]u8, out, {}, struct {
+    std.sort.pdq([]u8, out, {}, struct {
         fn lessThan(_: void, a: []u8, b: []u8) bool {
             return std.mem.lessThan(u8, a, b);
         }
@@ -69,7 +69,7 @@ pub fn walkExt(io: Io, gpa: Allocator, root: []const u8, exts: []const []const u
     }
 
     const out = try paths.toOwnedSlice(gpa);
-    std.mem.sort([]u8, out, {}, struct {
+    std.sort.pdq([]u8, out, {}, struct {
         fn lessThan(_: void, a: []u8, b: []u8) bool {
             return std.mem.lessThan(u8, a, b);
         }

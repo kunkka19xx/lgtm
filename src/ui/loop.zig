@@ -69,6 +69,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
         .ascii => theme_mod.Glyphs.ascii,
+        .nerd => theme_mod.Glyphs.nerd,
     };
     // Said once, on the first frame, and cleared by the first keystroke like
     // any other notice - long enough to read, and not a modal the user has to

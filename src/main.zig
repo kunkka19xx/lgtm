@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 pub const lib = @import("lib.zig");
 pub const config = @import("config.zig");
@@ -28,6 +29,15 @@ const usage =
 ;
 
 const version = "0.0.0-dev";
+
+/// A panic still says what went wrong; what this drops in a release build is
+/// the stack trace under it, and with it the DWARF reader, the inflate for
+/// compressed debug sections, and the stable sort they pull in - 304 KB
+/// measured, against a 1 MB budget. Build with `-Dtraces` to get them back.
+pub const panic = if (build_options.stack_traces)
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.simple_panic;
 
 /// Zig 0.16 hands main the process allocator, arena, and Io implementation.
 pub fn main(init: std.process.Init) !void {
@@ -93,6 +103,7 @@ pub fn main(init: std.process.Init) !void {
     const glyphs = switch (cfg.cfg.ui.icons) {
         .unicode => theme.Glyphs.unicode,
         .ascii => theme.Glyphs.ascii,
+        .nerd => theme.Glyphs.nerd,
     };
     if (want_preview) {
         try preview.write(w, glyphs);

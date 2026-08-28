@@ -48,6 +48,10 @@ pub const Glyphs = struct {
     box_bl: []const u8,
     box_br: []const u8,
 
+    /// Whether this set has per-filetype icons to go with it. Only the nerd
+    /// set does, because only it can assume the font has them.
+    file_icons: bool = false,
+
     pub const unicode: Glyphs = .{
         .sep = "\u{258f}",
         .rule = "\u{2500}",
@@ -64,6 +68,16 @@ pub const Glyphs = struct {
         .box_tr = "\u{256e}",
         .box_bl = "\u{2570}",
         .box_br = "\u{256f}",
+    };
+
+    /// The unicode set plus file-type icons. Everything else is identical:
+    /// a Nerd Font patches glyphs *in*, it does not change what a box corner
+    /// looks like, and a set that also moved the borders would make `nerd` a
+    /// second theme rather than an icon switch.
+    pub const nerd: Glyphs = blk: {
+        var g = unicode;
+        g.file_icons = true;
+        break :blk g;
     };
 
     pub const ascii: Glyphs = .{
@@ -86,6 +100,13 @@ pub const Glyphs = struct {
 /// The styles the renderer draws with. Built from a `Palette` rather than
 /// written out per theme; the slots are what `[theme]` overrides by name.
 pub const Theme = struct {
+    /// The palette this theme was built from, kept so that something wanting a
+    /// raw hue - a file icon, which is coloured by filetype rather than by any
+    /// meaning this file knows about - can ask for one without a slot per
+    /// language. Slot overrides do not change it: it is the theme's colours,
+    /// not its decisions.
+    hues: palette.Palette,
+
     text: Style,
     comment: Style,
     string: Style,
@@ -105,6 +126,16 @@ pub const Theme = struct {
     /// read as one object, dimmed so it frames the list instead of competing
     /// with it. A terminal has no opacity; `dim` is the nearest thing to it.
     popup_border: Style,
+
+    /// What happened to a file, in the `F` list. Colour rather than a letter
+    /// column: the list is paths, and a second alphabet beside them is one
+    /// more thing to learn and one less column for the path. Slots rather than
+    /// borrowed styles, so a theme moves them together with everything else.
+    file_added: Style,
+    file_deleted: Style,
+    file_modified: Style,
+    file_renamed: Style,
+    file_binary: Style,
 
     /// Chrome.
     rule: Style,
@@ -150,6 +181,7 @@ pub const Theme = struct {
 /// same thing in all of them.
 pub fn fromPalette(p: Palette) Theme {
     return .{
+        .hues = p,
         .text = .{ .fg = p.fg },
         .comment = .{ .fg = p.muted },
         .string = .{ .fg = p.green },
@@ -161,6 +193,16 @@ pub fn fromPalette(p: Palette) Theme {
 
         .accent = .{ .fg = p.accent, .bold = true },
         .popup_border = .{ .fg = p.accent, .dim = true },
+
+        .file_added = .{ .fg = p.green },
+        .file_deleted = .{ .fg = p.red },
+        // Amber, which is what "orange" is in a palette that has yellow: the
+        // file changed rather than arrived or left.
+        .file_modified = .{ .fg = p.yellow },
+        // A move is neither a gain nor a loss, so it takes neither colour.
+        .file_renamed = .{ .fg = p.blue },
+        // Nothing to read, so it recedes.
+        .file_binary = .{ .fg = p.muted },
 
         .rule = .{ .fg = p.muted },
         .dim = .{ .fg = p.muted },
@@ -338,6 +380,9 @@ test "the ascii glyph set stays inside 7-bit ascii" {
     // The point of the fallback is that it survives a terminal that mangles
     // anything above 0x7f, so assert it rather than trusting the literals.
     inline for (@typeInfo(Glyphs).@"struct".fields) |f| {
+        // The set is mostly strings and one flag; only the strings have bytes
+        // a terminal can mangle.
+        if (f.type != []const u8) continue;
         const g: []const u8 = @field(Glyphs.ascii, f.name);
         for (g) |c| try std.testing.expect(c < 0x80);
     }
@@ -359,6 +404,13 @@ test "every bundled theme keeps the relationships the default has" {
         // Add and delete must never be the same colour: the sign column is
         // the only thing distinguishing the two halves of a change.
         try std.testing.expect(!eq(t.add_sign.fg, t.del_sign.fg));
+        // Nor may the file statuses collide, for the same reason one level up:
+        // in the `F` list the colour *is* the status, so two that match are
+        // two statuses a reader cannot tell apart.
+        const status = [_]Style{ t.file_added, t.file_deleted, t.file_modified, t.file_renamed, t.file_binary };
+        for (status, 0..) |one, i| {
+            for (status[i + 1 ..]) |other| try std.testing.expect(!eq(one.fg, other.fg));
+        }
         // Text has to survive being drawn on the cursor line, which covers
         // the full width of the pane.
         try std.testing.expect(!eq(t.text.fg, t.cursor_line.bg));

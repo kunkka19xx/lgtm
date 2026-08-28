@@ -188,6 +188,10 @@ pub const FileEntry = struct {
     path: []const u8,
     added: u32,
     removed: u32,
+    /// What happened to the file. Modified draws no mark: it is the majority,
+    /// and what a reader looks for is the file that appeared, vanished, moved
+    /// or cannot be read at all.
+    status: diff.Status = .modified,
     /// The file the review is currently on, marked so the list opens showing
     /// the reader where they already are rather than at an arbitrary top.
     current: bool = false,

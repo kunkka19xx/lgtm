@@ -7,8 +7,18 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     const profile = b.option(bool, "profile", "Enable timing spans and the --profile report") orelse false;
+
+    // Stack traces on panic cost 304 KB of the 1 MB binary budget: DWARF
+    // parsing, the inflate to read compressed debug sections, and the stable
+    // sort those pull in. Measured, not guessed. On by default where they are
+    // read - a developer's Debug build - and off in a release, where a panic
+    // trace lands in the alt screen the TUI never got to leave anyway.
+    // `-Dtraces` forces them back on, which is what a bug report wants.
+    const traces = b.option(bool, "traces", "Stack traces on panic (default: only in Debug)") orelse (optimize == .Debug);
+
     const build_options = b.addOptions();
     build_options.addOption(bool, "profile", profile);
+    build_options.addOption(bool, "stack_traces", traces);
 
     const vaxis = b.dependency("vaxis", .{
         .target = target,

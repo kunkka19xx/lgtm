@@ -36,7 +36,10 @@ pub const max_bytes: usize = 256 << 10;
 
 /// `ui.icons`. Named here rather than as a `theme.Glyphs` value so this module
 /// stays free of vaxis; `ui/app.zig` does the mapping.
-pub const Icons = enum { unicode, ascii };
+/// `ui.icons`. `nerd` adds per-filetype icons to the file list and assumes a
+/// patched font; the other two assume nothing, which is why one of them is the
+/// default (FEATURES.md 4.2).
+pub const Icons = enum { unicode, ascii, nerd };
 
 pub const Ui = struct {
     icons: Icons = .unicode,
@@ -189,7 +192,7 @@ pub const Loader = struct {
                 if (std.mem.eql(u8, key, "icons")) {
                     const s = self.wantString(src, line, key, value) orelse return;
                     self.cfg.ui.icons = std.meta.stringToEnum(Icons, s) orelse {
-                        self.note(src, line, "ui.icons must be \"unicode\" or \"ascii\", not \"{s}\"", .{s});
+                        self.note(src, line, "ui.icons must be \"unicode\", \"ascii\" or \"nerd\", not \"{s}\"", .{s});
                         return;
                     };
                 } else self.unknownKey(src, line, section, key);
@@ -494,7 +497,7 @@ test "a bad line costs one key its value and nothing else" {
         \\hunk_crosses_files = maybe
         \\scrolloff = 5
         \\[ui]
-        \\icons = "nerd"
+        \\icons = "emoji"
         \\[bogus]
         \\anything = 1
     );

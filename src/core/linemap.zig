@@ -249,7 +249,7 @@ pub const HashIndex = struct {
         defer gpa.free(pairs);
         for (ids, 0..) |_, i| pairs[i] = .{ .h = windowHash(ids, i), .line = @intCast(i) };
 
-        std.mem.sort(Entry, pairs, {}, struct {
+        std.sort.pdq(Entry, pairs, {}, struct {
             fn lessThan(_: void, a: Entry, b: Entry) bool {
                 return a.h < b.h;
             }
