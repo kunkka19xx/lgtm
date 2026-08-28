@@ -3,9 +3,9 @@
 // Rust. The `'` spec carries a byte limit so a lifetime (`'a`) is not read as
 // an unterminated char literal - see StringSpec.max_bytes.
 
-const lexer = @import("../lexer.zig");
+const langdef = @import("../langdef.zig");
 
-pub const def = lexer.define(.{
+pub const def = langdef.define(.{
     .name = "rust",
     .extensions = &.{"rs"},
     .line_comment = &.{"//"},

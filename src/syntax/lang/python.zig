@@ -3,9 +3,9 @@
 // Python. The only `.indent` language so far: function spans close when a line
 // appears at or left of the declaration's indentation, not on a brace.
 
-const lexer = @import("../lexer.zig");
+const langdef = @import("../langdef.zig");
 
-pub const def = lexer.define(.{
+pub const def = langdef.define(.{
     .name = "python",
     .extensions = &.{ "py", "pyi" },
     .line_comment = &.{"#"},

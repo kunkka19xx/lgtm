@@ -28,6 +28,7 @@ const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
 const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
+const toml = @import("toml.zig");
 
 /// A config file larger than this is not a config file. Reading it is the one
 /// thing on the cold-start path that a user can make arbitrarily slow.
@@ -78,22 +79,6 @@ pub const Problem = struct {
 
 const Section = enum { nav, ui, keys, theme };
 
-const Value = union(enum) {
-    string: []const u8,
-    boolean: bool,
-    integer: i64,
-    list: []const []const u8,
-
-    fn typeName(self: Value) []const u8 {
-        return switch (self) {
-            .string => "a string",
-            .boolean => "a boolean",
-            .integer => "an integer",
-            .list => "a list",
-        };
-    }
-};
-
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
 /// file's theme and navigation exactly as they were.
@@ -129,59 +114,64 @@ pub const Loader = struct {
         self.merge(path, text);
     }
 
-    /// The whole parser. Pure: no file, no terminal, no allocation the caller
-    /// has to think about - which is what lets every rule below be a test.
+    /// Merges one document. Pure: no file, no terminal, no allocation the
+    /// caller has to think about - which is what lets every rule below be a
+    /// test. The reading is `toml.zig`'s; what happens here is deciding what
+    /// each setting means and saying so when it means nothing.
     pub fn merge(self: *Loader, source: []const u8, text: []const u8) void {
-        const src = self.arena.allocator().dupe(u8, source) catch return;
+        const arena = self.arena.allocator();
+        const src = arena.dupe(u8, source) catch return;
+        var parser: toml.Parser = .init(arena, text);
+
         var section: ?Section = null;
         // Inside a section this build does not know. Its keys are skipped
         // without a word each: the unknown header is already reported, and a
         // future `[templates]` block read by an older binary should cost one
         // line of complaint, not one per setting.
         var in_unknown = false;
-        var line_no: u32 = 0;
-        var lines = std.mem.splitScalar(u8, text, '\n');
-        while (lines.next()) |raw| {
-            line_no += 1;
-            const line = trim(stripComment(raw));
-            if (line.len == 0) continue;
 
-            if (line[0] == '[') {
-                if (line[line.len - 1] != ']') {
-                    self.note(src, line_no, "unterminated table header", .{});
-                    continue;
-                }
-                const name = trim(line[1 .. line.len - 1]);
-                section = std.meta.stringToEnum(Section, name) orelse {
-                    self.note(src, line_no, "unknown section '[{s}]'", .{name});
+        while (parser.next()) |ev| switch (ev) {
+            .table => |t| {
+                section = std.meta.stringToEnum(Section, t.name) orelse {
+                    self.note(src, t.line, "unknown section '[{s}]'", .{t.name});
+                    // Not merely "unknown": its keys must not land in whatever
+                    // table came before it.
                     section = null;
                     in_unknown = true;
                     continue;
                 };
                 in_unknown = false;
-                continue;
-            }
+            },
+            .item => |it| {
+                const sect = section orelse {
+                    if (!in_unknown) self.note(src, it.line, "'{s}' is outside any section", .{it.key});
+                    continue;
+                };
+                self.apply(src, it.line, sect, it.key, it.value);
+            },
+            .problem => |p| self.noteFault(src, p),
+        };
+    }
 
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse {
-                self.note(src, line_no, "expected 'key = value'", .{});
-                continue;
-            };
-            const key = trim(line[0..eq]);
-            const rest = trim(line[eq + 1 ..]);
-            if (key.len == 0) {
-                self.note(src, line_no, "missing key before '='", .{});
-                continue;
-            }
-            const sect = section orelse {
-                if (!in_unknown) self.note(src, line_no, "'{s}' is outside any section", .{key});
-                continue;
-            };
-            const value = self.parseValue(src, line_no, rest) orelse continue;
-            self.apply(src, line_no, sect, key, value);
+    /// A parser fault, in words. The parser reports what it found; this is
+    /// where it becomes something a user can act on, because the sentence
+    /// depends on what the line was trying to say.
+    fn noteFault(self: *Loader, src: []const u8, p: toml.Problem) void {
+        switch (p.fault) {
+            .unterminated_table => self.note(src, p.line, "unterminated table header", .{}),
+            .expected_assignment => self.note(src, p.line, "expected 'key = value'", .{}),
+            .missing_key => self.note(src, p.line, "missing key before '='", .{}),
+            .missing_value => self.note(src, p.line, "missing value after '='", .{}),
+            .unreadable_value => self.note(src, p.line, "cannot read value '{s}'", .{p.text}),
+            .unterminated_string => self.note(src, p.line, "unterminated string", .{}),
+            .trailing_text => self.note(src, p.line, "trailing text after the value", .{}),
+            .bad_escape => self.note(src, p.line, "unknown escape '\\{s}'", .{p.text}),
+            .unterminated_list => self.note(src, p.line, "unterminated list", .{}),
+            .list_wants_strings => self.note(src, p.line, "a list holds strings, and that is not one", .{}),
         }
     }
 
-    fn apply(self: *Loader, src: []const u8, line: u32, section: Section, key: []const u8, value: Value) void {
+    fn apply(self: *Loader, src: []const u8, line: u32, section: Section, key: []const u8, value: toml.Value) void {
         switch (section) {
             .nav => {
                 if (std.mem.eql(u8, key, "hunk_crosses_files")) {
@@ -215,7 +205,7 @@ pub const Loader = struct {
     /// binding of that command. An empty list unbinds it: the hint strip and
     /// the `?` popup are both generated from the bindings, so a command with
     /// no keys simply stops being advertised rather than lying about itself.
-    fn applyKeys(self: *Loader, src: []const u8, line: u32, key: []const u8, value: Value) void {
+    fn applyKeys(self: *Loader, src: []const u8, line: u32, key: []const u8, value: toml.Value) void {
         const cmd = std.meta.stringToEnum(keymap.Command, key) orelse {
             self.note(src, line, "unknown command '{s}'", .{key});
             return;
@@ -308,7 +298,7 @@ pub const Loader = struct {
     /// whatever the palette put there. In file order, so `name` after a slot
     /// override discards it - which is the only reading that stays
     /// predictable when two files each set both.
-    fn applyTheme(self: *Loader, src: []const u8, line: u32, key: []const u8, value: Value) void {
+    fn applyTheme(self: *Loader, src: []const u8, line: u32, key: []const u8, value: toml.Value) void {
         const spec = self.wantString(src, line, key, value) orelse return;
         if (std.mem.eql(u8, key, "name")) {
             self.cfg.theme = theme.byName(spec) orelse {
@@ -327,87 +317,7 @@ pub const Loader = struct {
         }
     }
 
-    fn parseValue(self: *Loader, src: []const u8, line: u32, text: []const u8) ?Value {
-        if (text.len == 0) {
-            self.note(src, line, "missing value after '='", .{});
-            return null;
-        }
-        if (text[0] == '"') return .{ .string = self.parseString(src, line, text) orelse return null };
-        if (text[0] == '[') return self.parseList(src, line, text);
-        if (std.mem.eql(u8, text, "true")) return .{ .boolean = true };
-        if (std.mem.eql(u8, text, "false")) return .{ .boolean = false };
-        if (std.fmt.parseInt(i64, text, 10)) |n| {
-            return .{ .integer = n };
-        } else |_| {}
-        self.note(src, line, "cannot read value '{s}'", .{text});
-        return null;
-    }
-
-    /// A basic TOML string: quotes, and the four escapes anything here could
-    /// want. `\n` matters because a template string will want one long before
-    /// dates or unicode escapes do.
-    fn parseString(self: *Loader, src: []const u8, line: u32, text: []const u8) ?[]const u8 {
-        const end = stringEnd(text) orelse {
-            self.note(src, line, "unterminated string", .{});
-            return null;
-        };
-        if (end != text.len - 1) {
-            self.note(src, line, "trailing text after the value", .{});
-            return null;
-        }
-        var out: std.ArrayList(u8) = .empty;
-        const a = self.arena.allocator();
-        var i: usize = 1;
-        while (i < end) : (i += 1) {
-            if (text[i] != '\\') {
-                out.append(a, text[i]) catch return null;
-                continue;
-            }
-            i += 1;
-            if (i >= end) break;
-            const ch: u8 = switch (text[i]) {
-                'n' => '\n',
-                't' => '\t',
-                'r' => '\r',
-                '"' => '"',
-                '\\' => '\\',
-                else => {
-                    self.note(src, line, "unknown escape '\\{c}'", .{text[i]});
-                    return null;
-                },
-            };
-            out.append(a, ch) catch return null;
-        }
-        return out.items;
-    }
-
-    fn parseList(self: *Loader, src: []const u8, line: u32, text: []const u8) ?Value {
-        if (text[text.len - 1] != ']') {
-            self.note(src, line, "unterminated list", .{});
-            return null;
-        }
-        const a = self.arena.allocator();
-        var items: std.ArrayList([]const u8) = .empty;
-        var i: usize = 1;
-        while (i < text.len - 1) {
-            while (i < text.len - 1 and (text[i] == ' ' or text[i] == '\t' or text[i] == ',')) i += 1;
-            if (i >= text.len - 1) break;
-            if (text[i] != '"') {
-                self.note(src, line, "a list holds strings; '{c}' is not one", .{text[i]});
-                return null;
-            }
-            const end = stringEnd(text[i..]) orelse {
-                self.note(src, line, "unterminated string in list", .{});
-                return null;
-            };
-            const piece = self.parseString(src, line, text[i .. i + end + 1]) orelse return null;
-            items.append(a, piece) catch return null;
-            i += end + 1;
-        }
-        return .{ .list = items.items };
-    }
-
-    fn wantBool(self: *Loader, src: []const u8, line: u32, key: []const u8, v: Value) ?bool {
+    fn wantBool(self: *Loader, src: []const u8, line: u32, key: []const u8, v: toml.Value) ?bool {
         return switch (v) {
             .boolean => |b| b,
             else => {
@@ -417,7 +327,7 @@ pub const Loader = struct {
         };
     }
 
-    fn wantInt(self: *Loader, src: []const u8, line: u32, key: []const u8, v: Value) ?i64 {
+    fn wantInt(self: *Loader, src: []const u8, line: u32, key: []const u8, v: toml.Value) ?i64 {
         return switch (v) {
             .integer => |n| n,
             else => {
@@ -427,7 +337,7 @@ pub const Loader = struct {
         };
     }
 
-    fn wantString(self: *Loader, src: []const u8, line: u32, key: []const u8, v: Value) ?[]const u8 {
+    fn wantString(self: *Loader, src: []const u8, line: u32, key: []const u8, v: toml.Value) ?[]const u8 {
         return switch (v) {
             .string => |s| s,
             else => {
@@ -501,41 +411,8 @@ fn protoFor(cmd: keymap.Command) keymap.Binding {
     return .{ .chords = &.{}, .command = cmd };
 }
 
-fn trim(s: []const u8) []const u8 {
-    return std.mem.trim(u8, s, " \t\r");
-}
 
-/// Everything before an unquoted `#`. Quoted, because `"#{change_id}"` is a
-/// template string that FEATURES.md 4.5 puts in this file, and truncating it
-/// at the `#` would be a silent corruption rather than an error.
-fn stripComment(line: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < line.len) : (i += 1) {
-        switch (line[i]) {
-            '#' => return line[0..i],
-            '"' => {
-                const end = stringEnd(line[i..]) orelse return line;
-                i += end;
-            },
-            else => {},
-        }
-    }
-    return line;
-}
 
-/// Index of the closing quote of the string starting at index 0, or null when
-/// there is not one. Escapes are honoured, so `"\""` closes at the last quote.
-fn stringEnd(text: []const u8) ?usize {
-    var i: usize = 1;
-    while (i < text.len) : (i += 1) {
-        if (text[i] == '\\') {
-            i += 1;
-            continue;
-        }
-        if (text[i] == '"') return i;
-    }
-    return null;
-}
 
 /// Where the config lives. `$XDG_CONFIG_HOME` first, as every other tool on
 /// the user's machine does, `~/.config` after it, and the repo's own file
@@ -576,6 +453,11 @@ pub fn load(
 }
 
 const testing = std.testing;
+
+// The parser this file reads its documents with; see the note in `ui/app.zig`.
+test {
+    _ = toml;
+}
 
 /// Parses one document into a loader the caller deinits. Every test below is
 /// this plus assertions, because the parser is pure by construction.
@@ -766,20 +648,21 @@ test "comments and quoting" {
     defer l.deinit();
     try testing.expectEqual(@as(usize, 0), l.problems.items.len);
     try testing.expectEqual(Icons.ascii, l.cfg.ui.icons);
-
-    // A `#` inside a string is data. Template strings are full of them
-    // (FEATURES.md 4.5: `ref_single = "#{change_id} {path}:{line}"`), and
-    // truncating one at the `#` would corrupt it silently.
-    try testing.expect(std.mem.eql(u8, stripComment("x = \"#{id}\" # note"), "x = \"#{id}\" "));
 }
 
-test "escapes inside a string" {
-    var l = Loader.init(testing.allocator);
+test "a bad escape names the escape, not the line" {
+    // The parser reports the fault; the sentence is this file's. Both halves
+    // have to line up, and this is the seam where they meet.
+    var l = loadText(
+        \\[theme]
+        \\name = "a\qb"
+    );
     defer l.deinit();
-    const s = l.parseString("config.toml", 1, "\"a\\nb\\\"c\"").?;
-    try testing.expectEqualStrings("a\nb\"c", s);
-    try testing.expect(l.parseString("config.toml", 1, "\"unterminated") == null);
     try testing.expectEqual(@as(usize, 1), l.problems.items.len);
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[0].text, "unknown escape") != null);
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[0].text, "q") != null);
+    // And the theme it had is the theme it keeps.
+    try testing.expectEqual(theme.default.accent, l.cfg.theme.accent);
 }
 
 test "the later file wins, key by key" {

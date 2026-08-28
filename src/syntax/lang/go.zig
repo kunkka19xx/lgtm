@@ -3,9 +3,9 @@
 // Go. `fn_receiver` is what lets `func (r *T) Name()` still report Name as the
 // enclosing function rather than stopping at the receiver.
 
-const lexer = @import("../lexer.zig");
+const langdef = @import("../langdef.zig");
 
-pub const def = lexer.define(.{
+pub const def = langdef.define(.{
     .name = "go",
     .extensions = &.{"go"},
     .line_comment = &.{"//"},

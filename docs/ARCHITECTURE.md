@@ -450,14 +450,16 @@ lgtm/
 ├── .zigversion
 ├── src/
 │   ├── main.zig
-│   ├── config.zig
+│   ├── config.zig         # what a setting means, and what a bad one costs
+│   ├── toml.zig           # the subset config.zig reads it from
 │   ├── text/              # buffer + TextEdit - see §11
 │   │   ├── buffer.zig
 │   │   └── edit.zig
 │   ├── core/              # pure logic, unit-tested
 │   │   ├── diff.zig
 │   │   ├── hunk.zig
-│   │   ├── anchor.zig
+│   │   ├── linemap.zig    # matching two versions line to line
+│   │   ├── anchor.zig     # the tiers built on it: mapped, hashed, stale
 │   │   ├── notes.zig
 │   │   └── review.zig
 │   ├── io/                # std.Io quarantine
@@ -479,13 +481,16 @@ lgtm/
 │   │   ├── prompt.zig     # the `/` and `:` input line
 │   │   ├── search.zig     # matching across the whole review
 │   │   ├── editor.zig     # $EDITOR argv, from $VISUAL/$EDITOR
-│   │   ├── theme.zig      # palettes, styles and glyph sets
+│   │   ├── palette.zig    # the seven bundled palettes, as data
+│   │   ├── theme.zig      # the mapping onto semantic slots, and `[theme]`
 │   │   └── preview.zig    # --theme-preview
 │   ├── bridge/
 │   ├── search/
 │   └── syntax/
+│       ├── token.zig      # what a lexer produces: kinds and runs
+│       ├── langdef.zig    # the vocabulary a language is described in
+│       ├── lexer.zig      # one pass: classify and track structure together
 │       ├── highlight.zig
-│       ├── lexer.zig
 │       └── lang/          # zig.zig, rust.zig, go.zig, python.zig
 └── tests/
     └── fixtures/          # recorded git diff output + edit sequences

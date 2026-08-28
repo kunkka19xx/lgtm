@@ -3,9 +3,9 @@
 // Zig. First because it is what this repository is written in, so every
 // fixture and every real recorded session exercises it (docs/PLAN.md phase 4).
 
-const lexer = @import("../lexer.zig");
+const langdef = @import("../langdef.zig");
 
-pub const def = lexer.define(.{
+pub const def = langdef.define(.{
     .name = "zig",
     .extensions = &.{ "zig", "zon" },
     .line_comment = &.{"//"},
