@@ -47,7 +47,7 @@ Not an agent. No embedded terminal. No plugin runtime. See `docs/SPEC.md` §4.
 
 ## Status
 
-Pre-alpha, and now a usable reader: `zig build run` shows this repository's own uncommitted changes, with syntax highlighting, hunk headers naming the enclosing function, vim motions across the whole review, search, visual select, a `?` key overlay, an `F` file list, seven themes and a config file. What it cannot yet do is the thing it exists for - `Enter` does not send a reference, because that is the bridge, phase 6.
+Pre-alpha, and now the whole loop: `zig build run` shows this repository's own uncommitted changes, with syntax highlighting, hunk headers naming the enclosing function, vim motions across the whole review, search, visual select, a `?` key overlay, an `F` file list, seven themes and a config file - and `Enter` puts a reference into the agent's pane, which is the thing it exists for. Every v0.1 phase is now green; what is left is a week of using it.
 
 The parts below the terminal were built first, because that is the order the dependency graph demands rather than the order a demo would want - each one is testable headless, and a wrong decision is far cheaper to find before a TUI is attached to it.
 
@@ -59,7 +59,7 @@ The parts below the terminal were built first, because that is the order the dep
 | 3 - File watching | done | one event per settled burst of writes |
 | 4 - Syntax lexer | done | 378 MB/s, 0.5 ms to scan 6.4k lines |
 | 5 - TUI | done | live diff, motions, search, themes, config, file list; 0.11 ms per frame |
-| 6 - Bridge | next | `Enter` sends a reference to the agent - the thing it exists for |
+| 6 - Bridge | done | tmux + OSC 52; `Enter`, `y`, `Y` and the ask presets |
 
 Every number is measured rather than estimated, but on whichever machine ran it. [`docs/PLAN.md`](docs/PLAN.md) has the conditions, the caveats, and what was deliberately left unbuilt.
 
@@ -89,6 +89,28 @@ zig build bench -- [dir]      # lexer benchmark, run under -Doptimize=ReleaseFas
 ```
 
 On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: run them as `nix run .#fhs -- -c "zig build check"`. The default shell warns about this.
+
+## Sending
+
+With the cursor on a line, `Enter` puts `#3 src/auth.zig:47` into the agent's
+pane. `V` selects a range first and sends `:47-52`. `y` copies the reference,
+`Y` copies it with the lines under it, and `a` `!` `t` `x` send the reference
+with a question attached - "why this approach?", "revert this, keep the rest",
+"add a test covering this", "explain what this does".
+
+**It inserts text and never presses Enter.** The payload ends with a trailing
+space; you type your question and decide when to submit. A payload containing a
+newline is refused rather than truncated, because in `tmux send-keys` a newline
+*is* Enter.
+
+Inside tmux the target pane is inferred when the window holds exactly one other
+pane, which is the setup this tool is named after. Three panes is a guess and a
+wrong guess types into your editor, so it asks instead: start with
+`lgtm --pane %3`. The working target is remembered in `.lgtm/target`, and if
+that pane dies the reference goes to the clipboard rather than nowhere.
+
+Outside tmux - or when a send fails - everything lands on the clipboard through
+OSC 52, which works over SSH.
 
 ## Configuring
 

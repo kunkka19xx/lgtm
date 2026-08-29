@@ -33,6 +33,18 @@ pub const Command = enum {
     search_prev,
     open_editor,
     command_line,
+    /// The bridge. `send_ref` inserts the reference into the agent's input
+    /// box; the two copies go to the clipboard whatever the backend is.
+    send_ref,
+    copy_ref,
+    copy_ref_lines,
+    /// Ask presets: one keystroke, a whole question (FEATURES.md 2.1). Each
+    /// is the reference plus a template, which is why they cost four enum
+    /// values and no dispatch of their own.
+    ask_why,
+    ask_revert,
+    ask_test,
+    ask_explain,
     /// Hide the chrome and give the body the whole pane.
     toggle_zen,
     /// Open the `?` overlay, and close it again from inside.
@@ -152,7 +164,14 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .desc = "next file" },
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .desc = "previous file" },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line" },
-    .{ .chords = &.{c('/')}, .command = .search_forward, .hint = "search", .desc = "search the review" },
+    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .hint = "send", .desc = "send the reference to the agent" },
+    .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference" },
+    .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines" },
+    .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?" },
+    .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest" },
+    .{ .chords = &.{c('t')}, .command = .ask_test, .desc = "ask: add a test covering this" },
+    .{ .chords = &.{c('x')}, .command = .ask_explain, .desc = "ask: explain what this does" },
+    .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review" },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match" },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match" },
     .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "select", .desc = "visual line select" },

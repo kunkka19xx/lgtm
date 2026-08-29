@@ -19,6 +19,7 @@ const usage =
     \\usage: lgtm [options]
     \\
     \\  --config <path>  read this file instead of the usual two
+    \\  --pane <id>      send to this multiplexer pane (e.g. %3)
     \\  --theme <name>   use this bundled theme for this run
     \\  --theme-preview  draw every bundled theme and exit
     \\  --once           render one frame and exit, for screenshots and CI
@@ -53,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
     var want_once = false;
     var config_path: ?[]const u8 = null;
     var theme_name: ?[]const u8 = null;
+    var pane: ?[]const u8 = null;
     var want_preview = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
@@ -74,6 +76,12 @@ pub fn main(init: std.process.Init) !void {
         } else if (std.mem.eql(u8, arg, "--theme")) {
             theme_name = args.next() orelse {
                 try w.print("lgtm: --theme needs a name\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--pane")) {
+            pane = args.next() orelse {
+                try w.print("lgtm: --pane needs a pane id\n\n{s}", .{usage});
                 try w.flush();
                 return;
             };
@@ -127,6 +135,7 @@ pub fn main(init: std.process.Init) !void {
         .once = want_once,
         .cfg = cfg.cfg,
         .problems = cfg.summary(&problem_buf),
+        .pane = pane,
     });
 
     if (want_profile) try metrics.report(w);

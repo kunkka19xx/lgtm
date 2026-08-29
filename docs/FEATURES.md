@@ -280,9 +280,9 @@ All four hold. A bad line costs that one key its value and nothing else - the li
 |---|---|---|
 | `?` help popup | **v0.1** | Ship with the first keybinding, not after |
 | Themes (bundled) | v0.1 | Reuse `look`'s |
-| Ask presets | v0.1 | Trivial once the bridge exists |
+| Ask presets | v0.1 | Shipped: `a` `!` `t` `x`, four templates and no dispatch of their own |
 | Keymap remapping | v0.2 | Needs the command-name indirection from day one |
-| Template strings | v0.2 | Ships with review notes |
+| Template strings | v0.2 | The table itself shipped in v0.1 (`bridge/template.zig`); `[templates]` overrides it in v0.2 |
 | Turn checkpoints (`m`) | v0.2 | Same machinery as anchoring |
 | Weakened-test detection | v0.2 | Needs the lexer |
 | Risk ordering | v0.3 | Needs tuning against real sessions |

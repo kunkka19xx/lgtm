@@ -20,6 +20,8 @@ const proc = @import("../io/proc.zig");
 const tty_mod = @import("../io/tty.zig");
 const watch = @import("../io/watch.zig");
 
+const bridge = @import("../bridge/bridge.zig");
+
 const config = @import("../config.zig");
 const app_mod = @import("app.zig");
 const App = app_mod.App;
@@ -40,6 +42,10 @@ pub const Options = struct {
     /// config error belongs in the status line, never in a refusal to start
     /// (FEATURES.md 4.9).
     problems: ?[]const u8 = null,
+    /// `--pane <id>`: the multiplexer pane the agent is running in. Beats both
+    /// the saved target and the inference, and replaces the saved one, because
+    /// it was typed just now and the inference was a guess.
+    pane: ?[]const u8 = null,
 };
 
 /// Runs the review UI until the user quits.
@@ -75,6 +81,22 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // any other notice - long enough to read, and not a modal the user has to
     // dismiss before reviewing anything.
     if (opts.problems) |p| app.notice.set("config: {s}", .{p});
+
+    // Detection is env vars and cannot fail; the target is the part that can,
+    // and it resolves lazily on the first send so a pane opened after lgtm
+    // started is still reachable (ARCHITECTURE.md 6).
+    var br = bridge.detect(environ);
+    var saved: SavedTarget = .{};
+    if (br == .tmux) {
+        var saved_buf: [bridge.max_pane_id]u8 = undefined;
+        if (bridge.loadTarget(io, gpa, &saved_buf)) |p| {
+            br.tmux.setPane(p);
+            saved.set(p);
+        }
+        // Typed just now, so it beats what a previous run inferred. Not
+        // recorded as saved: the first send that works is what persists it.
+        if (opts.pane) |p| br.tmux.setPane(p);
+    }
 
     var reader = input.Reader.init(&term, &queue);
     var winsize: input.WinsizeNotifier = .{ .tty = &term, .queue = &queue };
@@ -128,6 +150,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             try app.handle(ev, render.bodyHeight(ws.rows, app.zen));
         }
 
+        if (app.want_send) |how| {
+            app.want_send = null;
+            try deliver(&app, &br, w, how, &saved);
+        }
+
         if (app.want_editor) {
             app.want_editor = false;
             try openEditor(&app, &vx, &term, w, environ, &reader, opts);
@@ -135,6 +162,69 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             // drew is still on it, so the damage baseline is a lie.
             vx.queueRefresh();
         }
+    }
+}
+
+/// The pane id currently on disk. A target that changes mid-session - the
+/// agent's pane died and its replacement was inferred - is persisted, and one
+/// that has not changed is not rewritten on every send.
+const SavedTarget = struct {
+    buf: [bridge.max_pane_id]u8 = undefined,
+    len: usize = 0,
+
+    fn matches(self: *const SavedTarget, id: []const u8) bool {
+        return std.mem.eql(u8, self.buf[0..self.len], id);
+    }
+
+    fn set(self: *SavedTarget, id: []const u8) void {
+        self.len = @min(id.len, self.buf.len);
+        @memcpy(self.buf[0..self.len], id[0..self.len]);
+    }
+};
+
+/// Performs a composed payload. Which bridge, and whether it degraded, is the
+/// bridge's business; what the status line says about it is this file's.
+fn deliver(
+    app: *App,
+    br: *bridge.Bridge,
+    w: *std.Io.Writer,
+    how: App.Delivery,
+    saved: *SavedTarget,
+) !void {
+    const text = app.payload();
+    if (text.len == 0) return;
+
+    const cx: bridge.Ctx = .{ .gpa = app.gpa, .io = app.io, .w = w };
+    const res = switch (how) {
+        .send => br.sendText(cx, text),
+        .copy => br.copyText(cx, text),
+    } catch |err| {
+        switch (err) {
+            // The one case the user can act on, so it says what to do rather
+            // than what went wrong. Inference has already declined: the window
+            // holds more than the two panes it can be sure about.
+            error.NoTarget => app.notice.set("no agent pane: restart with --pane %N", .{}),
+            error.Multiline => app.notice.set("refusing to send a multi-line payload", .{}),
+            else => app.notice.set("bridge: {t}", .{err}),
+        }
+        return;
+    };
+
+    switch (res) {
+        .sent => |pane| {
+            // Only a target that has actually worked is persisted: writing a
+            // guess down would make the next run inherit a wrong pane and
+            // start by sending the user's first reference to the clipboard.
+            if (!saved.matches(pane)) {
+                bridge.saveTarget(app.io, pane);
+                saved.set(pane);
+            }
+            app.notice.set("sent to {s}", .{pane});
+        },
+        .copied => |why| if (why) |reason|
+            app.notice.set("{s}: copied to the clipboard instead", .{reason})
+        else
+            app.notice.set("copied to the clipboard", .{}),
     }
 }
 
@@ -250,5 +340,6 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
 // The modules only the loop reaches. See the note in `app.zig`: a module whose
 // tests nothing references is a module whose tests never run.
 test {
+    _ = bridge;
     _ = editor;
 }

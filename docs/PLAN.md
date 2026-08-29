@@ -372,21 +372,51 @@ Three things that have each cost a debugging cycle:
   body's cursor line share a highlight, so grep for the description text rather
   than for the escape sequence alone.
 
-## Phase 6: Bridge
+## Phase 6: Bridge - DONE
 
 `bridge/`, tmux + OSC 52 only in v0.1.
 
-- [ ] `bridge.zig` tagged union; invariants enforced here, not per backend: reject any payload containing `\n` (runtime assert), trailing space, no carriage return (ARCHITECTURE.md §6)
-- [ ] `detect()` from env vars, infallible, falls back to `osc52`; backend failure degrades to OSC 52 with a status-line notice, never fatal
-- [ ] `osc52.zig` (works over SSH): evaluate reusing libvaxis's existing OSC 52 implementation before hand-rolling escape sequences (ARCHITECTURE.md §5c). If reused, the no-`\n` assert still lives in `bridge.zig`, above it
-- [ ] `tmux.zig` via `send-keys -t <pane_id>`
-- [ ] Target pane: detect `$TMUX`, minimal selection (flag or simple prompt), persist to `.lgtm/`; dead pane gives a clear error. Full picker UI polish lands v0.2
-- [ ] `Enter` sends a reference from the internal template table (`#{change_id} {path}:{line}`); `V` range sends `:start-end`; references always resolve against the new file; on a deleted line send the enclosing hunk reference plus a short note (SPEC.md §6.3)
-- [ ] `y` copies the reference, `Y` copies reference plus line contents
-- [ ] Every outgoing string goes through the template table from day one (user-configurable `[templates]` is v0.2)
-- [ ] Stretch: ask presets `a ! t x` (FEATURES.md §2.1, trivial once the bridge exists)
+- [x] `bridge.zig` tagged union; invariants enforced here, not per backend: a payload containing `\n` is **refused**, trailing space added, carriage returns dropped (ARCHITECTURE.md §6). Refused rather than asserted: `std.debug.assert` is compiled out in ReleaseFast, which is the build where the mistake would be silent, so `normalise` returns `error.Multiline` in every build
+- [x] `detect()` from env vars, infallible, falls back to `osc52`; a dead pane degrades to OSC 52 with a status-line notice and never propagates
+- [x] `osc52.zig` (works over SSH). libvaxis's implementation was evaluated as §5c asks and not reused: `Vaxis.copyToSystemClipboard` is a method on a receiver it never reads, so reuse means `undefined` at the call site and a vaxis import in `bridge/`. The replacement is `std.base64` and one `print`, and it is what lets the backend tests run with no terminal
+- [x] `tmux.zig` via `send-keys -t <pane_id> -l -- <text>`. `-l` is the correctness argument, not a flourish: without it tmux resolves key *names*, so a payload containing the word `Enter` would press Enter
+- [x] Target pane: `--pane %N`, else `.lgtm/target`, else inferred. Inference is deliberately narrow - **exactly one other pane in the window** - because three panes is a guess and a wrong guess types into someone's editor. It runs lazily on first send, so a pane opened after `lgtm` started is still reachable, and again after a pane dies, so its replacement costs no restart. Only a target that has actually worked is written to `.lgtm/target`
+- [x] `Enter` sends a reference from the internal template table (`#{change_id} {path}:{line}`); `V` range sends `:start-end`; references always resolve against the new file; a deleted line sends the enclosing hunk reference plus `(deleted lines in this hunk)` (SPEC.md §6.3)
+- [x] `y` copies the reference, `Y` copies the reference plus the lines, markers kept - a mixed range pasted without `+`/`-` reads as nonsense
+- [x] Every outgoing string goes through `bridge/template.zig` from day one. An unknown `{placeholder}` survives verbatim rather than being dropped, the same rule the config loader follows for a key it does not know: a typo should be visible in the message just sent, not a silently shorter one. User-configurable `[templates]` is v0.2 and lands as an override of those fields
+- [x] Ask presets `a ! t x` (FEATURES.md §2.1), which were the stretch and cost four enum values and no dispatch of their own
 
-**Gate:** cursor on line, `Enter`, text appears in the agent pane with a trailing space and is never submitted; outside tmux the same flow lands on the clipboard via OSC 52.
+Three things the plan did not anticipate, each from driving it in a real pane:
+
+- **The hint strip has no room for a fourth action.** `<CR> send` had to go on
+  it - it is what the tool is for - and adding it pushed `q quit` off the end
+  at 80 columns. The `/` search hint was dropped to pay for it: `/` is the most
+  universally known key in a vim-like TUI and it keeps its `?` row. The strip
+  now measures exactly 80 in both normal and visual mode.
+- **The copy path is not the send path.** `y`/`Y` go to the clipboard whatever
+  the backend is, and `Y` legitimately contains newlines - hard rule 1 is about
+  what `send-keys` does with one, so `copyText` sits beside `sendText` rather
+  than under it.
+- **A pane id can outlive its pane.** Persisting an inferred target before it
+  had been proven would make the next run start by sending the user's first
+  reference to the clipboard.
+
+**Gate: PASSED.** Driven in a two-pane tmux session at 80x26 against this
+repository's own diff:
+
+| Check | Result |
+| --- | --- |
+| `Enter` on a line | `#1 src/io/fs.zig:18` in the agent pane, unsubmitted |
+| Twice in a row | `...:18 #1 src/io/fs.zig:18` - the trailing space is there |
+| `V j j` then `a` | `#1 src/io/fs.zig:18-20 - why this approach?` |
+| `y` | `copied to the clipboard` |
+| Agent pane killed | `pane is gone: copied to the clipboard instead` |
+| No pane left | `no agent pane: restart with --pane %N` |
+| Replacement pane opened | `sent to %66`, and `.lgtm/target` follows it |
+
+`send-keys` bypasses tmux's own key table, so it cannot reproduce a binding the
+user's tmux swallows - the same caveat phase 5 records. The keys driven above
+are `Enter`, `V`, `j`, `a` and `y`, none of which any common tmux config binds.
 
 ---
 

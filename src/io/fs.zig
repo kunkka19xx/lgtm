@@ -18,6 +18,23 @@ pub fn readFile(io: Io, gpa: Allocator, path: []const u8, max_bytes: usize) Read
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_bytes));
 }
 
+pub const WriteError = Dir.WriteFileError || Dir.CreateDirPathError;
+
+/// Whole-file write, creating the parent directories it needs.
+///
+/// The only durable state lgtm writes is under `.lgtm/` (ARCHITECTURE.md 1),
+/// and it is small enough that a whole-file write is the right shape: there is
+/// nothing to append to and nothing to keep open.
+pub fn writeFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
+    if (std.fs.path.dirname(path)) |dir| {
+        Dir.cwd().createDirPath(io, dir) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => |e| return e,
+        };
+    }
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
 /// Entry names of a directory, sorted. Caller owns the slice and each name.
 pub fn listDir(io: Io, gpa: Allocator, path: []const u8) ![][]u8 {
     var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });

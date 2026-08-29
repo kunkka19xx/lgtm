@@ -22,6 +22,8 @@ const event = @import("../core/event.zig");
 const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
 
+const template = @import("../bridge/template.zig");
+
 const config = @import("../config.zig");
 const devicon = @import("devicon.zig");
 const files_mod = @import("files.zig");
@@ -119,6 +121,17 @@ pub const App = struct {
     /// Set by `e`. The run loop owns the terminal, so it - not `run(cmd)` -
     /// is what can hand it to a child process.
     want_editor: bool = false,
+    /// Every outgoing string is a template (FEATURES.md 4.5). Config-owned in
+    /// v0.2; the defaults are the internal table until then.
+    templates: template.Table = .{},
+    /// The composed payload, waiting for the loop to deliver it. Session
+    /// allocated and reused: it must outlive the frame arena, which is reset
+    /// under it, and it is one short line.
+    outgoing: std.ArrayList(u8) = .empty,
+    /// Set by the bridge commands, for the same reason `want_editor` is: the
+    /// loop owns the terminal the clipboard sequence goes to and the process
+    /// the tmux send spawns.
+    want_send: ?Delivery = null,
 
     pub fn init(gpa: Allocator, io: std.Io, queue: *event.Queue) App {
         return .{
@@ -131,6 +144,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.frame_arena.deinit();
         self.* = undefined;
@@ -263,6 +277,13 @@ pub const App = struct {
             // The run loop owns the terminal and is the only thing that can
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
+            .send_ref => try self.compose(.send, .ref),
+            .copy_ref => try self.compose(.copy, .ref),
+            .copy_ref_lines => try self.compose(.copy, .ref_lines),
+            .ask_why => try self.compose(.send, .{ .ask = self.templates.ask_why }),
+            .ask_revert => try self.compose(.send, .{ .ask = self.templates.ask_revert }),
+            .ask_test => try self.compose(.send, .{ .ask = self.templates.ask_test }),
+            .ask_explain => try self.compose(.send, .{ .ask = self.templates.ask_explain }),
             .toggle_zen => self.zen = !self.zen,
             .help => self.toggleHelp(),
             .file_list => self.toggleFiles(),
@@ -493,6 +514,181 @@ pub const App = struct {
         self.notice.set("pattern not found: {s}", .{q});
     }
 
+    // -- the bridge ----------------------------------------------------------
+
+    /// Where a composed payload is going. The loop performs it; this is the
+    /// request, because only the loop owns the terminal and the subprocess.
+    pub const Delivery = enum { send, copy };
+
+    /// What to compose. `ask` carries its own template rather than an enum the
+    /// dispatch would have to translate back into one.
+    const What = union(enum) {
+        ref,
+        ref_lines,
+        ask: []const u8,
+    };
+
+    /// A reference, before a template turns it into text.
+    ///
+    /// Every field resolves against the *new* file (SPEC.md 6.3): a line
+    /// number from the HEAD side means nothing to an agent looking at what it
+    /// just wrote.
+    pub const Ref = struct {
+        change_id: hunk.ChangeId = hunk.no_id,
+        path: []const u8,
+        /// 1-based line in the new file, or 0 when there is none to point at.
+        line: u32 = 0,
+        /// End of a range, or 0 when the reference is a single line.
+        end: u32 = 0,
+        /// The cursor covers only lines that exist in HEAD and not on disk.
+        /// The reference becomes the enclosing hunk, and says why.
+        deleted: bool = false,
+    };
+
+    /// What the cursor, or the selection, is pointing at.
+    pub fn refAt(self: *App) ?Ref {
+        const f = self.current() orelse return null;
+        const path = f.path();
+
+        const hunk_index = self.rows.hunkAt(self.cursor);
+        const id = if (hunk_index) |h|
+            (if (h < f.hunks.len) f.hunks[h].id else hunk.no_id)
+        else
+            hunk.no_id;
+
+        // A selection resolves to the new-file lines it covers; without one
+        // the range is the cursor row alone. Rows that are chrome, and lines
+        // that exist only in HEAD, contribute nothing either way.
+        const sel = self.selection();
+        const lo_row = if (sel) |s| s.lo else self.cursor;
+        const hi_row = if (sel) |s| s.hi else self.cursor;
+
+        var first: u32 = 0;
+        var last: u32 = 0;
+        var row = lo_row;
+        while (row <= hi_row) : (row += 1) {
+            const li = self.rows.lineAt(row) orelse continue;
+            if (li >= f.lines.len()) continue;
+            const n = f.lines.new_no[li];
+            if (n == 0) continue;
+            if (first == 0) first = n;
+            last = n;
+        }
+        if (first != 0) {
+            return .{
+                .change_id = id,
+                .path = path,
+                .line = first,
+                .end = if (last > first) last else 0,
+            };
+        }
+
+        // Nothing under the cursor survives in the new file. The enclosing
+        // hunk is where the deletion happened, which is the closest thing to
+        // a place the agent can look.
+        if (hunk_index) |h| {
+            if (h < f.hunks.len) return .{
+                .change_id = id,
+                .path = path,
+                .line = f.hunks[h].new_start,
+                .deleted = true,
+            };
+        }
+        return .{ .change_id = id, .path = path };
+    }
+
+    /// The reference as text. Which template applies is decided here and
+    /// nowhere else, so a user who replaces one of them replaces exactly the
+    /// case they meant to.
+    fn refText(self: *App, out: *std.ArrayList(u8), r: Ref) Allocator.Error!void {
+        var id_buf: [12]u8 = undefined;
+        var line_buf: [12]u8 = undefined;
+        var end_buf: [12]u8 = undefined;
+        const id = std.fmt.bufPrint(&id_buf, "{d}", .{r.change_id}) catch unreachable;
+        const line = std.fmt.bufPrint(&line_buf, "{d}", .{r.line}) catch unreachable;
+        const end = std.fmt.bufPrint(&end_buf, "{d}", .{r.end}) catch unreachable;
+
+        // No hunk and no line is a file whose body was never parsed. `#0` and
+        // `:0` would both be lies, so the path is the whole reference.
+        const tmpl = if (r.line == 0 or r.change_id == hunk.no_id)
+            self.templates.ref_file
+        else if (r.deleted)
+            self.templates.ref_hunk
+        else if (r.end != 0)
+            self.templates.ref_range
+        else
+            self.templates.ref_single;
+
+        try template.render(self.gpa, out, tmpl, &.{
+            .{ .name = "change_id", .value = id },
+            .{ .name = "path", .value = r.path },
+            .{ .name = "line", .value = line },
+            .{ .name = "start", .value = line },
+            .{ .name = "end", .value = end },
+        });
+    }
+
+    /// The lines themselves, under the reference, markers kept. `Y` exists to
+    /// paste a change into a message, and `+`/`-` is what says which side of
+    /// it a line is on - without them a mixed range reads as nonsense.
+    fn appendLines(self: *App, out: *std.ArrayList(u8)) Allocator.Error!void {
+        const f = self.current() orelse return;
+        const sel = self.selection();
+        const lo_row = if (sel) |s| s.lo else self.cursor;
+        const hi_row = if (sel) |s| s.hi else self.cursor;
+
+        var row = lo_row;
+        while (row <= hi_row) : (row += 1) {
+            const li = self.rows.lineAt(row) orelse continue;
+            if (li >= f.lines.len()) continue;
+            try out.append(self.gpa, '\n');
+            try out.append(self.gpa, switch (f.lines.kind[li]) {
+                .add => '+',
+                .del => '-',
+                .context => ' ',
+            });
+            try out.appendSlice(self.gpa, f.lines.text[li]);
+        }
+    }
+
+    /// Builds the payload and hands it to the loop. Nothing here talks to a
+    /// bridge: `core/` and `ui/app.zig` are both testable without one, and
+    /// this is the file the tests are in.
+    fn compose(self: *App, how: Delivery, what: What) Allocator.Error!void {
+        const r = self.refAt() orelse {
+            self.notice.set("nothing here to point at", .{});
+            return;
+        };
+
+        self.outgoing.clearRetainingCapacity();
+        switch (what) {
+            .ref => try self.refText(&self.outgoing, r),
+            .ref_lines => {
+                try self.refText(&self.outgoing, r);
+                try self.appendLines(&self.outgoing);
+            },
+            .ask => |tmpl| {
+                var ref: std.ArrayList(u8) = .empty;
+                defer ref.deinit(self.gpa);
+                try self.refText(&ref, r);
+                try template.render(self.gpa, &self.outgoing, tmpl, &.{
+                    .{ .name = "ref", .value = ref.items },
+                });
+            },
+        }
+        self.want_send = how;
+
+        // An operation on a selection ends it, the way an operator does in
+        // vim: the range has been used, and leaving it highlighted invites a
+        // second send of the same thing.
+        if (self.mode == .visual) self.leaveVisual();
+    }
+
+    /// The composed payload, valid until the next `compose`.
+    pub fn payload(self: *const App) []const u8 {
+        return self.outgoing.items;
+    }
+
     // -- $EDITOR -------------------------------------------------------------
 
     pub const EditTarget = struct {
@@ -708,6 +904,7 @@ const testing = std.testing;
 // module joins `zig build check` where it is used: the ones the run loop pulls
 // in are listed in `loop.zig`, and `main.zig` covers the rest.
 test {
+    _ = template;
     _ = devicon;
     _ = files_mod;
     _ = help_mod;
@@ -1532,4 +1729,140 @@ test "a resize re-lays out rather than leaving the old scroll behind" {
     // The cursor itself is the reader's place in the file and a resize is not
     // a motion: it does not move.
     try fx.expectCursor(3);
+}
+
+// -- the bridge ----------------------------------------------------------
+
+test "Enter composes a reference to the line under the cursor" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    // A request, not an action: the loop owns the terminal and the subprocess.
+    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
+    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+}
+
+test "a selection sends a range, and using it ends the selection" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("Vj");
+    try testing.expectEqual(@as(u32, 2), fx.app.selection().?.count());
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
+
+    // An operator consumes its range, the way it does in vim. Leaving the
+    // rows highlighted invites sending the same lines twice.
+    try testing.expect(fx.app.selection() == null);
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+}
+
+test "a one-row selection is a single line, not a range of one" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("V<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+}
+
+test "y copies where Enter sends, and the payload is the same" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("y");
+    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
+    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+}
+
+test "Y puts the lines under the reference, markers kept" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // The marker is what says which side of the change a line is on; a mixed
+    // range pasted without them reads as nonsense.
+    try fx.press("Vj");
+    try fx.press("Y");
+    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
+    try testing.expectEqualStrings(
+        "#1 a.zig:1-2\n fn alpha() {\n     const x = 1;",
+        fx.app.payload(),
+    );
+}
+
+test "a deleted line points at its hunk and says why" {
+    var fx = try Fixture.withDeletion(testing.allocator, 1);
+    defer fx.deinit();
+
+    // References resolve against the new file (SPEC.md 6.3). This line is not
+    // in it, so the enclosing hunk is the closest honest answer - and the
+    // agent is told that is what happened.
+    fx.app.cursor = 2;
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1 (deleted lines in this hunk)", fx.app.payload());
+}
+
+test "a selection spanning a deletion keeps the lines that still exist" {
+    var fx = try Fixture.withDeletion(testing.allocator, 1);
+    defer fx.deinit();
+
+    // Rows 1-3 are lines 1, deleted, 3. The range is what survives.
+    fx.app.cursor = 1;
+    try fx.press("Vjj");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1-3", fx.app.payload());
+}
+
+test "the ask presets are the reference plus a question" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("a");
+    try testing.expectEqualStrings("#1 a.zig:1 - why this approach?", fx.app.payload());
+    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
+
+    try fx.press("t");
+    try testing.expectEqualStrings("#1 a.zig:1 - add a test covering this", fx.app.payload());
+
+    try fx.press("x");
+    try testing.expectEqualStrings("#1 a.zig:1 - explain what this does", fx.app.payload());
+
+    try fx.press("!");
+    try testing.expectEqualStrings("#1 a.zig:1 - revert this, keep the rest", fx.app.payload());
+}
+
+test "nothing sent to the agent ever contains a newline" {
+    // Hard rule 1, checked where the payload is built as well as where it is
+    // sent: in `tmux send-keys` a newline is Enter, and Enter submits the
+    // user's half-written message. `Y` is exempt by design - it is the
+    // clipboard, which no send-keys ever sees.
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    for ([_][]const u8{ "<CR>", "y", "a", "!", "t", "x" }) |keys| {
+        try fx.press("Vj");
+        try fx.press(keys);
+        try testing.expect(std.mem.indexOfScalar(u8, fx.app.payload(), '\n') == null);
+    }
+}
+
+test "a change id follows the hunk, not the row" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // The second file's hunk is #2, and its reference has to say so - the id
+    // is what the user and the agent say to each other (SPEC.md 6.5).
+    try fx.press("]f");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#2 b.zig:1", fx.app.payload());
+}
+
+test "composing again replaces the payload rather than appending to it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    try fx.press("j");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:2", fx.app.payload());
 }

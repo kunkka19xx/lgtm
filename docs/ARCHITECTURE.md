@@ -391,8 +391,14 @@ pub fn detect(a: Allocator) Bridge { ... }  // env vars, falls back to .osc52
 
 Two invariants enforced in `bridge.zig` rather than in each backend, so no backend can get them wrong:
 
-- `sendText` **rejects any payload containing `\n`.** This is a compile-time-documented, runtime-asserted rule. Review submission goes through `review.zig`, which writes a file and hands the bridge a single line.
-- Payloads end with a trailing space and never include a carriage return.
+- `sendText` **rejects any payload containing `\n`.** Documented here, and enforced by a returned `error.Multiline` rather than by `std.debug.assert` - assert is compiled out in ReleaseFast, which is precisely the build where the mistake would be silent. Review submission goes through `review.zig`, which writes a file and hands the bridge a single line.
+- Payloads end with a trailing space and never include a carriage return. The space is added by `bridge.zig`, so no caller can forget it or double it.
+
+**Three places the shipped v0.1 differs from the sketch above,** each recorded rather than quietly absorbed:
+
+- **Two variants, not five.** WezTerm, kitty and Zellij are v0.2. A variant whose `sendText` returns `error.Unsupported` is a backend `detect` would have to be careful never to return, which is more machinery than the three lines each will actually need.
+- **`sendText` takes a context and returns an outcome.** The two backends want different things - tmux spawns a subprocess, OSC 52 writes to the terminal - so the call carries `{ gpa, io, writer }`. It returns `.sent`/`.copied` rather than `void` because a send to a dead pane *succeeds at reaching the clipboard*, and the status line has to be able to say which happened.
+- **`copyText` sits beside it.** `y` and `Y` are the clipboard whatever the backend is, and `Y` legitimately contains newlines: the no-newline rule is about what `send-keys` does with one, not about the payload being one line.
 
 ---
 
@@ -487,6 +493,10 @@ lgtm/
 │   │   ├── theme.zig      # the mapping onto semantic slots, and `[theme]`
 │   │   └── preview.zig    # --theme-preview
 │   ├── bridge/
+│   │   ├── bridge.zig     # the union, the two invariants, detect()
+│   │   ├── tmux.zig       # send-keys argv, pane listing, target inference
+│   │   ├── osc52.zig      # the universal fallback, works over SSH
+│   │   └── template.zig   # every outgoing string, as data
 │   ├── search/
 │   └── syntax/
 │       ├── token.zig      # what a lexer produces: kinds and runs
