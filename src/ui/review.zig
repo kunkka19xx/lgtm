@@ -14,6 +14,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const anchor = @import("../core/anchor.zig");
 const diff = @import("../core/diff.zig");
 const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
@@ -39,6 +40,10 @@ pub const Carry = struct {
     /// That file's hunks from the previous generation, so change ids survive
     /// an edit rather than being renumbered under the reader.
     hunks: []const hunk.Hunk = &.{},
+    /// The working-tree line the reader was on, 1-based as `new_no` counts.
+    /// Zero when the cursor was on chrome or on a deleted line, neither of
+    /// which has a line in the new file to carry anywhere.
+    line: u32 = 0,
 };
 
 pub const Review = struct {
@@ -56,11 +61,20 @@ pub const Review = struct {
     /// states (SPEC.md 9).
     torn: bool = false,
 
+    /// The carried file's working-tree text as it was before the last reset,
+    /// and the line the reader was on in it. gpa-owned, not arena-owned:
+    /// re-anchoring needs the old text and the new text at the same moment,
+    /// and the old one lived in the arena `regenerate` just reset
+    /// (PERFORMANCE.md 3.1).
+    prev_work: []u8 = &.{},
+    prev_line: u32 = 0,
+
     pub fn init(gpa: Allocator, io: std.Io) Review {
         return .{ .gpa = gpa, .io = io, .arena = .init(gpa) };
     }
 
     pub fn deinit(self: *Review) void {
+        self.gpa.free(self.prev_work);
         self.ids.deinit(self.gpa);
         self.cache.deinit(self.gpa);
         self.arena.deinit();
@@ -118,6 +132,16 @@ pub const Review = struct {
         const keep_path = if (carry.path) |p| try self.gpa.dupe(u8, p) else null;
         defer if (keep_path) |p| self.gpa.free(p);
 
+        // The reader's line, and the text it was a line of, copied out for the
+        // same reason and while the buffers still exist. A failed dupe leaves
+        // `prev_work` empty, which re-anchoring reads as "nothing to carry".
+        self.gpa.free(self.prev_work);
+        self.prev_work = &.{};
+        self.prev_line = carry.line;
+        if (keep_path) |p| {
+            if (self.buffersFor(p).work) |w| self.prev_work = try self.gpa.dupe(u8, w.bytes);
+        }
+
         _ = self.arena.reset(.retain_capacity);
         const arena = self.arena.allocator();
         self.parsed = null;
@@ -163,6 +187,27 @@ pub const Review = struct {
         const srcs = self.sources orelse return .{};
         const s = srcs.find(path) orelse return .{};
         return .{ .work = s.work, .head = s.head };
+    }
+
+    /// Where the reader's line went, or null when it did not go anywhere that
+    /// can be pointed at.
+    ///
+    /// This is the primary path of PERFORMANCE.md 3.1: diff the previous
+    /// working tree against the new one and read the answer out of the line
+    /// map, which is a lookup rather than a search. The hash tiers inside
+    /// `Anchor.reanchor` pick up what the map cannot, and `stale` is reported
+    /// as null so the caller keeps the row it already had rather than jumping
+    /// the reader somewhere arbitrary.
+    ///
+    /// The carrying itself is `core/anchor.zig`'s; what belongs here is only
+    /// knowing which two texts to hand it.
+    pub fn reanchorLine(self: *Review, path: []const u8) Allocator.Error!?u32 {
+        if (self.prev_work.len == 0 or self.prev_line == 0) return null;
+        const work = self.buffersFor(path).work orelse return null;
+
+        // `new_no` is 1-based; anchors index lines from zero.
+        const got = try anchor.carryLine(self.gpa, self.prev_work, work.bytes, self.prev_line - 1);
+        return if (got) |ln| ln + 1 else null;
     }
 
     /// Enclosing function name per hunk, from the lexer's whole-file scan.

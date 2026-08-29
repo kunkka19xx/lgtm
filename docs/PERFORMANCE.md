@@ -318,6 +318,14 @@ The key is a parameter. `core/diff.zig` already captures git's blob hash from
 the `index a..b` line, which is a content hash git computed anyway. A hit is
 now 20 ns.
 
+**A second correction, from measuring rather than building: `diff_cache` is
+rejected.** `lex_cache` earns its place and is in use. `diff_cache` does not.
+Producing hunks is 0.09 ms of a 55 ms re-diff at 40 changed files, because two
+`git` spawns - `git diff` and the `cat-file --batch` behind `source.load` - are
+99.8% of it. The list above was right that content-hash keying beats path
+keying; it was wrong about which of the three caches had anything to save. Full
+numbers in PLAN.md, phase 5.
+
 **Status after phase 5a.** `lex_cache` is in use and earning its keep: whole
 frames cost 0.053 ms of lexing because the runs are computed once per blob, not
 once per frame. `layout_cache` is **not built** - the frame is 0.171 ms against

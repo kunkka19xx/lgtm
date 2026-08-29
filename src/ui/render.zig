@@ -113,7 +113,11 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
 fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     const t = f.theme;
 
-    var col: u16 = 1 + try f.print(row, 1, t.mode_badge, " {s} ", .{modeLabel(v.mode)}) + 2;
+    // Flush against the left edge: a leading space reads as the pill being
+    // indented rather than as the bar starting there.
+    var col: u16 = try f.print(row, 0, t.mode_badge, " {s} ", .{modeLabel(v.mode)});
+
+    col += 2;
 
     // One slot, three claimants, in order of how much the reader needs it: a
     // torn read is a correctness warning, a notice answers the keystroke just

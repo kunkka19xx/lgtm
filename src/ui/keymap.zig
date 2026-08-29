@@ -120,6 +120,12 @@ pub const Binding = struct {
     /// Null keeps a binding working but unadvertised, which is how aliases
     /// stay out of an already tight row.
     hint: ?[]const u8 = null,
+    /// What the strip prints instead of this binding's chords. For an action
+    /// that is *typed* rather than chorded: `:` opens the command line and the
+    /// user types `q`, so rendering the chord would advertise `:` for quit and
+    /// the two-key answer would be nowhere. Null renders the chords, which is
+    /// what every ordinary binding wants.
+    hint_keys: ?[]const u8 = null,
     /// One line in the `?` overlay. Null for aliases, for the same reason
     /// `hint` is: `[h` does not need its own row next to `]h`, and three ways
     /// to close the overlay do not need three rows saying "close".
@@ -149,22 +155,22 @@ pub const leader: Chord = c(' ');
 /// The v0.1 set. Only bindings that do something are listed: a hint strip that
 /// advertises keys the build does not implement is worse than a shorter one.
 pub const default_bindings: []const Binding = &.{
-    .{ .chords = &.{c('j')}, .command = .line_down, .hint = "move", .desc = "down a line" },
-    .{ .chords = &.{c('k')}, .command = .line_up, .hint = "move", .desc = "up a line" },
+    .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down a line" },
+    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "up a line" },
     .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "down half a page" },
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page" },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line" },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
-    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .hint = "hunk", .desc = "next hunk (wraps)" },
-    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .hint = "hunk", .desc = "previous hunk (wraps)" },
+    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)" },
+    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .desc = "next hunk" },
     .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .desc = "previous hunk" },
-    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .hint = "file", .desc = "next file (wraps)" },
-    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .hint = "file", .desc = "previous file (wraps)" },
+    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .desc = "next file (wraps)" },
+    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .desc = "next file" },
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .desc = "previous file" },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line" },
-    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .hint = "send", .desc = "send the reference to the agent" },
+    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent" },
     .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference" },
     .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines" },
     .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?" },
@@ -174,17 +180,16 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review" },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match" },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match" },
-    .{ .chords = &.{c('V')}, .command = .visual_toggle, .hint = "select", .desc = "visual line select" },
+    .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select" },
     .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select" },
-    .{ .chords = &.{c('e')}, .command = .open_editor, .hint = "edit", .desc = "open line in $EDITOR" },
+    .{ .chords = &.{c('e')}, .command = .open_editor, .desc = "open line in $EDITOR" },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
-    .{ .chords = &.{c(':')}, .command = .command_line, .desc = "command line (:q)" },
+    .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)" },
     .{ .chords = &.{ctrl('l')}, .command = .refresh, .desc = "re-run the diff" },
-    .{ .chords = &.{c('q')}, .command = .quit, .modes = Modes.normal_only, .hint = "quit", .desc = "quit" },
-    .{ .chords = &.{c('F')}, .command = .file_list, .hint = "files", .desc = "list the changed files" },
+    .{ .chords = &.{c('F')}, .command = .file_list, .desc = "list the changed files" },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
-    .{ .chords = &.{c('?')}, .command = .help, .desc = "this help" },
+    .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help" },
     // Inside the popup, and arrows first: a Ctrl chord is the one thing a
     // multiplexer takes before the application sees it. vim-tmux-navigator
     // binds C-h/C-j/C-k/C-l at the tmux *root* table and forwards them only to
@@ -409,6 +414,10 @@ test "every command is reachable from the default bindings" {
     // A command with no binding is dead code that looks alive.
     inline for (@typeInfo(Command).@"enum".fields) |f| {
         const want: Command = @enumFromInt(f.value);
+        // `quit` is the one exception, and by design: it is typed as `:q`
+        // rather than chorded, so `command_line` is the binding that reaches
+        // it and `app.submitCommand` is what dispatches it.
+        if (want == .quit) continue;
         var found = false;
         for (default_bindings) |b| {
             if (b.command == want) found = true;
@@ -440,10 +449,14 @@ test "a visual-only binding is invisible in normal mode, prefix included" {
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 
-test "quit is normal-only, so q mid-selection does not exit" {
+test "q does not quit; the command line does" {
+    // Quitting is typed, not chorded. A stray `q` over a diff now does
+    // nothing at all, which is the point: it sits one key from `j`, and the
+    // cost of hitting it was losing the session.
     var km: Keymap = .{};
-    try testing.expectEqual(Command.quit, km.feed(tap('q'), .normal).command);
+    try testing.expect(km.feed(tap('q'), .normal) == .none);
     try testing.expect(km.feed(tap('q'), .visual) == .none);
+    try testing.expectEqual(Command.command_line, km.feed(tap(':'), .normal).command);
 }
 
 test "the prompt modes reach no binding at all" {

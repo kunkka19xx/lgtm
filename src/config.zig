@@ -414,9 +414,6 @@ fn protoFor(cmd: keymap.Command) keymap.Binding {
     return .{ .chords = &.{}, .command = cmd };
 }
 
-
-
-
 /// Where the config lives. `$XDG_CONFIG_HOME` first, as every other tool on
 /// the user's machine does, `~/.config` after it, and the repo's own file
 /// last so that it wins (FEATURES.md 4.8).
@@ -593,7 +590,7 @@ test "a remap that would shadow another binding is refused, not accepted" {
     // config keeps its previous keymap and says why.
     var l = loadText(
         \\[keys]
-        \\quit = "<Space>"
+        \\refresh = "<Space>"
     );
     defer l.deinit();
 
@@ -614,11 +611,11 @@ test "a remap that would shadow another binding is refused, not accepted" {
     // dead, because the matcher returns the first binding it finds.
     var l3 = loadText(
         \\[keys]
-        \\refresh = "q"
+        \\refresh = "e"
     );
     defer l3.deinit();
     try testing.expectEqual(@as(usize, 1), l3.problems.items.len);
-    try testing.expect(std.mem.indexOf(u8, l3.problems.items[0].text, "already bound to quit") != null);
+    try testing.expect(std.mem.indexOf(u8, l3.problems.items[0].text, "already bound to open_editor") != null);
     try testing.expectEqual(keymap.default_bindings.ptr, l3.cfg.keys.ptr);
 }
 

@@ -77,7 +77,7 @@ Zig file, so the drift patterns are narrower than production will be.
 `zig build anchor` exits non-zero below the gate, so it can gate CI. Verified by
 corrupting a fixture expectation and confirming the failure.
 
-## Phase 2: Diff domain model - PARTIAL
+## Phase 2: Diff domain model - DONE
 
 `core/diff.zig` + `core/hunk.zig` + `core/git.zig`, still headless.
 
@@ -89,7 +89,7 @@ corrupting a fixture expectation and confirming the failure.
 - [x] Files over `large_file_lines` defer their render, and `materialise()` parses the deferred section on demand from the retained byte range. **Deferring is not discarding**: an earlier version dropped the content outright, which would have made oversized files unreviewable rather than merely slower to open
 - [x] Blob hashes captured from git's `index a..b` line, ready to key the cache on
 - [x] **HEAD and worktree content in `Buffer`s, with the diff as an overlay (ARCHITECTURE.md §11.1).** `core/source.zig` loads HEAD blobs through a single `git cat-file --batch` and worktree files directly, then `attach()` repoints every line's text into the buffers. Rendering now reads from buffers, not from git's diff output
-- [ ] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2). Still deferred: the watcher now exists, but nothing yet wires watch events to re-diffs, so there is no loop to profile. Revisit in phase 5 once the main loop runs. Blob hashes are already captured
+- [x] `diff_cache` LRU keyed on the blob-hash pair (PERFORMANCE.md §7.2): **measured and rejected**, not deferred a third time. §7.2 specifies `LRU<(blob_a, blob_b), Hunks>`, so what it saves is the production of hunks, and hunks are not where the time goes. Blob hashes stay captured: the key is free and v0.2 item 8 wants them anyway. Numbers under phase 5 below
 
 **Gate: met.** Recorded real `git diff` output (`tests/fixtures/diffs/mixed.diff`,
 covering add, rename, modify, binary, delete and a git-merged multi-change hunk)
@@ -248,9 +248,10 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] 5c, part: tests moved to what they are about and merged where they said it twice. The `anchorLine` pair went with the function to `review.zig` (and took its re-export with it); the popup's clamping, column arithmetic and filter reset now live once, in `help.zig`, leaving the app-level tests to assert the wiring they are actually about - that these keys are bindings live in `.help` and nowhere else. Two pairs of near-identical tests became one each: the file ring wraps at both ends in one test, and the leader forms are checked against their bracket forms in one. 246 tests to 244, with nothing uncovered; the file is 638 lines of code and 749 of tests, grouped under eight banners instead of running in the order they were written
 - [x] 5c, part: the same pass over the rest of the tree, splitting only where a file was doing two jobs and leaving the rest alone. `config.zig` gave up its parser to `toml.zig`, which makes the header's claim - that a real TOML dependency could replace it without touching a call site - literally true: the parser reports _faults_ and `config.zig` writes the sentences, because what to tell a user about a bad line depends on what the key meant. `lexer.zig` gave up `token.zig` (kinds and runs) and `langdef.zig` (the vocabulary a language is described in), which also fixes the dependency direction - `lang/zig.zig` described a language by importing the scanner that reads it. `anchor.zig` gave up `linemap.zig`: matching two versions line to line is most of the code, and the tiers that were the point of the file were buried under it. `theme.zig` gave up its seven palettes to `palette.zig`, so adding a theme is adding data
 - [x] 5c, part: **left alone, deliberately.** `core/diff.zig` parses a unified diff and does nothing else; `syntax/highlight.zig` is choosing a highlighter and memoising it; `io/watch.zig` already separates the pure poller from the thread inside one 267-line file; the five harnesses share about fifteen lines of stdout-and-argv boilerplate, which is less than a module to share it would cost. Splitting those would be motion, not cleaning
+- [x] 5c, part: **the cursor keeps its line across a re-diff, not its row.** `rediff` carried a row index, which means the same thing only until something above it changes; `core/anchor.zig` had been finished and gated since phase 1 and nothing called it. The carry is now `anchor.carryLine`, one line from one version of a file to the next, and the row index is the fallback for a line that is genuinely gone (hard rule 7: never moved somewhere that merely looks similar). Measured in a two-pane session, cursor on `demo.txt:22`, three lines inserted above it from outside: `.row` sent `#3 demo.txt:1 (deleted lines in this hunk)`, having stayed on a row that now belongs to a different hunk; `.line` sends `#1 demo.txt:25`, the same line of text
 - [x] 5c, part: the seven `test { _ = other_module; }` blocks are not ceremony. The render split lost five tests silently - a module nothing references runs nowhere - and the loss showed up only as a test count dropping from 241 to 236. Every module introduced by these splits is referenced from one, and the count is now part of what a split is checked against
 - [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
-- [ ] `diff_cache`: still unbuilt, and now measurable rather than hypothetical - see below
+- [x] `diff_cache`: **rejected with a measurement.** See the re-measurement under the 5a gate below
 
 **5a gate: PASSED.** ReleaseFast, `-Dprofile`, rendering this repository's own
 working tree in an 80x26 tmux pane.
@@ -265,10 +266,35 @@ working tree in an 80x26 tmux pane.
 
 Three things the measurement settled:
 
-- **`diff_cache` is still not worth building.** The whole re-diff is 3.1 ms, and
-  2.2 ms of that is the `git` subprocess the cache would not avoid. There is
-  about 0.9 ms on the table. Deferred again, now with a number rather than a
-  hunch.
+- **`diff_cache` is not worth building, and is now closed rather than deferred
+  again.** The whole re-diff is 3.1 ms, and 2.2 ms of that is the `git`
+  subprocess the cache would not avoid. There is about 0.9 ms on the table.
+
+  Re-measured after phase 6 at a scale an agent turn actually reaches, since a
+  handful of changed files was never the case that would justify a cache. A
+  scratch clone with 40 changed files, `--once` so every run pays for a first
+  re-diff, and a temporary span on `source.load`, which the instrumentation had
+  never separated from the work around it:
+
+  | span                                | run 1   | run 2  | run 3  |
+  | ----------------------------------- | ------- | ------ | ------ |
+  | `git diff` subprocess               | 81.375  | 35.630 | 46.228 |
+  | `source.load`, a second `git` spawn  | 26.173  | 18.866 | 20.088 |
+  | whole re-diff                       | 107.662 | 54.583 | 66.398 |
+  | parse, attach and row rebuild       | 0.114   | 0.087  | 0.082  |
+
+  Two subprocesses are 99.8% of a re-diff, and everything `diff_cache` would
+  skip is the last row. Rejected rather than deferred: 40 changed files is
+  already past a normal turn, and the figure the cache saves went *down* with
+  scale rather than up.
+
+  Two things this does not settle. `--once` measures a cold first re-diff in a
+  fresh process against a clone in `/tmp`, which is why these sit an order above
+  the 3.1 ms recorded from a warm session on this repository: the shape is
+  comparable, the absolute numbers are not. And run 1 crossed the 100 ms re-diff
+  budget at 107.662 ms. If re-diff ever does need to be faster, the thing to
+  attack is `source.load` re-reading every HEAD blob whose hash has not changed,
+  which is a different cache from this one.
 - **The frame budget is not close to being a constraint.** 0.171 ms against 8 ms
   means the over-draw strategy is fine and row-level dirty tracking stays
   unbuilt, exactly as ARCHITECTURE.md 5c asks. Note what this measurement does

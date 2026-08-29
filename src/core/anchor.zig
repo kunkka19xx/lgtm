@@ -153,13 +153,126 @@ fn nearest(candidates: []const u32, to: u32) ?u32 {
     return best;
 }
 
+/// Carries one 0-based line from `from_text` to `to_text`, or null when it is
+/// gone. The whole ladder in one call, and nothing kept afterwards.
+///
+/// This is the shape a cursor wants: one position, two versions of one file,
+/// and no index worth holding on to between re-diffs. A caller carrying many
+/// notes should build the versions and the map once and drive `Anchor`
+/// directly, which is what the harness does - building them per note would pay
+/// for the same line diff over and over.
+pub fn carryLine(
+    gpa: Allocator,
+    from_text: []const u8,
+    to_text: []const u8,
+    line: u32,
+) Allocator.Error!?u32 {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const sa = scratch.allocator();
+
+    // One interner per role, shared by both versions: ids only compare when
+    // they came from the same table.
+    var exact: Interner = .{};
+    var norm: Interner = .{};
+
+    const from = try Version.init(sa, &exact, &norm, sa, from_text);
+    if (line >= from.ids.len) return null;
+    var to = try Version.init(sa, &exact, &norm, sa, to_text);
+
+    const map = try lineMap(sa, from.ids, to.ids);
+    var a: Anchor = .init(from, line);
+    return switch (try a.reanchor(sa, map, &to)) {
+        .stale => null,
+        else => a.line,
+    };
+}
+
 const testing = std.testing;
+
+test "carryLine follows a line that insertions pushed down" {
+    const from =
+        \\fn alpha() void {
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    return a + b;
+        \\}
+        \\
+        \\fn beta() void {
+        \\    unreachable;
+        \\}
+        \\
+    ;
+    const to =
+        \\const std = @import("std");
+        \\
+        \\fn alpha() void {
+        \\    const a = 1;
+        \\    const b = 2;
+        \\    return a + b;
+        \\}
+        \\
+        \\fn beta() void {
+        \\    unreachable;
+        \\}
+        \\
+    ;
+    // `return a + b;` is line 3, and two lines were added above it.
+    try testing.expectEqual(@as(?u32, 5), try carryLine(testing.allocator, from, to, 3));
+    // The first line moves by the same amount.
+    try testing.expectEqual(@as(?u32, 2), try carryLine(testing.allocator, from, to, 0));
+}
+
+test "carryLine is the identity when nothing moved" {
+    const text =
+        \\one
+        \\two
+        \\three
+        \\four
+        \\five
+        \\six
+        \\seven
+        \\
+    ;
+    for (0..7) |i| {
+        const n: u32 = @intCast(i);
+        try testing.expectEqual(@as(?u32, n), try carryLine(testing.allocator, text, text, n));
+    }
+}
+
+test "a line that is gone is null, not a neighbour" {
+    // Hard rule 7 in the cursor's terms: the caller keeps the position it had
+    // rather than being moved somewhere that merely looks similar.
+    const from =
+        \\alpha
+        \\bravo
+        \\charlie
+        \\delta
+        \\echo
+        \\foxtrot
+        \\golf
+        \\
+    ;
+    const to =
+        \\alpha
+        \\bravo
+        \\golf
+        \\
+    ;
+    try testing.expectEqual(@as(?u32, null), try carryLine(testing.allocator, from, to, 3));
+    // The lines that survived still carry.
+    try testing.expectEqual(@as(?u32, 0), try carryLine(testing.allocator, from, to, 0));
+}
+
+test "a line past the end of the old text carries nowhere" {
+    const text = "a\nb\n";
+    try testing.expectEqual(@as(?u32, null), try carryLine(testing.allocator, text, text, 99));
+}
 
 // The matcher this file is policy over; see the note in `ui/app.zig`.
 test {
     _ = linemap;
 }
-
 
 test "anchor takes the primary path when the line maps" {
     var h = Harness.init(testing.allocator);

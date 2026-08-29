@@ -66,7 +66,12 @@ pub const Notice = struct {
 /// Whether a rows rebuild starts the reader over or keeps their place. A file
 /// change under the cursor should not send you back to the top of the file,
 /// and moving to a different file should not leave you halfway down it.
-const Keep = enum { reset, row };
+///
+/// `line` is the one a re-diff wants: it keeps the *line the reader was
+/// reading*, re-anchored through `core/anchor.zig`, and falls back to `row`
+/// when the line cannot be placed. `row` keeps a row index, which means the
+/// same thing only until something above it changes.
+const Keep = enum { reset, row, line };
 
 pub const App = struct {
     gpa: Allocator,
@@ -168,17 +173,17 @@ pub const App = struct {
         self.file_index = try self.review.regenerate(.{
             .path = if (self.current()) |f| f.path() else null,
             .hunks = self.prev_hunks,
+            .line = self.cursorLine(),
         });
         self.rows = rows_mod.Rows.empty;
         self.fn_names = &.{};
         self.prev_hunks = &.{};
 
         // The agent writing a file must not send the reader back to the top of
-        // it, so the row index survives a re-diff. This is a stopgap, not the
-        // answer: the row that *means* the same thing after an edit is what
-        // `core/anchor.zig` computes, and wiring that in is what turns "the
-        // same row number" into "the same line". Tracked in PLAN.md 5c.
-        try self.rebuildRows(.row);
+        // it, nor leave them on a row that now means something else. The line
+        // is re-anchored through `core/anchor.zig`; the row index is only the
+        // fallback for a line that is genuinely gone.
+        try self.rebuildRows(.line);
     }
 
     fn rebuildRows(self: *App, keep: Keep) !void {
@@ -193,12 +198,24 @@ pub const App = struct {
         self.rows = try rows_mod.build(self.review.allocator(), f);
         self.prev_hunks = f.hunks;
         self.fn_names = try self.review.enclosingNames(f);
-        switch (keep) {
+        var placed = false;
+        if (keep == .line) {
+            if (try self.review.reanchorLine(f.path())) |ln| {
+                if (self.rowForFileLine(f, ln)) |r| {
+                    self.cursor = r;
+                    placed = true;
+                }
+            }
+        }
+
+        if (!placed) switch (keep) {
             .reset => {
                 self.cursor = self.rows.firstLineRow();
                 self.scroll = 0;
             },
-            .row => {
+            // A line that could not be placed keeps the row it had, which is
+            // the old behaviour and still the least surprising answer.
+            .row, .line => {
                 self.cursor = @min(self.cursor, self.rows.len() -| 1);
                 // Never leave the cursor on chrome. `moveTo` cannot put it
                 // there, but keeping a row index across a rebuild can - and
@@ -208,11 +225,32 @@ pub const App = struct {
                     self.cursor = self.rows.firstLineRow();
                 }
             },
-        }
+        };
         // The rows the anchor pointed at are gone, so the selection it
         // described is gone with them. Silently keeping the range would select
         // whatever now happens to sit at those indexes.
         if (self.mode == .visual) self.leaveVisual();
+    }
+
+    /// The working-tree line under the cursor, 1-based, or 0 when there is
+    /// none: chrome has no line, and a deleted line exists only in the old
+    /// file, so neither has anything to carry into the next generation.
+    fn cursorLine(self: *App) u32 {
+        const f = self.current() orelse return 0;
+        const li = self.rows.lineAt(self.cursor) orelse return 0;
+        if (li >= f.lines.new_no.len) return 0;
+        return f.lines.new_no[li];
+    }
+
+    /// The row drawing working-tree line `ln` of `f`, if the diff shows it.
+    /// A re-anchored line often lands in unchanged context that this
+    /// generation no longer renders, and that is not a failure: the caller
+    /// keeps the row it had.
+    fn rowForFileLine(self: *const App, f: *const diff.FileDiff, ln: u32) ?u32 {
+        for (f.lines.new_no, 0..) |n, li| {
+            if (n == ln) return self.rows.rowForLine(@intCast(li));
+        }
+        return null;
     }
 
     pub fn view(self: *App) ?render.View {

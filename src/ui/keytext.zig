@@ -152,8 +152,16 @@ pub fn hints(bindings: []const Binding, mode: event.Mode, buf: []u8) []const u8 
                 entry[e] = ' ';
                 e += 1;
             }
-            const keys = bufWriteChords(g.chords, entry[e..]);
-            e += keys.len;
+            // A binding that says how it is typed says it here; everything
+            // else renders its chords, so a remap still moves the strip.
+            if (g.hint_keys) |k| {
+                if (e + k.len > entry.len) continue;
+                @memcpy(entry[e..][0..k.len], k);
+                e += k.len;
+            } else {
+                const keys = bufWriteChords(g.chords, entry[e..]);
+                e += keys.len;
+            }
         }
         if (e + 1 + label.len > entry.len) continue;
         entry[e] = ' ';
@@ -252,29 +260,30 @@ fn ctrl(cp: u21) Chord {
 test "hints come from the bindings and fit the width given" {
     var buf: [80]u8 = undefined;
     const h = hints(default_bindings, .normal, &buf);
-    try testing.expect(std.mem.indexOf(u8, h, "j k move") != null);
-    try testing.expect(std.mem.indexOf(u8, h, "q quit") != null);
+    // The strip is two entries by design: how to leave, and where everything
+    // else is written down. Every other key lives in the `?` popup, which is
+    // the one the strip points at.
+    try testing.expectEqualStrings(":q quit  ? help", h);
 
     // A narrow strip truncates on a boundary rather than overrunning.
     var tiny: [10]u8 = undefined;
     const t = hints(default_bindings, .normal, &tiny);
     try testing.expect(t.len <= tiny.len);
-    try testing.expectEqualStrings("j k move", t);
+    try testing.expectEqualStrings(":q quit", t);
 }
 
 test "the hint strip advertises only what the current mode can do" {
     var buf: [160]u8 = undefined;
     const normal = hints(default_bindings, .normal, &buf);
-    try testing.expect(std.mem.indexOf(u8, normal, "cancel") == null);
-    try testing.expect(std.mem.indexOf(u8, normal, "q quit") != null);
+    // Nothing about leaving a selection you are not in.
+    try testing.expectEqualStrings(":q quit  ? help", normal);
 
     var buf2: [160]u8 = undefined;
     const visual = hints(default_bindings, .visual, &buf2);
-    // Spelled the way the popup spells it, because both now render the same
+    // Escape comes first because it is the way out of the mode you are in.
+    // Spelled the way the popup spells it, because both render the same
     // chords rather than each carrying its own hand-written text.
-    try testing.expect(std.mem.indexOf(u8, visual, "<Esc> cancel") != null);
-    // `q` does not quit from visual mode, so the strip must not claim it does.
-    try testing.expect(std.mem.indexOf(u8, visual, "q quit") == null);
+    try testing.expectEqualStrings("<Esc> cancel  :q quit  ? help", visual);
 }
 
 test "every default binding parses back from the way the popup spells it" {
@@ -362,7 +371,8 @@ test "the overlay lists the mode it was opened from, aliases excluded" {
     for (normal) |e| {
         // The visual-only Escape is not a normal-mode key and must not be listed.
         try testing.expect(!std.mem.eql(u8, e.desc, "leave visual select"));
-        if (std.mem.eql(u8, e.keys, "q")) saw_quit = true;
+        // Quitting is `:q`, so the overlay lists the key that opens it.
+        if (std.mem.eql(u8, e.keys, ":")) saw_quit = true;
         if (std.mem.eql(u8, e.keys, "<Space>nf")) saw_leader = true;
     }
     try testing.expect(saw_quit);
