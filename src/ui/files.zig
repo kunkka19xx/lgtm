@@ -57,9 +57,26 @@ pub const Files = struct {
         };
     }
 
-    /// Clamped against the list as filtered, so the selection is never past
-    /// the end of what is on screen.
+    /// One row, counted against the list as filtered, so the
+    /// selection can never sit past the end of what is on screen.
     pub fn move(self: *Files, files: []const diff.FileDiff, delta: i32) void {
+        const n = count(files, self.filter.text());
+        if (n == 0) {
+            self.index = 0;
+            return;
+        }
+        // Wraps at both ends. A list you step through with Tab should come
+        // back round rather than stop dead, and the review's own `]h`/`[h`
+        // already read that way.
+        const len: i64 = @intCast(n);
+        // `@mod`, not `%`: the result must be non-negative so a step up from
+        // the first row lands on the last.
+        self.index = @intCast(@mod(@as(i64, @intCast(self.index)) + delta, len));
+    }
+
+    /// The same step, stopping at the ends. What a page wants: wrapping a
+    /// screenful lands nowhere the eye was looking.
+    fn moveClamped(self: *Files, files: []const diff.FileDiff, delta: i32) void {
         const n = count(files, self.filter.text());
         if (n == 0) {
             self.index = 0;
@@ -74,7 +91,7 @@ pub const Files = struct {
     /// single-column list rather than a key that does nothing.
     pub fn movePage(self: *Files, files: []const diff.FileDiff, delta: i32) void {
         const per: i32 = @intCast(@min(@max(self.layout.per, 1), 1000));
-        self.move(files, delta * per);
+        self.moveClamped(files, delta * per);
     }
 
     /// Which file the selection points at, as an index into the review's own
@@ -232,21 +249,26 @@ test "a selection points at a file in the review, not in the filtered view" {
     try testing.expect(fl.selected(&files) == null);
 }
 
-test "the selection is clamped against the list as filtered" {
+test "the selection wraps, a page clamps, and a filter resets it" {
     const files = fixture();
     var fl: Files = .{};
     fl.open(0);
 
-    fl.move(&files, 1000);
+    // A step wraps at both ends; a page stops.
+    fl.move(&files, -1);
     try testing.expectEqual(@as(usize, 3), fl.index);
-    fl.move(&files, -1000);
+    fl.move(&files, 1);
     try testing.expectEqual(@as(usize, 0), fl.index);
+    fl.movePage(&files, -1);
+    try testing.expectEqual(@as(usize, 0), fl.index);
+    fl.movePage(&files, 1000);
+    try testing.expectEqual(@as(usize, 3), fl.index);
 
     // Narrowing resets the selection, so it cannot survive into a shorter
     // list and point at a different row than the reader was looking at.
     _ = fl.feed(.{ .codepoint = 'R', .mods = .{} });
     try testing.expectEqual(@as(usize, 0), fl.index);
-    fl.move(&files, 1000);
+    fl.movePage(&files, 1000);
     try testing.expectEqual(count(&files, fl.filter.text()) - 1, fl.index);
 }
 

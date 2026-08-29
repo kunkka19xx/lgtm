@@ -217,6 +217,11 @@ fn statusPath(line: []const u8) []const u8 {
     return rest;
 }
 
+/// How often the poll interval is interrupted to look at the stop flag. Small
+/// enough that quitting is instant, large enough that an idle `lgtm` beside an
+/// agent is still asleep almost all of the time.
+const stop_check_ms = 25;
+
 /// Runs a `Poller` on its own thread and posts to the event queue.
 pub const Watcher = struct {
     poller: Poller,
@@ -252,7 +257,18 @@ pub const Watcher = struct {
         const poll = self.poller.opts.poll_ms;
         var elapsed: i64 = 0;
         while (!self.stop_flag.load(.acquire)) {
-            std.Io.sleep(io, .fromMilliseconds(poll), .awake) catch break;
+            // Slept in slices rather than one interval, so `stop` is noticed
+            // without waiting the interval out. One 500 ms sleep made quitting
+            // take up to that long *plus* a whole `git status` - the flag was
+            // read only at the top - which reads as a hang on the way out.
+            var slept: i64 = 0;
+            while (slept < poll) {
+                const slice = @min(@as(i64, stop_check_ms), poll - slept);
+                std.Io.sleep(io, .fromMilliseconds(slice), .awake) catch return;
+                if (self.stop_flag.load(.acquire)) return;
+                slept += slice;
+            }
+
             elapsed += poll;
             const paths = self.poller.tick(elapsed) catch continue orelse continue;
             self.queue.push(.{ .files_changed = paths }) catch {

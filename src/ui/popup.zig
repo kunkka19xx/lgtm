@@ -60,8 +60,12 @@ fn footerOf(
         while (last + 1 < all.items.len and
             std.mem.eql(u8, all.items[last + 1].desc, all.items[n].desc)) last += 1;
         for (all.items[n .. last + 1]) |e| {
-            try spans.append(arena, .{ .start = out.items.len, .len = e.keys.len });
-            try out.appendSlice(arena, e.keys);
+            // The first spelling only. An entry carries every alias of its
+            // action - `]f / <Space>nf` - which is what the list above wants
+            // and what a one-line footer inside a box cannot afford.
+            const k = e.keys[0 .. std.mem.indexOf(u8, e.keys, keytext.row_keys_sep) orelse e.keys.len];
+            try spans.append(arena, .{ .start = out.items.len, .len = k.len });
+            try out.appendSlice(arena, k);
             try out.appendSlice(arena, " ");
         }
         try out.appendSlice(arena, all.items[n].desc);
@@ -133,10 +137,12 @@ pub const Metrics = struct {
     entries: usize = 0,
     title: u16 = 0,
     footer: u16 = 0,
-    /// Most columns the grid may use. Two for the key list, which is short
-    /// rows and many of them; one for the file list, where a row is a path and
-    /// splitting them across columns costs the width they need.
-    max_cols: u16 = 2,
+    /// Most columns the grid may use. One everywhere now: a two-column grid
+    /// made the reader scan in two directions to find a key, and the merged
+    /// `]f / <Space>nf` rows are wide enough that the second column pushed the
+    /// box past most panes. The grid is kept because a narrow list is the same
+    /// code with `cols` of one.
+    max_cols: u16 = 1,
 };
 
 /// The space the box may float in: the body, or the whole pane in zen mode.
@@ -313,13 +319,20 @@ test "the popup footer marks exactly its key names, and no other text" {
     }
 }
 
-test "a narrow pane gets one column, a wide one gets two" {
-    // 23 rows of keys against an 80x26 pane is the case the two-column layout
-    // exists for; at 60 columns the same list has to fall back to one.
+test "one column by default, and the grid still fits two when asked" {
     const m: Metrics = .{ .keys = 10, .desc = 22, .entries = 23, .title = 6, .footer = 40 };
 
+    // A wide pane no longer buys a second column: every list is one column and
+    // scrolls, because a grid is read in two directions to find one key.
     const wide = fit(m, 0, .{ .width = 100, .top = 2, .height = 22 }).?;
-    try testing.expectEqual(@as(u16, 2), wide.cols);
+    try testing.expectEqual(@as(u16, 1), wide.cols);
+
+    // The grid is still there for a caller that wants it, and still refuses
+    // when the width cannot hold two columns.
+    var grid = m;
+    grid.max_cols = 2;
+    try testing.expectEqual(@as(u16, 2), fit(grid, 0, .{ .width = 100, .top = 2, .height = 22 }).?.cols);
+    try testing.expectEqual(@as(u16, 1), fit(grid, 0, .{ .width = 46, .top = 2, .height = 22 }).?.cols);
 
     const narrow = fit(m, 0, .{ .width = 46, .top = 2, .height = 22 }).?;
     try testing.expectEqual(@as(u16, 1), narrow.cols);

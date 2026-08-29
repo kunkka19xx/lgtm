@@ -66,9 +66,26 @@ pub const Help = struct {
         };
     }
 
-    /// Clamped against the same filter the popup is drawn from, so the
+    /// One row, counted against the same filter the popup is drawn from, so the
     /// selection can never sit past the end of what is on screen.
     pub fn move(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
+        const n = keytext.helpCount(bindings, self.from, self.filter.text());
+        if (n == 0) {
+            self.index = 0;
+            return;
+        }
+        // Wraps at both ends. A list you step through with Tab should come
+        // back round rather than stop dead, and the review's own `]h`/`[h`
+        // already read that way.
+        const len: i64 = @intCast(n);
+        // `@mod`, not `%`: the result must be non-negative so a step up from
+        // the first row lands on the last.
+        self.index = @intCast(@mod(@as(i64, @intCast(self.index)) + delta, len));
+    }
+
+    /// The same step, stopping at the ends. What a page wants: wrapping a
+    /// screenful lands nowhere the eye was looking.
+    fn moveClamped(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
         const n = keytext.helpCount(bindings, self.from, self.filter.text());
         if (n == 0) {
             self.index = 0;
@@ -83,7 +100,7 @@ pub const Help = struct {
     /// than the one the eye came from.
     pub fn moveColumn(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
         const per: i32 = @intCast(@min(@max(self.layout.per, 1), 1000));
-        self.move(bindings, delta * per);
+        self.moveClamped(bindings, delta * per);
     }
 
     /// The popup's contents for one frame, or null when it is not open. Needs
@@ -111,18 +128,24 @@ pub const Help = struct {
 
 const testing = std.testing;
 
-test "a selection is clamped against the list the filter leaves" {
+test "the selection wraps, but a page stops at the ends" {
     var h: Help = .{};
     h.open(.normal);
-
-    // Past the end stops at the last row rather than running off it.
-    h.move(keymap.default_bindings, 1000);
     const n = keytext.helpCount(keymap.default_bindings, .normal, "");
-    try testing.expectEqual(n - 1, h.index);
 
-    // And past the start stops at the first.
-    h.move(keymap.default_bindings, -1000);
+    // Up from the first row lands on the last: Tab and Shift-Tab are a cycle,
+    // not two keys that stop working at the edges.
+    h.move(keymap.default_bindings, -1);
+    try testing.expectEqual(n - 1, h.index);
+    h.move(keymap.default_bindings, 1);
     try testing.expectEqual(@as(usize, 0), h.index);
+
+    // A page is clamped, because wrapping a screenful lands nowhere the eye
+    // was looking.
+    h.moveColumn(keymap.default_bindings, -1);
+    try testing.expectEqual(@as(usize, 0), h.index);
+    h.moveColumn(keymap.default_bindings, 1000);
+    try testing.expectEqual(n - 1, h.index);
 }
 
 test "a filter that matches nothing leaves nothing to select" {

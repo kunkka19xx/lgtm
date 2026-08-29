@@ -27,11 +27,23 @@ const tty_mod = @import("tty.zig");
 
 /// Translates a vaxis key into the core type, so nothing above `io/` needs to
 /// know vaxis exists.
+/// Whether a codepoint is one a keyboard produces as text. Below `0x20` are
+/// the C0 controls the named keys live in; `0xE000` up is the private-use area
+/// kitty puts its functional keycodes in.
+fn typesText(cp: u21) bool {
+    return cp >= 0x20 and cp != event.code.backspace and cp < 0xE000;
+}
+
 pub fn toKey(k: vaxis.Key) event.Key {
     return .{
         .codepoint = k.codepoint,
         .mods = .{
-            .shift = k.mods.shift,
+            // Dropped for anything that types a character: the shift is
+            // already in the codepoint, and terminals disagree about whether
+            // to report it as well, so keeping it would make `V` match a
+            // binding on one terminal and miss on another. It survives for the
+            // named keys, where `<S-Tab>` really is a different key.
+            .shift = k.mods.shift and !typesText(k.codepoint),
             .ctrl = k.mods.ctrl,
             .alt = k.mods.alt,
             .super = k.mods.super,
@@ -52,6 +64,9 @@ pub const Reader = struct {
     /// it did not, `stop` detaches instead of joining, because the read there
     /// is still uninterruptible.
     pollable: bool = false,
+    /// The descriptor readiness is actually asked about, which is not always
+    /// the one we read from - see `pollableFd`.
+    poll_fd: ?std.posix.fd_t = null,
 
     /// How long a `poll` waits before rechecking `running`. Short enough that
     /// `e` does not feel delayed, long enough that idling costs twenty
@@ -64,7 +79,8 @@ pub const Reader = struct {
     }
 
     pub fn start(self: *Reader) !void {
-        self.pollable = self.tty.handle() != null;
+        self.poll_fd = pollableFd(self.tty);
+        self.pollable = self.poll_fd != null;
         self.running.store(true, .release);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
@@ -84,15 +100,51 @@ pub const Reader = struct {
     /// True when the descriptor has bytes waiting. A timeout returns false and
     /// the loop goes back to check `running`; an error returns true so the
     /// read reports the real failure rather than this one.
+    ///
+    /// `HUP` counts as readable so the terminal going away is reported by the
+    /// read, which sees the end of the file, rather than spun on here.
     fn readable(self: *Reader) bool {
-        const fd = self.tty.handle() orelse return true;
+        const fd = self.poll_fd orelse return true;
         var fds = [_]std.posix.pollfd{.{
             .fd = fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
         const n = std.posix.poll(&fds, poll_interval_ms) catch return true;
-        return n > 0;
+        if (n == 0) return false;
+        return fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0;
+    }
+
+    /// A descriptor whose readiness `poll` will actually answer.
+    ///
+    /// macOS answers `POLLNVAL` for `/dev/tty`: the controlling-terminal clone
+    /// device is not pollable there, though the pty behind it polls normally.
+    /// Taking `n > 0` as "readable" then dropped the thread into a read that
+    /// parks until the next keystroke, and everything that waits for the
+    /// thread - quitting, and handing the terminal to `$EDITOR` - waited with
+    /// it. That is the `:q` that needed a second Enter.
+    ///
+    /// The two descriptors are the same terminal, so readiness on one is
+    /// readiness to read on the other. Probed rather than assumed, because
+    /// which descriptor is pollable is a property of the platform.
+    fn pollableFd(tty: *tty_mod.Tty) ?std.posix.fd_t {
+        if (tty.handle()) |fd| {
+            if (pollAnswers(fd)) return fd;
+        }
+        // Only when stdin is this terminal: polling a redirect that is always
+        // ready would spin instead of waiting.
+        if (std.c.isatty(0) != 0 and pollAnswers(0)) return 0;
+        return null;
+    }
+
+    fn pollAnswers(fd: std.posix.fd_t) bool {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = fd,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        _ = std.posix.poll(&fds, 0) catch return false;
+        return fds[0].revents & (std.posix.POLL.NVAL | std.posix.POLL.ERR) == 0;
     }
 
     fn run(self: *Reader) void {

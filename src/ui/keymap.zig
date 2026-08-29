@@ -100,9 +100,16 @@ pub const Modes = packed struct(u8) {
 pub const Chord = struct {
     cp: u21,
     ctrl: bool = false,
+    /// Only ever set for a named key. `io/input.zig` strips shift from
+    /// anything that types a character, so `V` is the codepoint `V` and not a
+    /// shifted `v`, and this can be compared exactly without a binding
+    /// matching on one terminal and missing on another.
+    shift: bool = false,
 
     pub fn matches(self: Chord, key: event.Key) bool {
-        return self.cp == key.codepoint and self.ctrl == key.mods.ctrl;
+        return self.cp == key.codepoint and
+            self.ctrl == key.mods.ctrl and
+            self.shift == key.mods.shift;
     }
 };
 
@@ -146,6 +153,10 @@ fn ctrl(cp: u21) Chord {
     return .{ .cp = cp, .ctrl = true };
 }
 
+fn shift(cp: u21) Chord {
+    return .{ .cp = cp, .shift = true };
+}
+
 /// The leader. Named once so rebinding it is one edit rather than a sweep over
 /// every sequence that starts with it. Space is unbound on its own and must
 /// stay that way: `feed` resolves an exact match as soon as it finds one, so a
@@ -163,12 +174,12 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
     .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)" },
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
-    .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .desc = "next hunk" },
-    .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .desc = "previous hunk" },
+    .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk },
+    .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk },
     .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .desc = "next file (wraps)" },
     .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)" },
-    .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .desc = "next file" },
-    .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .desc = "previous file" },
+    .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file },
+    .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line" },
     .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent" },
     .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference" },
@@ -185,7 +196,12 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('e')}, .command = .open_editor, .desc = "open line in $EDITOR" },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)" },
-    .{ .chords = &.{ctrl('l')}, .command = .refresh, .desc = "re-run the diff" },
+    // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
+    // tmux *root* table and forwards them only to processes matching its vim
+    // pattern, which `lgtm` does not match - so under a very common config
+    // `<C-l>` never arrived and reloading was unreachable. `<C-r>` is the
+    // redo/reload key everywhere else and nothing takes it.
+    .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff" },
     .{ .chords = &.{c('F')}, .command = .file_list, .desc = "list the changed files" },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
@@ -214,6 +230,13 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.left)}, .command = .list_left, .modes = Modes.lists },
     .{ .chords = &.{ctrl('n')}, .command = .list_down, .modes = Modes.lists },
     .{ .chords = &.{ctrl('p')}, .command = .list_up, .modes = Modes.lists },
+    // Tab cycles either list, the way it cycles a completion menu everywhere
+    // else. It is `toggle_zen` in the review, which is a different mode, so
+    // the two never compete. Shift-Tab arrives as Tab with the shift bit -
+    // the only key in the table where shift is part of the chord rather than
+    // part of the character.
+    .{ .chords = &.{c(event.code.tab)}, .command = .list_down, .modes = Modes.lists },
+    .{ .chords = &.{shift(event.code.tab)}, .command = .list_up, .modes = Modes.lists },
 };
 
 pub const Match = union(enum) {
@@ -276,7 +299,7 @@ pub const Keymap = struct {
 pub fn isPrefix(short: []const Chord, long: []const Chord) bool {
     if (short.len == 0 or short.len >= long.len) return false;
     for (short, long[0..short.len]) |a, b| {
-        if (a.cp != b.cp or a.ctrl != b.ctrl) return false;
+        if (!sameChord(a, b)) return false;
     }
     return true;
 }
@@ -316,9 +339,16 @@ pub fn shadowed(bindings: []const Binding) ?Conflict {
 fn sameChords(a: []const Chord, b: []const Chord) bool {
     if (a.len != b.len or a.len == 0) return false;
     for (a, b) |x, y| {
-        if (x.cp != y.cp or x.ctrl != y.ctrl) return false;
+        if (!sameChord(x, y)) return false;
     }
     return true;
+}
+
+/// Every field that makes a chord distinct. Written once because two callers
+/// compare chords and a modifier missing from one of them is a binding that
+/// reports a conflict with a key it is not.
+fn sameChord(a: Chord, b: Chord) bool {
+    return a.cp == b.cp and a.ctrl == b.ctrl and a.shift == b.shift;
 }
 
 fn modesOverlap(a: Modes, b: Modes) bool {

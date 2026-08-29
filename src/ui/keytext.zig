@@ -35,6 +35,17 @@ pub fn writeChords(chords: []const Chord, arena: Allocator) Allocator.Error![]co
 
 /// Longest a rendered sequence can be: `max_sequence` chords of `<Space>`.
 pub const max_keys_bytes = max_sequence_bytes * Keymap.max_sequence;
+
+/// Room for every spelling of one action on a single overlay row, separators
+/// included. The most any command carries is the two forms of a motion plus
+/// the list bindings' arrow and letter, so four sequences is slack rather than
+/// a limit.
+pub const max_row_keys_bytes = max_keys_bytes * 4 + row_keys_sep.len * 4;
+
+/// What sits between two spellings of the same action. A space alone left
+/// `]h <Space>nh` reading as one four-token key rather than two spellings of
+/// one action, which is the confusion the merged row was supposed to remove.
+pub const row_keys_sep = " / ";
 const max_sequence_bytes = 8;
 
 /// The allocation-free core of `writeChords`, so the same rendering feeds both
@@ -45,7 +56,10 @@ pub fn bufWriteChords(chords: []const Chord, buf: []u8) []const u8 {
         var tmp: [max_sequence_bytes]u8 = undefined;
         const piece: []const u8 = if (ch.ctrl)
             std.fmt.bufPrint(&tmp, "<C-{u}>", .{ch.cp}) catch "<C-?>"
-        else switch (ch.cp) {
+        else if (ch.shift) switch (ch.cp) {
+            event.code.tab => "<S-Tab>",
+            else => std.fmt.bufPrint(&tmp, "<S-{u}>", .{ch.cp}) catch "<S-?>",
+        } else switch (ch.cp) {
             event.code.escape => "<Esc>",
             event.code.tab => "<Tab>",
             event.code.enter => "<CR>",
@@ -109,6 +123,13 @@ fn namedChord(name: []const u8) KeyParseError!Chord {
         return .{ .cp = std.ascii.toLower(name[2]), .ctrl = true };
     }
     const eq = std.ascii.eqlIgnoreCase;
+    // Shift is only meaningful on a named key: on a character the shift is
+    // the character, and `<S-v>` would be a second spelling of `V` that the
+    // matcher could never see.
+    if (name.len > 2 and std.ascii.toLower(name[0]) == 's' and name[1] == '-') {
+        if (eq(name[2..], "Tab")) return .{ .cp = event.code.tab, .shift = true };
+        return error.BadKeyName;
+    }
     if (eq(name, "Space")) return c(' ');
     if (eq(name, "Esc") or eq(name, "Escape")) return c(event.code.escape);
     if (eq(name, "Tab")) return c(event.code.tab);
@@ -203,13 +224,34 @@ pub const HelpEntry = struct {
 
 /// Whether `b` belongs in the popup for `mode` under `filter`, and how well it
 /// matched. One predicate, used by both `helpEntries` and `helpCount`.
-fn ranked(b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, tier: fuzzy.Tier } {
+/// Every spelling of `cmd` that `mode` can reach, joined: `]f <Space>nf`.
+///
+/// The overlay lists one row per *action*, not one per binding. Two rows for
+/// the same command read as two commands, and the reader stops to work out
+/// what the difference is - there is none, which is the worst answer to have
+/// invited.
+fn keysFor(bindings: []const Binding, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
+    var n: usize = 0;
+    for (bindings) |b| {
+        if (b.command != cmd or !b.modes.has(mode)) continue;
+        if (n != 0 and n + row_keys_sep.len <= buf.len) {
+            @memcpy(buf[n..][0..row_keys_sep.len], row_keys_sep);
+            n += row_keys_sep.len;
+        }
+        n += bufWriteChords(b.chords, buf[n..]).len;
+    }
+    return buf[0..n];
+}
+
+fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, tier: fuzzy.Tier } {
     if (!b.modes.has(mode)) return null;
+    // An alias carries no description, so the row its command already has is
+    // the one its keys were gathered onto.
     const d = b.desc orelse return null;
-    const keys = bufWriteChords(b.chords, kbuf);
+    const keys = keysFor(bindings, b.command, mode, kbuf);
     // The filter runs over the keys as well as the description, so `spc` finds
     // the leader bindings and `ctrl` does not have to be spelled `<C-`.
-    var hay: [max_keys_bytes + 128]u8 = undefined;
+    var hay: [max_row_keys_bytes + 128]u8 = undefined;
     const text = std.fmt.bufPrint(&hay, "{s} {s}", .{ keys, d }) catch keys;
     const tier = fuzzy.match(text, filter) orelse return null;
     return .{ .keys = keys, .desc = d, .tier = tier };
@@ -219,9 +261,9 @@ fn ranked(b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct 
 /// laying the list out first.
 pub fn helpCount(bindings: []const Binding, mode: event.Mode, filter: []const u8) usize {
     var n: usize = 0;
-    var kbuf: [max_keys_bytes]u8 = undefined;
+    var kbuf: [max_row_keys_bytes]u8 = undefined;
     for (bindings) |b| {
-        if (ranked(b, mode, filter, &kbuf) != null) n += 1;
+        if (ranked(bindings, b, mode, filter, &kbuf) != null) n += 1;
     }
     return n;
 }
@@ -234,9 +276,9 @@ pub fn helpEntries(
 ) Allocator.Error![]const HelpEntry {
     var solid: std.ArrayList(HelpEntry) = .empty;
     var loose: std.ArrayList(HelpEntry) = .empty;
-    var kbuf: [max_keys_bytes]u8 = undefined;
+    var kbuf: [max_row_keys_bytes]u8 = undefined;
     for (bindings) |b| {
-        const r = ranked(b, mode, filter, &kbuf) orelse continue;
+        const r = ranked(bindings, b, mode, filter, &kbuf) orelse continue;
         const entry: HelpEntry = .{ .keys = try arena.dupe(u8, r.keys), .desc = r.desc };
         // Two tiers rather than a score: a run of the query as typed comes
         // first, scattered letters after. Without this, "file" pulls up
@@ -373,7 +415,8 @@ test "the overlay lists the mode it was opened from, aliases excluded" {
         try testing.expect(!std.mem.eql(u8, e.desc, "leave visual select"));
         // Quitting is `:q`, so the overlay lists the key that opens it.
         if (std.mem.eql(u8, e.keys, ":")) saw_quit = true;
-        if (std.mem.eql(u8, e.keys, "<Space>nf")) saw_leader = true;
+        // The leader form shares a row with the bracket form it duplicates.
+        if (std.mem.eql(u8, e.keys, "]f / <Space>nf")) saw_leader = true;
     }
     try testing.expect(saw_quit);
     try testing.expect(saw_leader);
@@ -397,7 +440,9 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     // the name a user would type for them.
     const leader_hits = try helpEntries(default_bindings, .normal, "space", arena);
     try testing.expectEqual(@as(usize, 4), leader_hits.len);
-    for (leader_hits) |e| try testing.expect(std.mem.startsWith(u8, e.keys, "<Space>"));
+    // Four actions, not four bindings: each row carries both spellings, so the
+    // leader form is inside the keys rather than at the front of them.
+    for (leader_hits) |e| try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);
 
     const none = try helpEntries(default_bindings, .normal, "zzzz", arena);
     try testing.expectEqual(@as(usize, 0), none.len);
@@ -413,8 +458,10 @@ test "the popup's own keys collapse to one label in its footer" {
     const own = try helpEntries(default_bindings, .help, "", a.allocator());
     try testing.expectEqual(@as(usize, 4), own.len);
     for (own) |e| try testing.expectEqualStrings("move", e.desc);
-    try testing.expectEqualStrings("H", own[0].keys);
-    try testing.expectEqualStrings("L", own[3].keys);
+    // Each row carries every spelling of its action; the footer prints only
+    // the first, which is what keeps the label reading `H J K L move`.
+    try testing.expectEqualStrings("H / <Left>", own[0].keys);
+    try testing.expectEqualStrings("L / <Right>", own[3].keys);
 }
 
 test "the count and the list agree, whatever the filter" {
