@@ -27,12 +27,20 @@ jobs:
           # minimum_zig_version, the same way flake.nix is.
           version: 0.16.0
 
-      - name: tests and SPDX headers
-        run: zig build check --summary all
+      - name: tests
+        run: zig build test --summary all
+
+      # Everything from here down is independent of the steps above, so each
+      # runs even after one has failed. A step's default `success()` would stop
+      # at the first red and hide the rest, which turns one run into three.
+      - name: SPDX headers
+        if: ${{ !cancelled() }}
+        run: zig build spdx
 
       # The phase 1 go/no-go gate. It exits non-zero below the hit rate, which
       # is what makes it a gate rather than a report.
       - name: anchor harness
+        if: ${{ !cancelled() }}
         run: zig build anchor
 
       # The steps above run in Debug, where `std.debug.assert` is live. It is
@@ -40,6 +48,7 @@ jobs:
       # with a returned error rather than an assert, so the suite is run again
       # in the mode that ships. Around 13s.
       - name: release build and tests
+        if: ${{ !cancelled() }}
         run: |
           zig build -Doptimize=ReleaseFast
           zig build test -Doptimize=ReleaseFast
