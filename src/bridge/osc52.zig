@@ -22,13 +22,20 @@ const Allocator = std.mem.Allocator;
 
 const encoder = std.base64.standard.Encoder;
 
+/// OSC 52 addressed to selection `c`, the clipboard, and the ST that ends it.
+/// Named because `bridge.zig` asserts on the prefix too; the tests below keep
+/// the bytes spelled out, since a test that rebuilds its expectation from the
+/// constant it is testing checks nothing.
+pub const prefix = "\x1b]52;c;";
+pub const terminator = "\x1b\\";
+
 /// The sequence, without a writer. Split out so the encoding has a test that
 /// does not need a terminal, and so the writer path stays three lines.
 pub fn sequence(gpa: Allocator, text: []const u8) Allocator.Error![]u8 {
     const b64 = try gpa.alloc(u8, encoder.calcSize(text.len));
     defer gpa.free(b64);
     _ = encoder.encode(b64, text);
-    return std.mem.concat(gpa, u8, &.{ "\x1b]52;c;", b64, "\x1b\\" });
+    return std.mem.concat(gpa, u8, &.{ prefix, b64, terminator });
 }
 
 /// Writes the sequence and flushes. The writer is the one `io/tty.zig` owns

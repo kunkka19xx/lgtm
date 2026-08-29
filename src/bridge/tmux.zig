@@ -20,6 +20,18 @@ const proc = @import("../io/proc.zig");
 /// bytes is cheaper than a lifetime.
 pub const max_pane_id = 24;
 
+/// The sigil every pane id starts with. Both the listing parser here and the
+/// saved-target validator in `bridge.zig` reject an id without it.
+pub const pane_sigil = '%';
+
+/// `send-keys` prints nothing on success and one short line on failure, so the
+/// cap exists only to bound a tmux that has gone wrong.
+const send_output_max = 4 << 10;
+
+/// `list-panes` prints one short line per pane. 64 KB is thousands of them,
+/// which is far past any real window.
+const list_output_max = 64 << 10;
+
 pub const Pane = struct {
     id: []const u8,
     /// `#{pane_current_command}` - what is running there, which is the only
@@ -63,7 +75,7 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
         const id = fields.next() orelse continue;
         const active = fields.next() orelse continue;
         const command = fields.next() orelse continue;
-        if (id.len == 0 or id[0] != '%') continue;
+        if (id.len == 0 or id[0] != pane_sigil) continue;
         try panes.append(arena, .{
             .id = id,
             .active = std.mem.eql(u8, active, "1"),
@@ -99,7 +111,7 @@ pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) Send
     defer scratch.deinit();
 
     const argv = try sendArgv(scratch.allocator(), pane, text);
-    const out = proc.run(gpa, io, argv, 4 << 10) catch return error.TmuxFailed;
+    const out = proc.run(gpa, io, argv, send_output_max) catch return error.TmuxFailed;
     defer out.deinit(gpa);
     if (out.exit_code != 0) {
         return if (std.mem.indexOf(u8, out.stderr, "find pane") != null)
@@ -113,7 +125,7 @@ pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) Send
 /// the panes point into `arena`.
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all_sessions: bool) SendError![]Pane {
     const argv = try listArgv(arena, all_sessions);
-    const out = proc.run(gpa, io, argv, 64 << 10) catch return error.TmuxFailed;
+    const out = proc.run(gpa, io, argv, list_output_max) catch return error.TmuxFailed;
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.TmuxFailed;
     return parsePanes(arena, try arena.dupe(u8, out.stdout));

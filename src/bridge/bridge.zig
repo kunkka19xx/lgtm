@@ -193,11 +193,15 @@ fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
 /// pane id, one line, so it is readable and deletable by hand.
 pub const target_path = ".lgtm/target";
 
+/// One pane id and a newline. The cap is a sanity bound on a file the user can
+/// edit by hand, not a budget.
+const target_read_max = 256;
+
 /// The saved pane id, copied into `buf`. Best effort throughout: a missing
 /// file is the normal first run, and a corrupt one is not worth a message the
 /// user cannot act on - inference runs next and usually gets it right.
 pub fn loadTarget(io: std.Io, gpa: Allocator, buf: []u8) ?[]const u8 {
-    const bytes = fs.readFile(io, gpa, target_path, 256) catch return null;
+    const bytes = fs.readFile(io, gpa, target_path, target_read_max) catch return null;
     defer gpa.free(bytes);
     return parseTarget(bytes, buf);
 }
@@ -205,7 +209,7 @@ pub fn loadTarget(io: std.Io, gpa: Allocator, buf: []u8) ?[]const u8 {
 /// Split from the read so the validation has a test that touches no file.
 fn parseTarget(bytes: []const u8, buf: []u8) ?[]const u8 {
     const id = std.mem.trim(u8, bytes, " \t\r\n");
-    if (id.len == 0 or id.len > buf.len or id[0] != '%') return null;
+    if (id.len == 0 or id.len > buf.len or id[0] != tmux.pane_sigil) return null;
     @memcpy(buf[0..id.len], id);
     return buf[0..id.len];
 }
@@ -286,7 +290,7 @@ test "the clipboard path takes text a send would refuse" {
     }, "#3 a.zig:1\n+    return 1;");
     try testing.expect(res == .copied);
     try testing.expect(res.copied == null);
-    try testing.expect(std.mem.startsWith(u8, out.written(), "\x1b]52;c;"));
+    try testing.expect(std.mem.startsWith(u8, out.written(), osc52.prefix));
 }
 
 test "a send with no multiplexer lands on the clipboard and says so" {
