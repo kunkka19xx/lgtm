@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Install:  pre-commit install
+# Bypass:   git commit --no-verify
+#
+# Everything here runs on the staged files only, so the files that predate the
+# hook are reformatted as they are next touched rather than in one sweep.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        # Two trailing spaces are a line break in markdown, not an accident.
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+      - id: check-merge-conflict
+      - id: check-yaml
+
+  - repo: local
+    hooks:
+      # A fixer rather than `--check`: it rewrites the file and pre-commit
+      # fails the commit telling you to re-stage, which is a step shorter than
+      # being told to go and run it yourself.
+      - id: zig-fmt
+        name: zig fmt
+        entry: zig fmt
+        language: system
+        files: \.zig$
+
+      # Tests plus the SPDX header check, around 0.75s warm. It takes no
+      # filenames: it is one whole-project command and must not be run once
+      # per staged file.
+      - id: zig-build-check
+        name: zig build check
+        entry: zig build check
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: \.(zig|zon)$

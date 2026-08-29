@@ -78,6 +78,14 @@ zig build            # the binary
 zig build check      # tests plus the SPDX header check
 ```
 
+Commits are gated by [pre-commit](https://pre-commit.com): `zig fmt` on the staged `.zig` files, then `zig build check`, around 0.75s warm. Once per clone:
+
+```
+pre-commit install
+```
+
+It runs on the files in the commit only, so the handful that predate the hook are reformatted as they are next touched rather than in one sweep. `git commit --no-verify` skips it.
+
 Each phase ships the harness that measures it. They take a real path, so they can be pointed at code that was never a fixture - which is how several of the gaps so far were found:
 
 ```
