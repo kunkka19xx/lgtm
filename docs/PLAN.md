@@ -374,10 +374,29 @@ reading of the pair is that a phase costs roughly 100 KB and the budget has
 57% of itself left. The CI step prints the figure on every push, which is what
 turns "recheck near 1 MB" into something that happens.
 
-What this does **not** settle: the 5a gate table above was measured under
-`ReleaseFast`. Re-run `--profile` under `ReleaseSmall` before publishing those
-numbers. There is 47x headroom on the frame budget so the trade is almost
-certainly free, but almost certainly is not a measurement.
+**Settled once `dist` existed.** The 5a gate table was measured under
+`ReleaseFast`, which is not what ships, so the numbers described a binary
+nobody would run. Re-measured with `-Dprofile` in both modes against the same
+tree - a clone with 12 changed files, `--once` so every run pays for a cold
+first frame - five runs each, medians:
+
+| Span                       | ReleaseFast | ReleaseSmall |
+| -------------------------- | ----------- | ------------ |
+| frame                      | 0.335 ms    | 0.381 ms     |
+| render                     | 0.132 ms    | 0.113 ms     |
+| re-diff (`diff_parse`)     | 40.6 ms     | 39.0 ms      |
+| whole `--once`, wall clock | 0.04 s      | 0.04 s       |
+| stripped binary            | 766 KB      | **603 KB**   |
+
+`ReleaseSmall` costs about 14% of frame time and saves 163 KB. At 0.381 ms
+against an 8 ms budget that is 21x headroom, so the trade is free in the only
+sense that matters, and the bet this section made is confirmed rather than
+assumed. Re-diff and cold start are indistinguishable between the modes,
+which follows from two `git` spawns being ~99.8% of a re-diff.
+
+These are cold first frames through `--once`; the 0.171 ms in the 5a table is a
+warm steady-state frame in a live session. The two are not the same measurement
+and the pair should not be read as a regression.
 
 **Gate for 5b/5c: PASSED.** Flawless at 80 columns in a split tmux pane, and
 at 62 and 40 with the overlays open; below that it says "window too small"
