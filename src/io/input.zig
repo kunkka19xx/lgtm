@@ -133,8 +133,17 @@ pub const Reader = struct {
         }
         // Only when stdin is this terminal: polling a redirect that is always
         // ready would spin instead of waiting.
-        if (std.c.isatty(0) != 0 and pollAnswers(0)) return 0;
+        if (isTerminal(0) and pollAnswers(0)) return 0;
         return null;
+    }
+
+    /// `tcgetattr` succeeds on a terminal and fails on anything else, which is
+    /// what `isatty` is - and unlike `isatty` it is a syscall rather than a
+    /// libc symbol. The Linux build does not link libc, so `std.c` is not
+    /// reachable there at all.
+    fn isTerminal(fd: std.posix.fd_t) bool {
+        _ = std.posix.tcgetattr(fd) catch return false;
+        return true;
     }
 
     fn pollAnswers(fd: std.posix.fd_t) bool {
