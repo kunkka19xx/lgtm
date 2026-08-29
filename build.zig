@@ -46,6 +46,44 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run lgtm").dependOn(&run.step);
 
+    // The distribution build, and the only one the 1 MB budget is about: what
+    // a user downloads. `ReleaseFast` had drifted to 982 KB of that budget by
+    // phase 5, which is what triggered phase 0's "recheck near 1 MB"; the same
+    // tree at `ReleaseSmall` is half of it, with `uucode`'s Unicode tables and
+    // the default panic handler both still present. That is what settled the
+    // question without dropping `gwidth` or adding a `-Dexternal_uucode` flag
+    // (PLAN.md, "Binary size needs a decision before 5c").
+    //
+    // Its own module rather than a flag on the default one: the optimize mode
+    // is the decision, so it should not be something a caller has to remember
+    // to pass.
+    const dist_options = b.addOptions();
+    dist_options.addOption(bool, "profile", false);
+    // A panic trace lands in an alt screen the TUI never got to leave, and
+    // costs 304 KB to be able to print.
+    dist_options.addOption(bool, "stack_traces", false);
+
+    const dist_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseSmall,
+        .strip = true,
+    });
+    dist_module.addOptions("build_options", dist_options);
+    dist_module.addImport("vaxis", b.dependency("vaxis", .{
+        .target = target,
+        .optimize = .ReleaseSmall,
+    }).module("vaxis"));
+    dist_module.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
+
+    const dist_exe = b.addExecutable(.{
+        .name = "lgtm",
+        .root_module = dist_module,
+    });
+    const dist_install = b.addInstallArtifact(dist_exe, .{});
+    b.step("dist", "Build the distribution binary (ReleaseSmall, stripped)")
+        .dependOn(&dist_install.step);
+
     // Tests import src/main.zig, which pulls in every module via its test block.
     const test_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),

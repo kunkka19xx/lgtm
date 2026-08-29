@@ -76,7 +76,10 @@ Every number is measured rather than estimated, but on whichever machine ran it.
 ```
 zig build            # the binary
 zig build check      # tests plus the SPDX header check
+zig build dist       # the distribution binary: ReleaseSmall, stripped
 ```
+
+`dist` is the one the 1 MB budget is about, because it is what a user downloads. It comes in around 600 KB, and CI fails if it ever crosses the budget rather than leaving that to be noticed.
 
 Commits are gated by [pre-commit](https://pre-commit.com): `zig fmt` on the staged `.zig` files, then `zig build check`, around 0.75s warm. Once per clone:
 

@@ -52,3 +52,15 @@ jobs:
         run: |
           zig build -Doptimize=ReleaseFast
           zig build test -Doptimize=ReleaseFast
+
+      # The 1 MB budget is about what a user downloads, so it is checked
+      # against the binary a user would download rather than left in prose.
+      # Phase 0 said "recheck if it ever approaches 1 MB"; this is that recheck,
+      # run on every push instead of remembered.
+      - name: distribution binary fits its budget
+        if: ${{ !cancelled() }}
+        run: |
+          zig build dist
+          size=$(stat -c%s zig-out/bin/lgtm 2>/dev/null || stat -f%z zig-out/bin/lgtm)
+          echo "stripped ReleaseSmall: $size bytes ($((size * 100 / 1048576))% of 1 MB)"
+          test "$size" -lt 1048576

@@ -153,7 +153,7 @@ a timing-dependent test in CI.
 - [x] `Highlighter` union `{lexer, tree_sitter, plain}` with `tree_sitter` unimplemented (ARCHITECTURE.md 5). `.plain` emits one `.text` run per line rather than nothing, so callers have no special case
 - [x] Guard rails: over 500 KB or 10k lines falls to plain; LRU cache of ~32 files keyed by content hash
 - [ ] Checkpoint invalidation from the first changed line: **not built, with evidence.** The whole-file pass costs 0.5 ms over a 6.4k-line corpus against a 100 ms re-diff budget, so a partial rebuild would save half a millisecond and cost a second code path that can disagree with the first. PERFORMANCE.md 6.2 makes the _data structure_ T0 and that is what shipped; the incremental rebuild waits for a profile that wants it
-- [ ] "Lex the visible range plus a margin": the API takes `(from, to, state)` and the benchmark measures it at 4.5 us per 50-line screen, but nothing calls it that way until the renderer exists. Phase 5 owes the caller, not phase 4
+- [x] "Lex the visible range plus a margin": the API takes `(from, to, state)` and the benchmark measures it at 4.5 us per 50-line screen. Phase 5 shipped without calling it that way, and **the profile says leave it**: `lex` costs 0.053 ms across a whole frame against an 8 ms budget, memoised by `lex_cache`. Ranged lexing would save microseconds and add a second path that can disagree with the whole-file one about a lexer state carried across a screen boundary. Closed rather than left looking like debt; reopen it if a file ever makes `lex` visible in `--profile`
 
 **Zig first rather than Rust.** The plan said Rust first. Every fixture, every recorded session and every file in this repository is Zig, so a Rust-first order would have meant testing the first language against no real code. Rust, Go and Python all landed in the same phase anyway, and all four are exercised against real files through `zig build lex`.
 
@@ -344,8 +344,15 @@ reason. Note also that phase 0's 653 KB was measured on macOS arm64, where
 debug info lives in a separate `.dSYM` - so that number and this one were never
 measuring the same thing, and the honest comparison is stripped-to-stripped.
 
-**Decided: `ReleaseSmall` for distribution builds.** Measured on Linux x86-64,
-stripped-to-stripped:
+**Decided: `ReleaseSmall` for distribution builds, and `zig build dist` is
+it.** The decision lived only in this paragraph until phase 6 was done, which
+made it a decision nothing acted on: no step produced a distribution binary and
+nothing checked its size. `dist` builds `ReleaseSmall` and stripped, with stack
+traces off, and CI fails the push if the result crosses 1 MB - phase 0 asked for
+a recheck near the budget, and this is that recheck run every time rather than
+remembered.
+
+Measured on Linux x86-64, stripped-to-stripped:
 
 | Build            | Stripped   |
 | ---------------- | ---------- |
@@ -359,6 +366,13 @@ real. But `ReleaseSmall` comes in at half the budget - under even phase 0's
 `gwidth` stays, the default panic handler stays, and no `-Dexternal_uucode`
 flag needs to exist. The 185 KB of Unicode tables and the DWARF unwinder are a
 _Debug_-build weight problem, not a distribution one.
+
+**Re-measured once `dist` existed**, after the bridge, the anchor wiring and the
+overlay work landed: 607,848 bytes on x86-64 Linux and 602,872 on arm64 macOS,
+both `zig build dist`. The 501 KB above predates all of that, so the honest
+reading of the pair is that a phase costs roughly 100 KB and the budget has
+57% of itself left. The CI step prints the figure on every push, which is what
+turns "recheck near 1 MB" into something that happens.
 
 What this does **not** settle: the 5a gate table above was measured under
 `ReleaseFast`. Re-run `--profile` under `ReleaseSmall` before publishing those
