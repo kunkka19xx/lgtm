@@ -116,7 +116,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `Ctrl-d` / `Ctrl-u` | half page |
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; `N` runs it backwards |
-| `}` `{` | paragraph |
+| `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
 | `]f` / `[f` | next / previous file (wraps at either end) |
@@ -129,6 +129,16 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `?` | help popup: every key live in the current mode, fuzzy-filtered as you type, `HJKL` or arrows to move: `J`/`K` a row, `H`/`L` a column |
 
 **Word motions cross lines, and know what a line is.** `w`, `b`, `e` and their capitals carry into the neighbouring diff line rather than stopping at the end of one, which is what vim does and what a hand expects. Two rules come with that: a hunk header is not a word, so the motions step over it; and an empty line *is* a word, so `w` and `b` stop on one - but `e` and `E` pass over it, because an empty line has no word end for a cursor to sit on. `gg` lands on the first line for the same reason: it says "first line", and row zero is a hunk header.
+
+**The viewport catches up rather than teleporting.** A jump - `<C-d>`, `]h`, `gg`, a search landing - travels into place instead of the screen changing between one frame and the next, which is what makes it possible to see *where* you went rather than only that you went.
+
+**One screen row per frame is the floor, and it is also the ceiling.** Half a row cannot be drawn, so a row per 60 Hz frame is the finest motion a cell grid can express; the animation moves at constant speed with that as its minimum, and `ui.scroll_ms` (default 250) only bounds how long a *long* jump may take before it starts moving more than a row at a time. An ease-out curve was tried first and is worse for exactly this reason - it spends its opening frames moving four and five rows, which reads as a jump, and its closing frames moving less than a row, which the terminal cannot draw at all.
+
+**The cursor travels for every motion.** `h l w b e`, `f t F T`, `j k`, a page key, a hunk jump - the block moves to where the motion put it a cell at a time rather than appearing there, at one cell per frame with `ui.cursor_ms` (default 80) bounding a long hop. A `w` of four columns is four frames of travel: not much, and far more than none. It travels in screen cells rather than in rows and byte offsets, which is the space a column, a wrapped line and a scrolling viewport all move it through - so one chase handles the three of them. Only the *drawn* block lags: every reference, every send and every motion resolves against where the cursor actually is.
+
+**The viewport is the part that only animates for a jump - never for a step.** `<C-d>`, `]h`, `gg`, `zz` and a search landing take you somewhere you asked to go; `j`, `k` and the word motions move the view only because the cursor walked off the edge of it, and those are always instant. With soft wrap a single `j` can cross three screen rows, so animating a step would start a fresh animation on every keystroke and a held `j` would spend its life cancelling the last one - which reads as stutter and costs a frame of input latency per key on top of it. A jump further than two screens is a teleport in intent and is left as one; a second jump arriving mid-flight joins the first rather than queueing behind it; anything that is not a jump arrives at once. `ui.scroll_ms = 0` turns it off.
+
+**This is as smooth as a terminal gets, and that is a hard ceiling.** A GPU frontend like Neovide owns pixels and can slide a viewport sub-pixel; an application drawing into any terminal writes cells, and a cell is the smallest thing that can move. Beating it would mean rasterising our own glyphs and pushing them through the kitty graphics protocol - becoming a font renderer, for one family of terminals. Cursor motion is not animated at all for the same reason: a word motion covers three or four cells and there is nothing to put between them.
 
 **The cursor is a character, not a line.** It is a `(row, column)` pair drawn as the terminal's own cursor inside the line highlight, and the column survives a vertical motion the way vim's `curswant` does: down through a short line and back onto a long one returns to where the eye was, not to the short line's end. Word motions treat a change of character class as a boundary, so `w` steps through `foo.bar(baz)` a piece at a time. What the column is *for* is §6.3: pointing at a word rather than at a line.
 

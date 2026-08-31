@@ -25,6 +25,7 @@ const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
 const rows_mod = @import("rows.zig");
 const theme_mod = @import("theme.zig");
+const anim = @import("anim.zig");
 const wrap = @import("wrap.zig");
 
 pub const Theme = theme_mod.Theme;
@@ -112,9 +113,28 @@ pub const View = struct {
     rows: rows_mod.Rows,
     file_index: u32,
     file_count: u32,
-    /// Row index of the cursor, and of the first visible row.
+    /// Row index of the cursor, and of the first row drawn - which is where
+    /// the viewport is *drawn*, not where it has settled, while a jump is
+    /// still catching up.
     cursor: u32,
     scroll: u32,
+    /// The row the cursor is *drawn* on. The same as `cursor` except while a
+    /// jump is catching up, when it is displaced with the viewport so the
+    /// cursor keeps its place on screen and the text slides under it. Only the
+    /// body reads it: the status line counts hunks, which is a question about
+    /// where the reader *is*, not about what is on screen this frame.
+    cursor_drawn: u32 = 0,
+    /// The cell the cursor block is drawn on, in body coordinates, or null
+    /// when it is off screen. Fractional while it is travelling: the renderer
+    /// rounds it to the cell it has reached. Computed by the app rather than
+    /// here because the travel has to persist between frames, and a `View` is
+    /// one frame's worth of answers.
+    cursor_cell: ?anim.Cursor.Cell = null,
+    /// Screen rows of the first drawn row that are above the top of the body.
+    /// Non-zero only mid-animation, and only when that row is wrapped: it is
+    /// what lets the viewport move by a screen row rather than by a whole
+    /// line of the file (`ui/anim.zig`).
+    skip: u16 = 0,
     /// Byte offset of the cursor within its line, for the cell the terminal
     /// cursor is parked on.
     col: u32 = 0,

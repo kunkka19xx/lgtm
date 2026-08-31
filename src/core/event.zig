@@ -143,6 +143,15 @@ pub const Queue = struct {
         return out;
     }
 
+    /// Whether anything is waiting, without taking it. What a paced loop asks
+    /// between the slices of one frame's sleep, so a keystroke arriving
+    /// mid-animation waits a slice rather than a whole frame.
+    pub fn pending(self: *Queue) bool {
+        self.mutex.lockUncancelable(self.io);
+        defer self.mutex.unlock(self.io);
+        return self.items.items.len > 0 or self.closed;
+    }
+
     /// Non-blocking variant for the render loop.
     pub fn tryDrain(self: *Queue, gpa: Allocator) Allocator.Error![]Event {
         self.mutex.lockUncancelable(self.io);
@@ -169,6 +178,28 @@ test "queue drains in one acquisition" {
     try testing.expectEqual(@as(usize, 2), events.len);
     try testing.expectEqual(@as(u16, 80), events[0].resize.cols);
     try testing.expectEqual(Event.quit, events[1]);
+}
+
+test "pending reports what is waiting without taking it" {
+    const testing = std.testing;
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var q = Queue.init(testing.allocator, threaded.io());
+    defer q.deinit();
+
+    try testing.expect(!q.pending());
+    try q.push(.{ .resize = .{ .cols = 80, .rows = 24 } });
+    try testing.expect(q.pending());
+    // Reporting is not taking: the event is still there to drain.
+    try testing.expect(q.pending());
+    const events = try q.tryDrain(testing.allocator);
+    defer testing.allocator.free(events);
+    try testing.expectEqual(@as(usize, 1), events.len);
+    try testing.expect(!q.pending());
+
+    // A closed queue is always ready: the waiter has to wake up and see it.
+    q.close();
+    try testing.expect(q.pending());
 }
 
 test "tryDrain returns empty without blocking" {

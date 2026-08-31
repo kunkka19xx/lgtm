@@ -89,6 +89,31 @@ pub const Command = enum {
     /// list, which is the same movement in a list one column wide.
     list_left,
     list_right,
+
+    /// Whether this command *jumps* - takes the reader somewhere they asked to
+    /// go - as against stepping, where the view moves only because the cursor
+    /// walked off the edge of it.
+    ///
+    /// Only a jump is worth animating. A step has to be instant: with soft
+    /// wrap a single `j` crosses two or three screen rows, so animating it
+    /// would start a fresh animation on every keystroke, and a held `j` would
+    /// spend its life cancelling the last one - which reads as stutter, and
+    /// costs a frame of input latency per key on top.
+    pub fn jumps(self: Command) bool {
+        return switch (self) {
+            .page_down,
+            .page_up,
+            .top,
+            .bottom,
+            .center,
+            .next_hunk,
+            .prev_hunk,
+            .search_next,
+            .search_prev,
+            => true,
+            else => false,
+        };
+    }
 };
 
 /// Which modes a binding is live in. Motions are live in both, which is what

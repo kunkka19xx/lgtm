@@ -39,12 +39,41 @@ pub fn draw(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
         .glyphs = f.glyphs,
     };
 
-    var screen_row: u16 = 0;
+    // Negative to begin with when the top row is only partly on screen, which
+    // is how the viewport moves by a screen row rather than by a whole line of
+    // the file while a jump is catching up (`ui/anim.zig`). Rows drawn above
+    // zero are clipped a chunk at a time rather than by the window, because
+    // the window's own clipping is against the screen and would eat the rule.
+    var screen_row: i32 = -@as(i32, v.skip);
     var idx = v.scroll;
     while (screen_row < height and idx < v.rows.len()) : (idx += 1) {
-        const mark: Mark = .{ .row = idx, .cursor = idx == v.cursor, .sel = v.selection };
+        const mark: Mark = .{ .row = idx, .cursor = idx == v.cursor_drawn, .sel = v.selection };
         screen_row += try drawRow(bf, v, screen_row, v.rows.items[idx], mark);
     }
+
+    // Last, and once for the frame rather than once for whichever row happens
+    // to be the cursor's: while it is travelling it is between rows, and the
+    // row it is over is not the row it belongs to.
+    //
+    // The terminal's own cursor rather than a drawn block: it blinks the way
+    // the reader's terminal blinks and screen readers find it, which is the
+    // same argument `drawPrompt` makes. A prompt draws after the body and
+    // takes it back, which is what should happen while one is open.
+    if (v.cursor_cell) |c| {
+        const at: i32 = @intFromFloat(@round(c.row));
+        if (onScreen(bf, at)) |y| {
+            bf.win.setCursorShape(.block);
+            bf.win.showCursor(@intFromFloat(@round(c.col)), y);
+        }
+    }
+}
+
+/// Whether a screen row is inside the body, and what it is as a coordinate.
+/// One place, because every draw below has to ask and getting it wrong writes
+/// over the chrome.
+fn onScreen(f: Frame, row: i32) ?u16 {
+    if (row < 0 or row >= f.win.height) return null;
+    return @intCast(row);
 }
 
 /// How a body row is standing out, if it is. The cursor and the selection are
@@ -81,21 +110,28 @@ const Mark = struct {
 
 /// Returns the screen rows the row took: one for chrome, and for a line as
 /// many as its text wrapped onto.
-fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, mark: Mark) Allocator.Error!u16 {
+fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.Error!i32 {
+    switch (r) {
+        .line => |li| return drawLine(f, v, row, li, mark),
+        // Chrome is one screen row and never wraps, so it is drawn or it is
+        // not; only a line can straddle the top of the body.
+        else => {},
+    }
+    const at = onScreen(f, row) orelse return 1;
     switch (r) {
         .gap => {
             const cols = if (f.width() > 6) f.width() - 6 else f.width();
-            f.put(row, 3, try f.rule(f.glyphs.gap, cols), f.theme.rule);
+            f.put(at, 3, try f.rule(f.glyphs.gap, cols), f.theme.rule);
         },
         .summarised => _ = try f.print(
-            row,
+            at,
             0,
             f.theme.dim,
             "  {d} lines changed - too large to render inline, not discarded",
             .{v.file.added + v.file.removed},
         ),
-        .hunk_header => |hi| try drawHunkHeader(f, v, row, hi),
-        .line => |li| return drawLine(f, v, row, li, mark),
+        .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
+        .line => unreachable,
     }
     return 1;
 }
@@ -134,7 +170,7 @@ fn drawHunkHeader(f: Frame, v: View, row: u16, hi: u32) Allocator.Error!void {
     }
 }
 
-fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u16 {
+fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i32 {
     const lines = v.file.lines;
     if (li >= lines.len()) return 1;
     const kind = lines.kind[li];
@@ -162,9 +198,11 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u1
     const prefix = try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}  ", .{ sign, no, col - 4 });
 
     // How many screen rows this line needs. Capped at what is left of the
-    // body: a line taller than the pane is drawn until the pane runs out.
-    const rest = f.win.height -| row;
-    const height: u16 = if (v.wrap)
+    // body - and a line starting above it needs the rows above counting too,
+    // or a wrapped row scrolled halfway off the top would report the height of
+    // the part still showing and the rows below it would all shift up.
+    const rest: u16 = @intCast(@max(0, @as(i32, f.win.height) - row));
+    const height: i32 = if (v.wrap)
         wrap.height(lines.text[li], f.width() -| col, f.method(), rest)
     else
         1;
@@ -173,30 +211,22 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u1
     // the columns that happen to carry text - and every row of a wrapped line,
     // or the cursor would look like it stopped halfway down its own line.
     if (bg) |b| {
-        var r: u16 = 0;
+        var r: i32 = 0;
         while (r < height) : (r += 1) {
+            const at = onScreen(f, row + r) orelse continue;
             var c: u16 = 0;
             while (c < f.width()) : (c += 1) {
-                f.win.writeCell(c, row + r, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
+                f.win.writeCell(c, at, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
             }
         }
     }
 
     // The sign and the number go on the first row only. A continuation row
-    // repeating them would read as a second line of the file.
-    f.put(row, 0, prefix, sign_style);
+    // repeating them would read as a second line of the file - and a first row
+    // scrolled off the top takes them with it.
+    if (onScreen(f, row)) |at| f.put(at, 0, prefix, sign_style);
     try drawCode(f, v, row, col, li, kind, bg, height, mark);
 
-    // The terminal's own cursor rather than a drawn block: it blinks the way
-    // the reader's terminal blinks and screen readers find it, which is the
-    // same argument `drawPrompt` makes. A prompt draws after the body and
-    // takes it back, which is what should happen while one is open.
-    if (mark.cursor) {
-        const avail = if (v.wrap) f.width() -| col else 0;
-        const cell = wrap.locate(lines.text[li], avail, f.method(), v.col);
-        f.win.setCursorShape(.block);
-        f.win.showCursor(col + cell.col, row + cell.row);
-    }
     return height;
 }
 
@@ -208,12 +238,12 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u1
 fn drawCode(
     f: Frame,
     v: View,
-    row: u16,
+    row: i32,
     col: u16,
     li: u32,
     kind: hunk.LineKind,
     bg: ?vaxis.Color,
-    height: u16,
+    height: i32,
     mark: Mark,
 ) Allocator.Error!void {
     const lines = v.file.lines;
@@ -265,18 +295,25 @@ fn drawCode(
     }
 
     if (height <= 1) {
-        _ = f.win.print(segs.items, .{ .row_offset = row, .col_offset = col, .wrap = .none });
+        const at = onScreen(f, row) orelse return;
+        _ = f.win.print(segs.items, .{ .row_offset = at, .col_offset = col, .wrap = .none });
         return;
     }
 
     // The chunks come from the same iterator that measured the height, so the
-    // rows drawn and the rows counted cannot disagree.
+    // rows drawn and the rows counted cannot disagree. Chunks above the body
+    // are skipped rather than drawn: that is what a line scrolled halfway off
+    // the top looks like.
     var it: wrap.Iterator = .init(text, f.width() -| col, f.method());
     var r = row;
     while (it.next()) |chunk| : (r += 1) {
         if (r >= row + height) break;
+        const at = onScreen(f, r) orelse {
+            if (r >= f.win.height) break;
+            continue;
+        };
         const part = try sliceSegs(f.arena, segs.items, chunk);
-        _ = f.win.print(part, .{ .row_offset = r, .col_offset = col, .wrap = .none });
+        _ = f.win.print(part, .{ .row_offset = at, .col_offset = col, .wrap = .none });
     }
 }
 

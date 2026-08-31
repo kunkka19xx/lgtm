@@ -142,6 +142,8 @@ cursor_line = "on #313244"
 icons = "unicode"          # "ascii" for a terminal without the glyphs,
                            # "nerd" for file-type icons in the file list
 wrap = true                # soft wrap long lines; zw toggles it live
+scroll_ms = 250            # longest a view jump may take; 0 to turn it off
+cursor_ms = 80             # longest the cursor takes to travel; 0 for instant
 
 [nav]
 hunk_crosses_files = true  # ]h walks the whole review, not just this file
@@ -164,6 +166,27 @@ back. Thirty-seven file types have their own icon and everything else gets a
 generic one, so the column never comes out ragged. `nerd` changes nothing else:
 it patches icons in, and leaves the rules and box borders exactly as `unicode`
 draws them.
+
+**The cursor travels rather than teleporting.** Every motion moves it a cell at
+a time - `w`, `f`, `$`, `j`, a page key, a hunk jump - at one cell per frame,
+which is the finest a terminal can draw. Only the drawn block lags; what you
+send always resolves against where the cursor actually is. `cursor_ms = 0` for
+instant.
+
+**Jumps glide instead of teleporting.** `<C-d>`, `]h`, `gg` and a search
+landing travel into place at one screen row per frame - the finest a cell grid
+can draw, since half a row does not exist. A wrapped line is crossed a row at a
+time. Only jumps animate - `j`, `k` and the word motions are always instant,
+because they move the view only as a side effect of the cursor reaching the edge
+and animating that would stutter on every keystroke. A second jump mid-flight
+joins the first; anything else arrives at once, so it never costs you latency.
+`scroll_ms` bounds how long a long jump may take before it starts moving more
+than a row at a time, and `0` turns the whole thing off.
+
+This is as smooth as a terminal gets. Neovide owns pixels and can slide a
+viewport sub-pixel; anything drawing into a terminal writes cells. That is also
+why the cursor itself is not animated - a word motion covers four cells and
+there is nothing to put between them.
 
 **Point at a word, not just a line.** The cursor is a character: `h l w b e`
 and `W B E` for the whitespace-delimited kind, `0 ^ $`, and `f t F T` with `;`

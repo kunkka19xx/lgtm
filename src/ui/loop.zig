@@ -30,6 +30,10 @@ const keytext = @import("keytext.zig");
 const render = @import("render.zig");
 const theme_mod = @import("theme.zig");
 
+/// One animation frame. 60 Hz is smooth and is what the terminal can flush;
+/// asking for more would spend bandwidth on frames a pane cannot show.
+const frame_ms: i64 = 16;
+
 pub const Options = struct {
     /// Render one frame and exit. What CI and a screenshot need, and the only
     /// way to exercise the render path without a human at a keyboard.
@@ -71,6 +75,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer app.deinit();
     app.nav = opts.cfg.nav;
     app.wrap = opts.cfg.ui.wrap;
+    app.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
+    app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
@@ -137,21 +143,35 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     try app.rediff();
 
     while (!app.quit) {
-        app.clampScroll(render.bodyHeight(ws.rows, app.zen));
+        // Once for the iteration: every use below is the same answer, and a
+        // resize inside `applyEvents` is picked up by the next pass.
+        const body = render.bodyHeight(ws.rows, app.zen);
+        app.clampScroll(body);
 
-        try drawFrame(&app, &vx, w);
+        try drawFrame(&app, &vx, w, body);
         if (opts.once) break;
 
-        const events = try queue.drain(gpa);
-        defer gpa.free(events);
-        if (events.len == 0) break; // queue closed
-
-        for (events) |ev| {
-            if (ev == .resize) {
-                ws = .{ .cols = ev.resize.cols, .rows = ev.resize.rows, .x_pixel = 0, .y_pixel = 0 };
-                try vx.resize(gpa, w, ws);
+        // Two ways to wait. Settled, the loop blocks - a review pane is idle
+        // almost all of the time and should cost nothing while it is. With the
+        // viewport still catching up it paces itself instead, and goes back to
+        // blocking the moment it arrives.
+        if (app.animating(body)) {
+            const events = try queue.tryDrain(gpa);
+            defer gpa.free(events);
+            if (events.len == 0) {
+                app.stepAnim(pace(io, &queue, frame_ms), body);
+            } else {
+                // Whether this cancels what is in flight is the command's
+                // decision, not the loop's: another jump adds to it and the
+                // two travel together, anything else arrives at once. See
+                // `App.run`.
+                try applyEvents(&app, &vx, w, gpa, &ws, events);
             }
-            try app.handle(ev, render.bodyHeight(ws.rows, app.zen));
+        } else {
+            const events = try queue.drain(gpa);
+            defer gpa.free(events);
+            if (events.len == 0) break; // queue closed
+            try applyEvents(&app, &vx, w, gpa, &ws, events);
         }
 
         if (app.want_send) |how| {
@@ -232,6 +252,43 @@ fn deliver(
     }
 }
 
+/// One animation frame's worth of waiting, and the real time it took.
+///
+/// Real rather than assumed: a terminal slow to flush would otherwise stretch
+/// every animation out behind it. Slept in slices with the queue checked
+/// between, for the same reason `io/watch.zig` slices its interval - a
+/// keystroke arriving mid-animation should wait a slice, not a whole frame.
+fn pace(io: std.Io, queue: *event.Queue, ms: i64) f32 {
+    const slice: i64 = 4;
+    const start: std.Io.Timestamp = .now(io, .awake);
+    var slept: i64 = 0;
+    while (slept < ms) : (slept += slice) {
+        std.Io.sleep(io, .fromMilliseconds(@min(slice, ms - slept)), .awake) catch break;
+        if (queue.pending()) break;
+    }
+    const ns = start.durationTo(.now(io, .awake)).nanoseconds;
+    return @as(f32, @floatFromInt(ns)) / std.time.ns_per_ms;
+}
+
+/// A drained batch, applied. Shared by the two waits above so that pacing an
+/// animation cannot drift from blocking on a keystroke.
+fn applyEvents(
+    app: *App,
+    vx: *vaxis.Vaxis,
+    w: *std.Io.Writer,
+    gpa: Allocator,
+    ws: *tty_mod.Winsize,
+    events: []const event.Event,
+) !void {
+    for (events) |ev| {
+        if (ev == .resize) {
+            ws.* = .{ .cols = ev.resize.cols, .rows = ev.resize.rows, .x_pixel = 0, .y_pixel = 0 };
+            try vx.resize(gpa, w, ws.*);
+        }
+        try app.handle(ev, render.bodyHeight(ws.rows, app.zen));
+    }
+}
+
 /// Hands the terminal to `$EDITOR` and takes it back.
 ///
 /// Order matters in both directions and every step has a failure that looks
@@ -298,7 +355,7 @@ fn frameOf(app: *App, win: vaxis.Window, arena: Allocator) render.Frame {
     return .{ .win = win, .arena = arena, .theme = app.theme, .glyphs = app.glyphs };
 }
 
-fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
+fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
     const frame = metrics.span(.frame);
     defer frame.end();
 
@@ -308,7 +365,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
     // read per frame rather than captured at startup.
     app.width_method = vx.screen.width_method;
 
-    if (app.view()) |v| {
+    if (app.view(body)) |v| {
         var shown = v;
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));

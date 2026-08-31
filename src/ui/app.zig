@@ -30,6 +30,7 @@ const files_mod = @import("files.zig");
 const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
 const keytext = @import("keytext.zig");
+const anim = @import("anim.zig");
 const motion = @import("motion.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
@@ -144,6 +145,14 @@ pub const App = struct {
     prompt: prompt_mod.Prompt = .{},
     finder: search.State = .{},
     notice: Notice = .{},
+    /// The viewport catching up with where it has settled, in screen rows.
+    /// Zero except while a jump is in flight; see `ui/anim.zig`.
+    scroll_anim: anim.Scroll = .{},
+    /// The cursor block travelling to where it belongs. Every motion moves it,
+    /// which is the difference between this and `scroll_anim`: the viewport
+    /// only animates for a jump, because it moves under a step as a side
+    /// effect, but the cursor is what the reader is actually following.
+    cursor_anim: anim.Cursor = .{},
     /// `Tab`: chrome hidden, the body gets the whole pane.
     zen: bool = false,
     /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
@@ -292,16 +301,20 @@ pub const App = struct {
         return null;
     }
 
-    pub fn view(self: *App) ?render.View {
+    pub fn view(self: *App, body: u16) ?render.View {
         const f = self.current() orelse return null;
         const bufs = self.review.buffersFor(f.path());
+        const drawn = self.drawnTop(body);
         return .{
             .file = f,
             .rows = self.rows,
             .file_index = self.file_index,
             .file_count = @intCast(self.files().len),
             .cursor = self.cursor,
-            .scroll = self.scroll,
+            .cursor_drawn = self.drawnCursor(body),
+            .cursor_cell = if (self.cursorCell(body)) |t| self.cursor_anim.cell(t) else null,
+            .scroll = drawn.row,
+            .skip = drawn.skip,
             .col = self.col,
             .fn_names = self.fn_names,
             .total_hunks = self.review.totalHunks(),
@@ -333,12 +346,19 @@ pub const App = struct {
     // -- commands ------------------------------------------------------------
 
     pub fn run(self: *App, cmd: keymap.Command, body: u16) !void {
+        const was_at = self.scroll;
+        const was_in = self.file_index;
+        // Anything that is not itself a jump arrives at once: an animation the
+        // reader has already moved past is latency, not motion. Another jump
+        // is left running, because `anim.Scroll.add` makes the two travel
+        // together rather than queueing - which is what holding `<C-d>` is.
+        if (!cmd.jumps()) self.settleScroll();
         switch (cmd) {
             .quit => self.quit = true,
             .line_down => self.moveTo(self.cursor +| 1),
             .line_up => self.moveTo(self.cursor -| 1),
-            .page_down => self.moveTo(self.rowBelow(self.cursor, @max(1, body / 2), body)),
-            .page_up => self.moveTo(self.rowAbove(self.cursor, @max(1, body / 2), body)),
+            .page_down => self.page(1, body),
+            .page_up => self.page(-1, body),
             // The first *line*, which is what the key says: row 0 is the hunk
             // header, and a cursor parked on chrome points at nothing.
             .top => self.moveTo(self.rows.firstLineRow()),
@@ -396,9 +416,18 @@ pub const App = struct {
             .ask_revert => try self.compose(.send, .{ .ask = self.templates.ask_revert }),
             .ask_test => try self.compose(.send, .{ .ask = self.templates.ask_test }),
             .ask_explain => try self.compose(.send, .{ .ask = self.templates.ask_explain }),
-            .toggle_zen => self.zen = !self.zen,
+            // Both relay out every row under the cursor, so it is placed
+            // rather than walked: zen changes the body's height and wrap
+            // changes what every line is worth in screen rows. Travelling
+            // across a screen that no longer exists draws a path through
+            // nothing (`ui/anim.zig`).
+            .toggle_zen => {
+                self.zen = !self.zen;
+                self.placeCursor();
+            },
             .toggle_wrap => {
                 self.wrap = !self.wrap;
+                self.placeCursor();
                 // Nothing else on screen says which it is until a line is long
                 // enough to show it, and by then the reader has stopped
                 // wondering whether the key did anything.
@@ -414,6 +443,20 @@ pub const App = struct {
             .list_left => self.pageList(-1),
         }
         self.clampScroll(body);
+        // A jump inside one file is motion the eye can follow, so the viewport
+        // catches up rather than teleporting.
+        //
+        // Two things are deliberately not animated. Across files, because the
+        // rows underneath are different rows and sliding between two unrelated
+        // screens is an animation of nothing. And a *step* - `j`, `k`, a word
+        // motion - because the view only moved there as a consequence of the
+        // cursor reaching the edge, and with soft wrap one `j` can be three
+        // screen rows: animating that starts a fresh animation on every
+        // keystroke, and a held `j` spends its life cancelling the last one.
+        if (cmd.jumps() and self.file_index == was_in) self.animateFrom(was_at, body);
+        // Another file is another screen: the cursor has nowhere to travel
+        // from, so it is placed rather than moved.
+        if (self.file_index != was_in) self.placeCursor();
     }
 
     // -- visual select -------------------------------------------------------
@@ -1088,6 +1131,25 @@ pub const App = struct {
         );
     }
 
+    /// `<C-d>` and `<C-u>`: half a screen, and the *screen* is what moves.
+    ///
+    /// Moving only the cursor is what this did before, and it made the first
+    /// press of a page key do nothing visible - the cursor slid down inside a
+    /// stationary view and the text only started moving once it reached the
+    /// bottom margin. Vim moves both by the same amount, so the cursor keeps
+    /// its place on screen and the page turns under it, which is the whole
+    /// point of a page key.
+    fn page(self: *App, dir: i32, body: u16) void {
+        const half = @max(1, body / 2);
+        if (dir > 0) {
+            self.scroll = self.rowBelow(self.scroll, half, body);
+            self.moveTo(self.rowBelow(self.cursor, half, body));
+        } else {
+            self.scroll = self.rowAbove(self.scroll, half, body);
+            self.moveTo(self.rowAbove(self.cursor, half, body));
+        }
+    }
+
     /// The row `screens` screen rows below `from`, and above for the other.
     /// Both move at least one row: a page motion that cannot move because the
     /// line under the cursor fills the pane is a key that does nothing.
@@ -1127,6 +1189,142 @@ pub const App = struct {
             top -= 1;
         }
         self.scroll = top;
+    }
+
+    /// Screen rows between two scroll positions, positive when `to` is below
+    /// `from`. Capped, because the only caller refuses to animate past two
+    /// screens and walking ten thousand rows to find that out is waste.
+    fn screenRowsBetween(self: *App, from: u32, to: u32, body: u16) i32 {
+        const cap: u32 = @as(u32, anim.max_screens) * @as(u32, body) + 1;
+        var acc: u32 = 0;
+        var i = @min(from, to);
+        const end = @max(from, to);
+        while (i < end and acc <= cap) : (i += 1) acc += self.rowHeight(i, body);
+        const d: i32 = @intCast(@min(acc, cap));
+        return if (to >= from) d else -d;
+    }
+
+    /// Starts the viewport catching up, if it moved at all.
+    fn animateFrom(self: *App, was_at: u32, body: u16) void {
+        if (was_at == self.scroll) return;
+        self.scroll_anim.add(self.screenRowsBetween(was_at, self.scroll, body), body);
+    }
+
+    pub fn animating(self: *App, body: u16) bool {
+        if (self.scroll_anim.active()) return true;
+        const target = self.cursorCell(body) orelse return false;
+        return self.cursor_anim.travelling(target);
+    }
+
+    /// One frame of both animations. The viewport moves first, because where
+    /// the cursor belongs on screen depends on where the viewport has got to.
+    pub fn stepAnim(self: *App, dt_ms: f32, body: u16) void {
+        self.scroll_anim.step(dt_ms);
+        if (self.cursorCell(body)) |target| self.cursor_anim.step(target, dt_ms);
+    }
+
+    /// Arrive now. What the loop does when a key arrives mid-flight: an
+    /// animation the reader has already moved past is latency, not motion.
+    pub fn settleScroll(self: *App) void {
+        self.scroll_anim.settle();
+    }
+
+    /// The cursor is somewhere else entirely rather than somewhere further:
+    /// another file, a rebuilt diff, a pane that changed size. There is no
+    /// path between two unrelated screens to draw the block along.
+    pub fn placeCursor(self: *App) void {
+        self.cursor_anim.place();
+    }
+
+    /// A position displaced by the animation: the row `up` screen rows above
+    /// `from`, and how many of that row's screen rows are above the result.
+    /// Negative `up` walks the other way.
+    ///
+    /// A wrapped line is several screen rows, so this is a walk rather than
+    /// arithmetic - and the walk is bounded by the displacement, which
+    /// `anim.Scroll` has already capped at two screens.
+    pub const Top = struct { row: u32, skip: u16 };
+
+    fn displaced(self: *App, from: u32, up: i32, body: u16) Top {
+        if (up == 0) return .{ .row = from, .skip = 0 };
+
+        if (up > 0) {
+            // Drawn above where it settles, which is what scrolling *down*
+            // looks like while the screen catches up.
+            var row = from;
+            var left: u32 = @intCast(up);
+            while (left > 0 and row > 0) {
+                row -= 1;
+                const h = self.rowHeight(row, body);
+                if (h > left) return .{ .row = row, .skip = @intCast(h - left) };
+                left -= h;
+            }
+            return .{ .row = row, .skip = 0 };
+        }
+
+        var row = from;
+        var left: u32 = @intCast(-up);
+        const last = self.rows.len() -| 1;
+        while (left > 0 and row < last) {
+            const h = self.rowHeight(row, body);
+            if (h > left) return .{ .row = row, .skip = @intCast(left) };
+            left -= h;
+            row += 1;
+        }
+        return .{ .row = row, .skip = 0 };
+    }
+
+    /// Where the body is drawn from while the viewport catches up.
+    fn drawnTop(self: *App, body: u16) Top {
+        return self.displaced(self.scroll, self.scroll_anim.rows(), body);
+    }
+
+    /// The cell the cursor belongs on this frame, in body coordinates: the
+    /// screen row it lands on once the rows above it are counted, and the
+    /// column its byte offset falls at once the line is wrapped.
+    ///
+    /// Null when it is not on screen at all, which is the one case with no
+    /// cell to travel to.
+    pub fn cursorCell(self: *App, body: u16) ?anim.Cursor.Cell {
+        const f = self.current() orelse return null;
+        const top = self.drawnTop(body);
+        const row = self.drawnCursor(body);
+        if (row < top.row) return null;
+
+        var y: i32 = -@as(i32, top.skip);
+        var i = top.row;
+        while (i < row) : (i += 1) y += self.rowHeight(i, body);
+
+        const gutter = rows_mod.gutter(f);
+        // A hunk header or a rule has no line to find a column in, but the
+        // cursor is still on it: `j` steps through chrome like any other row.
+        // Parking it at the first text column keeps it visible and keeps it
+        // moving - returning null here blinks it out for a frame and then
+        // teleports it, which is what a held `j` looked like.
+        const li = self.rows.lineAt(row) orelse
+            return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
+        if (li >= f.lines.len()) return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
+
+        const avail = if (self.wrap) self.cols -| gutter else 0;
+        const cell = wrap_mod.locate(f.lines.text[li], avail, self.width_method, self.col);
+        return .{
+            .row = @floatFromInt(y + @as(i32, cell.row)),
+            .col = @floatFromInt(gutter + cell.col),
+        };
+    }
+
+    /// Which row the cursor is *drawn* on while the viewport catches up.
+    ///
+    /// Displaced by the same amount as the viewport, so the cursor holds its
+    /// place on screen and the text slides underneath it - which is what a
+    /// page key does, and what the eye is tracking. Left at its settled row it
+    /// does the opposite: on the first frame the old screen is still showing
+    /// but the cursor is already half a page further down, so it snaps away
+    /// (often off the bottom edge, where it disappears altogether) and then
+    /// crawls back. Text and cursor moving in opposite directions is the one
+    /// thing that reads worse than not animating at all.
+    fn drawnCursor(self: *App, body: u16) u32 {
+        return self.displaced(self.cursor, self.scroll_anim.rows(), body).row;
     }
 
     /// Keeps the cursor inside the body with a margin, and never scrolls past
@@ -1176,7 +1374,11 @@ pub const App = struct {
                     .pending, .none => {},
                 }
             },
+            // Neither of these is motion the reader asked for, so nothing
+            // slides: the screen they were watching is already gone.
             .files_changed => |paths| {
+                self.settleScroll();
+                self.placeCursor();
                 // One place knows what an event owns, so a new owning variant
                 // cannot be freed here and forgotten in `Queue.deinit`.
                 event.Queue.freePayload(self.gpa, .{ .files_changed = paths });
@@ -1190,6 +1392,8 @@ pub const App = struct {
             // here rather than only at the top of the loop is what makes a
             // resize testable without a terminal.
             .resize => |size| {
+                self.settleScroll();
+                self.placeCursor();
                 self.cols = size.cols;
                 self.clampScroll(body);
             },
@@ -1299,6 +1503,7 @@ test {
     _ = prompt_mod;
     _ = render;
     _ = review_mod;
+    _ = anim;
     _ = motion;
     _ = rows_mod;
     _ = search;
@@ -1777,6 +1982,263 @@ test "a charwise selection points the agent at the words, not at a column" {
     try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
 }
 
+// -- the viewport catching up ---------------------------------------------
+
+test "a jump animates and a single row does not" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.scroll_anim.budget_ms = 250;
+
+    // Nothing to animate: the fixture is four rows in a 22-row body, so no
+    // motion in it scrolls at all.
+    try fx.press("j");
+    try testing.expect(!fx.app.animating(body_rows));
+
+    // A jump that does scroll starts the viewport catching up, displaced by
+    // the screen rows it travelled.
+    fx.app.scroll = 0;
+    fx.app.cursor = 3;
+    fx.app.animateFrom(2, body_rows);
+    try testing.expect(fx.app.animating(body_rows));
+    try testing.expectEqual(@as(i32, -2), fx.app.scroll_anim.rows());
+
+    // And it settles on its own.
+    var guard: u32 = 0;
+    while (fx.app.animating(body_rows) and guard < 100) : (guard += 1) fx.app.stepAnim(16, body_rows);
+    try testing.expect(!fx.app.animating(body_rows));
+}
+
+test "stepping is instant and only a jump is animated" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.scroll_anim.budget_ms = 250;
+
+    // A wrapped line makes one `j` worth three screen rows, which is exactly
+    // the case that used to start an animation per keystroke: a held `j` then
+    // spends its life cancelling the last one, which reads as stutter and
+    // costs a frame of input latency per key.
+    fx.files[0].lines.text[1] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+    fx.app.scroll = 0;
+    fx.app.cursor = 1;
+    try fx.app.run(.line_down, 4);
+    try testing.expect(!fx.app.animating(body_rows));
+
+    // The same movement asked for as a jump does animate.
+    fx.app.scroll = 0;
+    fx.app.cursor = 1;
+    try fx.app.run(.page_down, 4);
+    try testing.expect(fx.app.animating(body_rows));
+}
+
+test "the cursor travels for every motion, not only for a jump" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Placed where it belongs the first time it is drawn: there is nowhere to
+    // travel from yet.
+    const first = fx.app.cursorCell(body_rows).?;
+    _ = fx.app.cursor_anim.cell(first);
+    try testing.expect(!fx.app.animating(body_rows));
+
+    // A column motion is a motion: the cursor has ground to cover, and the
+    // viewport - which only animates for a jump - has none.
+    try fx.press("$");
+    try testing.expect(fx.app.animating(body_rows));
+    try testing.expect(!fx.app.scroll_anim.active());
+
+    // And it gets there, a cell at a time.
+    var guard: u32 = 0;
+    while (fx.app.animating(body_rows) and guard < 200) : (guard += 1) fx.app.stepAnim(16, body_rows);
+    try testing.expect(guard > 1);
+    try testing.expectEqual(fx.app.cursorCell(body_rows).?, fx.app.cursor_anim.at.?);
+}
+
+test "a row with no line still has a cell for the cursor to be on" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Row 0 is the hunk header. `j` steps through chrome like any other row,
+    // and a cursor with nowhere to be blinks out for a frame and then
+    // teleports - which is what a held `j` used to look like.
+    fx.app.cursor = 0;
+    const cell = fx.app.cursorCell(body_rows).?;
+    try testing.expectEqual(@as(f32, 0), cell.row);
+    try testing.expectEqual(@as(f32, @floatFromInt(rows_mod.gutter(&fx.files[0]))), cell.col);
+}
+
+test "the cursor keeps its place on screen while the text slides under it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.scroll_anim.budget_ms = 250;
+
+    // Settled, the drawn cursor is the cursor. Far enough from the top that
+    // the walk has room: displaced past the first row it clamps there, and the
+    // gap closes because the screen has run out of file rather than because
+    // anything moved wrongly.
+    fx.app.scroll = 2;
+    fx.app.cursor = 3;
+    try testing.expectEqual(@as(u32, 3), fx.app.drawnCursor(body_rows));
+
+    // Mid-flight, both are displaced by the same amount, so the cursor's
+    // screen position - the gap between them - does not change. Left at its
+    // settled row it would snap half a page away on the first frame and crawl
+    // back, which is the text and the cursor moving opposite ways.
+    fx.app.scroll_anim.offset = 2;
+    const top = fx.app.drawnTop(body_rows);
+    const cur = fx.app.drawnCursor(body_rows);
+    try testing.expectEqual(@as(u32, 0), top.row);
+    try testing.expectEqual(@as(u32, 1), cur);
+    try testing.expectEqual(fx.app.cursor - fx.app.scroll, cur - top.row);
+}
+
+test "a second jump joins the first rather than cancelling it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.scroll_anim.budget_ms = 250;
+    // Tall enough to have somewhere to scroll to: three of the four rows wrap
+    // onto three screen rows each in a narrow pane.
+    for (0..3) |i| fx.files[0].lines.text[i] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+
+    fx.app.scroll = 0;
+    fx.app.cursor = 1;
+    try fx.app.run(.page_down, 4);
+    try testing.expect(fx.app.animating(body_rows));
+    const first = fx.app.scroll_anim.offset;
+
+    // Another jump arriving mid-flight adds to what is left: the reader asked
+    // to be further away, not to wait twice as long.
+    fx.app.scroll = 0;
+    fx.app.cursor = 1;
+    try fx.app.run(.page_down, 4);
+    try testing.expect(fx.app.scroll_anim.offset > first);
+
+    // Anything that is not a jump arrives at once instead.
+    try fx.app.run(.line_down, 4);
+    try testing.expect(!fx.app.animating(body_rows));
+}
+
+test "only the commands that take you somewhere count as jumps" {
+    // Stepping never does, whatever it moves underneath.
+    try testing.expect(!keymap.Command.line_down.jumps());
+    try testing.expect(!keymap.Command.line_up.jumps());
+    try testing.expect(!keymap.Command.word_next.jumps());
+    try testing.expect(!keymap.Command.char_right.jumps());
+    // Nor does anything that is not a motion at all.
+    try testing.expect(!keymap.Command.send_ref.jumps());
+    try testing.expect(!keymap.Command.toggle_wrap.jumps());
+
+    // Asking to be somewhere does.
+    try testing.expect(keymap.Command.page_down.jumps());
+    try testing.expect(keymap.Command.bottom.jumps());
+    try testing.expect(keymap.Command.next_hunk.jumps());
+    try testing.expect(keymap.Command.center.jumps());
+    try testing.expect(keymap.Command.search_next.jumps());
+}
+
+test "the drawn viewport is where the settled one is, once it arrives" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Settled: the row drawn first is the row scrolled to, with nothing of it
+    // above the top of the pane.
+    fx.app.scroll = 2;
+    const settled = fx.app.drawnTop(body_rows);
+    try testing.expectEqual(@as(u32, 2), settled.row);
+    try testing.expectEqual(@as(u16, 0), settled.skip);
+
+    // Mid-flight, drawn two screen rows above it - which on unwrapped lines is
+    // two rows earlier and no partial row.
+    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.scroll_anim.offset = 2;
+    const flying = fx.app.drawnTop(body_rows);
+    try testing.expectEqual(@as(u32, 0), flying.row);
+    try testing.expectEqual(@as(u16, 0), flying.skip);
+
+    // It never walks off the top: displaced further than there are rows above
+    // it, the first row is as far as it goes.
+    fx.app.scroll_anim.offset = 20;
+    try testing.expectEqual(@as(u32, 0), fx.app.drawnTop(body_rows).row);
+}
+
+test "a wrapped row is crossed a screen row at a time, not all at once" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Make row 1 three screen rows tall in a narrow pane.
+    fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+    try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
+
+    // Settled on row 2, displaced by one screen row: the top is still row 1,
+    // with two of its three screen rows above the pane. Stepping by whole
+    // rows could only ever show all of it or none of it.
+    fx.app.scroll = 2;
+    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.scroll_anim.offset = 1;
+    const one = fx.app.drawnTop(body_rows);
+    try testing.expectEqual(@as(u32, 1), one.row);
+    try testing.expectEqual(@as(u16, 2), one.skip);
+
+    // Two rows up, one of them above; three, and the whole row is on screen.
+    fx.app.scroll_anim.offset = 2;
+    try testing.expectEqual(@as(u16, 1), fx.app.drawnTop(body_rows).skip);
+    fx.app.scroll_anim.offset = 3;
+    const three = fx.app.drawnTop(body_rows);
+    try testing.expectEqual(@as(u32, 1), three.row);
+    try testing.expectEqual(@as(u16, 0), three.skip);
+}
+
+test "the distance between two scroll positions is measured in screen rows" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Unwrapped, a row is a screen row and the distance is the row count.
+    try testing.expectEqual(@as(i32, 2), fx.app.screenRowsBetween(1, 3, body_rows));
+    // Backwards is the same distance, the other way.
+    try testing.expectEqual(@as(i32, -2), fx.app.screenRowsBetween(3, 1, body_rows));
+    try testing.expectEqual(@as(i32, 0), fx.app.screenRowsBetween(2, 2, body_rows));
+
+    // Wrapped, the tall row costs what it draws: row 1 is three screen rows.
+    fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+    try testing.expectEqual(@as(i32, 4), fx.app.screenRowsBetween(1, 3, body_rows));
+}
+
+test "a relayout places the cursor rather than walking it across a new screen" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Give the cursor somewhere to have been drawn.
+    _ = fx.app.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
+    try testing.expect(fx.app.cursor_anim.at != null);
+
+    // `zw` changes what every line is worth in screen rows, so the cell the
+    // cursor was on is not a cell on this screen: there is no path between
+    // the two to draw a block along.
+    try fx.press("zw");
+    try testing.expect(fx.app.cursor_anim.at == null);
+
+    // `Tab` changes the body's height, which moves every row under it, and is
+    // the same case.
+    _ = fx.app.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
+    try fx.app.run(.toggle_zen, body_rows);
+    try testing.expect(fx.app.cursor_anim.at == null);
+}
+
+test "crossing into another file arrives rather than sliding" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.scroll_anim.budget_ms = 250;
+
+    // The rows under a new file are different rows; sliding between two
+    // unrelated screens is an animation of nothing.
+    try fx.press("]f");
+    try fx.expectFile(1);
+    try testing.expect(!fx.app.animating(body_rows));
+}
+
 // -- soft wrap ------------------------------------------------------------
 
 test "a line wider than the pane is as many screen rows as it needs" {
@@ -2136,7 +2598,7 @@ test "the popup is available when there is nothing to review" {
 
     // No current file, so `view()` is null and the review branch never runs.
     fx.app.file_index = 99;
-    try testing.expect(fx.app.view() == null);
+    try testing.expect(fx.app.view(body_rows) == null);
 
     try fx.press("?");
     const hv = (try fx.app.help.view(fx.app.mode, fx.app.km.bindings, arena)).?;

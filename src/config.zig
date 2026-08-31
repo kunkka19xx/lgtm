@@ -48,6 +48,18 @@ pub const Ui = struct {
     /// designed for is a split one, and a review that hides the end of a line
     /// is a review of the part that fit (SPEC.md 3).
     wrap: bool = true,
+    /// The longest a scroll may take to arrive, in milliseconds. A short jump
+    /// finishes sooner: it travels at one screen row per frame, which is the
+    /// finest a cell grid can draw, and runs out of rows. Zero is the old
+    /// behaviour, where the viewport teleports. One key rather than a flag and
+    /// a duration: they would be the same decision spelled twice, and `0`
+    /// already says off.
+    scroll_ms: u32 = 250,
+    /// The longest the cursor takes to travel to where a motion put it. Every
+    /// motion moves it, so this is the one the reader feels most; a short hop
+    /// arrives sooner because it moves a cell a frame and runs out of cells.
+    /// Zero puts it there at once.
+    cursor_ms: u32 = 80,
 };
 
 /// Navigation policy: motions that could reasonably go either way are settings
@@ -196,6 +208,20 @@ pub const Loader = struct {
             .ui => {
                 if (std.mem.eql(u8, key, "wrap")) {
                     self.cfg.ui.wrap = self.wantBool(src, line, key, value) orelse return;
+                } else if (std.mem.eql(u8, key, "scroll_ms")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    if (n < 0 or n > 1000) {
+                        self.note(src, line, "ui.scroll_ms must be between 0 and 1000", .{});
+                        return;
+                    }
+                    self.cfg.ui.scroll_ms = @intCast(n);
+                } else if (std.mem.eql(u8, key, "cursor_ms")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    if (n < 0 or n > 1000) {
+                        self.note(src, line, "ui.cursor_ms must be between 0 and 1000", .{});
+                        return;
+                    }
+                    self.cfg.ui.cursor_ms = @intCast(n);
                 } else if (std.mem.eql(u8, key, "icons")) {
                     const s = self.wantString(src, line, key, value) orelse return;
                     self.cfg.ui.icons = std.meta.stringToEnum(Icons, s) orelse {

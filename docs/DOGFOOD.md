@@ -35,6 +35,14 @@ has actually settled it.
       real layout has three, every session needs `--pane %N`. This is the most
       likely daily annoyance in the whole tool.
 - [ ] **80 columns.** Tested there, but a real split pane is the judge.
+- [ ] **The travelling cursor.** Every motion moves it a cell at a time. Does
+      it help you keep track of where you went, or is it a block sliding around
+      in the way? `ui.cursor_ms = 0` is the answer if it is the second.
+- [ ] **Smooth scrolling.** One screen row per frame, 250 ms budget for a long
+      jump. Too slow, too fast, or in the
+      way? `ui.scroll_ms` tunes it and `0` turns it off - if that gets set to
+      zero in the first hour, the default is wrong. Watch it over SSH too: an
+      animated frame repaints the whole body.
 - [ ] **The character cursor.** `h l w b e`, `f t F T`, and `v` for a charwise
       selection. Does pointing at a word actually beat pointing at a line when
       the agent reads the line either way? And do the three moved keys (`e`,
