@@ -31,11 +31,10 @@ pub const Help = struct {
     /// narrowing points at a different row than the one the user was looking
     /// at, so every narrowing resets it.
     index: usize = 0,
-    /// The grid the last frame actually drew, written back by the renderer.
-    /// Sideways movement is by a whole column, and only the renderer knows how
-    /// tall a column came out - it depends on the pane, the filter and the
-    /// widest description.
-    layout: render.HelpLayout = .{},
+    /// The tab the list is narrowed to. Ignored while the filter has text in
+    /// it: `shown` is what the list is actually drawn from, and finding a key
+    /// must not require knowing which tab it was filed under.
+    group: keymap.Group = .move,
     /// The mode `?` was opened from. It is both the mode to return to and the
     /// mode whose keys the overlay lists: the overlay describes the review,
     /// not itself.
@@ -45,6 +44,17 @@ pub const Help = struct {
         self.from = from;
         self.filter.start(.help_filter);
         self.index = 0;
+        // Reopening lands on the first tab rather than wherever the last
+        // reader left it: `?` is asked in order to start looking, and a
+        // remembered tab makes the same key show a different screen.
+        self.group = .move;
+    }
+
+    /// The group the list is narrowed to this frame, or null for all of them.
+    /// A filter cuts across every tab, so the tabs stop narrowing while one
+    /// is being typed.
+    pub fn shown(self: Help) ?keymap.Group {
+        return if (self.filter.text().len == 0) self.group else null;
     }
 
     pub fn close(self: *Help) void {
@@ -69,7 +79,7 @@ pub const Help = struct {
     /// One row, counted against the same filter the popup is drawn from, so the
     /// selection can never sit past the end of what is on screen.
     pub fn move(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
-        const n = keytext.helpCount(bindings, self.from, self.filter.text());
+        const n = keytext.helpCount(bindings, self.from, self.shown(), self.filter.text());
         if (n == 0) {
             self.index = 0;
             return;
@@ -83,24 +93,17 @@ pub const Help = struct {
         self.index = @intCast(@mod(@as(i64, @intCast(self.index)) + delta, len));
     }
 
-    /// The same step, stopping at the ends. What a page wants: wrapping a
-    /// screenful lands nowhere the eye was looking.
-    fn moveClamped(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
-        const n = keytext.helpCount(bindings, self.from, self.filter.text());
-        if (n == 0) {
-            self.index = 0;
-            return;
-        }
-        const i = @as(i64, @intCast(self.index)) + delta;
-        self.index = if (i < 0) 0 else if (i >= @as(i64, @intCast(n))) n - 1 else @intCast(i);
-    }
-
-    /// One column sideways. Clamping rather than wrapping at the edges: the
-    /// last column is usually short, so wrapping would land on a different row
-    /// than the one the eye came from.
-    pub fn moveColumn(self: *Help, bindings: []const keymap.Binding, delta: i32) void {
-        const per: i32 = @intCast(@min(@max(self.layout.per, 1), 1000));
-        self.moveClamped(bindings, delta * per);
+    /// Sideways is the next tab, wrapping.
+    ///
+    /// It used to be one column of the grid, which has been one column wide
+    /// since the two-column layout was rejected for pushing the box past most
+    /// panes - so `H` and `L` were bound to a movement that could not happen,
+    /// and the footer advertised them anyway. The tabs give them something to
+    /// do, and cost no new key and no row of the box.
+    pub fn moveGroup(self: *Help, delta: i32) void {
+        self.group = self.group.step(delta);
+        // A different tab is a different list: start at the top of it.
+        self.index = 0;
     }
 
     /// The popup's contents for one frame, or null when it is not open. Needs
@@ -115,23 +118,27 @@ pub const Help = struct {
         if (mode != .help) return null;
         const filter = self.filter.text();
         return .{
-            .entries = try keytext.helpEntries(bindings, self.from, filter, arena),
+            .entries = try keytext.helpEntries(bindings, self.from, self.shown(), filter, arena),
             .query = filter,
             .index = self.index,
             // The popup's own keys, along the bottom border: those live in
             // `.help`, not in the mode being described.
-            .keys = try keytext.helpEntries(bindings, .help, "", arena),
-            .layout = &self.layout,
+            .keys = try keytext.helpEntries(bindings, .help, null, "", arena),
+            // The strip marks the tab the list came from. Null while a filter
+            // is being typed, which is what says it is searching all of them.
+            .group = self.shown(),
         };
     }
 };
 
 const testing = std.testing;
 
-test "the selection wraps, but a page stops at the ends" {
+test "the selection wraps within the tab it is drawn from" {
     var h: Help = .{};
     h.open(.normal);
-    const n = keytext.helpCount(keymap.default_bindings, .normal, "");
+    // Counted against the tab the list is actually showing, which is what
+    // the selection is clamped against.
+    const n = keytext.helpCount(keymap.default_bindings, .normal, h.shown(), "");
 
     // Up from the first row lands on the last: Tab and Shift-Tab are a cycle,
     // not two keys that stop working at the edges.
@@ -139,13 +146,6 @@ test "the selection wraps, but a page stops at the ends" {
     try testing.expectEqual(n - 1, h.index);
     h.move(keymap.default_bindings, 1);
     try testing.expectEqual(@as(usize, 0), h.index);
-
-    // A page is clamped, because wrapping a screenful lands nowhere the eye
-    // was looking.
-    h.moveColumn(keymap.default_bindings, -1);
-    try testing.expectEqual(@as(usize, 0), h.index);
-    h.moveColumn(keymap.default_bindings, 1000);
-    try testing.expectEqual(n - 1, h.index);
 }
 
 test "a filter that matches nothing leaves nothing to select" {
@@ -154,24 +154,56 @@ test "a filter that matches nothing leaves nothing to select" {
     _ = h.feed(.{ .codepoint = 'z', .mods = .{} });
     _ = h.feed(.{ .codepoint = 'z', .mods = .{} });
     _ = h.feed(.{ .codepoint = 'q', .mods = .{} });
-    try testing.expectEqual(@as(usize, 0), keytext.helpCount(keymap.default_bindings, .normal, h.filter.text()));
+    try testing.expectEqual(@as(usize, 0), keytext.helpCount(keymap.default_bindings, .normal, null, h.filter.text()));
     h.move(keymap.default_bindings, 1);
     try testing.expectEqual(@as(usize, 0), h.index);
 }
 
-test "a column step is a whole column of the grid the frame drew" {
+test "sideways is the next tab, and it wraps" {
     var h: Help = .{};
     h.open(.normal);
-    h.layout = .{ .cols = 2, .per = 11 };
-    h.moveColumn(keymap.default_bindings, 1);
-    try testing.expectEqual(@as(usize, 11), h.index);
+    try testing.expectEqual(keymap.Group.move, h.group);
 
-    // A layout the renderer has not written yet moves by one row rather than
-    // by zero - a first keypress that does nothing reads as a dropped key.
-    var fresh: Help = .{};
-    fresh.open(.normal);
-    fresh.moveColumn(keymap.default_bindings, 1);
-    try testing.expectEqual(@as(usize, 1), fresh.index);
+    h.moveGroup(1);
+    try testing.expectEqual(keymap.Group.jump, h.group);
+
+    // A different tab is a different list, so the selection starts at its top
+    // rather than pointing into the middle of a list that is no longer there.
+    h.index = 5;
+    h.moveGroup(1);
+    try testing.expectEqual(@as(usize, 0), h.index);
+
+    // Back past the first lands on the last: the tabs are a cycle, the way
+    // `]h` and `[h` already are.
+    h.group = .move;
+    h.moveGroup(-1);
+    try testing.expectEqual(keymap.Group.view, h.group);
+    h.moveGroup(1);
+    try testing.expectEqual(keymap.Group.move, h.group);
+}
+
+test "a tab narrows the list, and a filter cuts across every tab" {
+    var h: Help = .{};
+    h.open(.normal);
+    const bindings = keymap.default_bindings;
+
+    // Narrowed to one tab, the list is a fraction of the whole.
+    const all = keytext.helpCount(bindings, .normal, null, "");
+    const moves = keytext.helpCount(bindings, .normal, .move, "");
+    try testing.expect(moves > 0);
+    try testing.expect(moves < all);
+
+    // Every entry lands in exactly one tab, so the tabs partition the list
+    // rather than sampling it: nothing is listed twice and nothing is lost.
+    var sum: usize = 0;
+    for (std.enums.values(keymap.Group)) |g| sum += keytext.helpCount(bindings, .normal, g, "");
+    try testing.expectEqual(all, sum);
+
+    // Empty filter follows the tab; any filter at all searches all of them,
+    // because finding a key must not require knowing where it was filed.
+    try testing.expectEqual(keymap.Group.move, h.shown().?);
+    _ = h.filter.feed(.{ .codepoint = 'f', .mods = .{} });
+    try testing.expect(h.shown() == null);
 }
 
 test "backspacing past the start closes, and typing does not" {

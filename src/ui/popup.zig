@@ -19,6 +19,7 @@ const Frame = frame_mod.Frame;
 const HelpView = frame_mod.HelpView;
 const devicon = @import("devicon.zig");
 const keytext = @import("keytext.zig");
+const keymap = @import("keymap.zig");
 const prompt_mod = @import("prompt.zig");
 
 /// A byte range inside a border label.
@@ -37,8 +38,8 @@ const Footer = struct {
 /// sit inside the text so they can be repainted in the accent.
 ///
 /// Keys sharing a description collapse into one label - four bindings become
-/// `H J K L move`, because four rows each saying "move" is the verbose
-/// spelling of the same thing. `tail` is for the keys that are not bindings:
+/// `J K move  H L tab`, because four rows each saying the same word is the
+/// verbose spelling of it. `tail` is for the keys that are not bindings:
 /// `<CR>` and `<Esc>` are `prompt.zig`'s submit and cancel, the same two every
 /// prompt has, so they are passed in rather than generated.
 fn footerOf(
@@ -77,6 +78,28 @@ fn footerOf(
     return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
 }
 
+/// The tab strip, let into the *top* border with the active tab marked so it
+/// can be repainted in the accent.
+///
+/// Into the border rather than onto a row of its own: a box already has a top
+/// edge, and a popup in an 80x24 pane cannot spend one of its rows on labels
+/// for its rows. Null highlights nothing, which is what a filter does - it
+/// searches every tab, so none of them is the one being shown.
+fn tabsOf(arena: Allocator, active: ?keymap.Group) Allocator.Error!Footer {
+    var out: std.ArrayList(u8) = .empty;
+    var spans: std.ArrayList(Span) = .empty;
+    try out.appendSlice(arena, " ");
+    for (std.enums.values(keymap.Group)) |g| {
+        const label = g.label();
+        if (active) |a| {
+            if (g == a) try spans.append(arena, .{ .start = out.items.len, .len = label.len });
+        }
+        try out.appendSlice(arena, label);
+        try out.appendSlice(arena, "  ");
+    }
+    return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
+}
+
 /// What closing an overlay is bound to, in both of them.
 const close_key: keytext.HelpEntry = .{ .keys = "<Esc>", .desc = "close" };
 
@@ -101,7 +124,7 @@ fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []con
 /// returns a run of spaces as wide as the box - which the list then uses to
 /// paint a selected row. Shared by both overlays, because a box is a box: only
 /// what goes inside it differs.
-fn chromeOf(f: Frame, box: Box, title: []const u8, foot: Footer, footer_width: u16) Allocator.Error![]u8 {
+fn chromeOf(f: Frame, box: Box, title: Footer, foot: Footer, title_width: u16, footer_width: u16) Allocator.Error![]u8 {
     const blank = try f.arena.alloc(u8, box.width);
     @memset(blank, ' ');
     var r: u16 = 0;
@@ -109,7 +132,7 @@ fn chromeOf(f: Frame, box: Box, title: []const u8, foot: Footer, footer_width: u
 
     const border = f.theme.popup_border;
     const inner = box.content + 2;
-    f.put(box.top, box.col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title, inner), border);
+    f.put(box.top, box.col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title.text, inner), border);
     f.put(box.top + box.height - 1, box.col, try borderLine(f, f.glyphs.box_bl, f.glyphs.box_br, foot.text, inner), border);
     // `borderLine` lays the label after a corner and one rule glyph, so the
     // label starts two columns in. Key names are ASCII, so a byte offset into
@@ -117,6 +140,11 @@ fn chromeOf(f: Frame, box: Box, title: []const u8, foot: Footer, footer_width: u
     if (footer_width <= inner) {
         for (foot.keys) |sp| {
             f.put(box.top + box.height - 1, box.col + 2 + @as(u16, @intCast(sp.start)), foot.text[sp.start..][0..sp.len], f.theme.accent);
+        }
+    }
+    if (title_width <= inner) {
+        for (title.keys) |sp| {
+            f.put(box.top, box.col + 2 + @as(u16, @intCast(sp.start)), title.text[sp.start..][0..sp.len], f.theme.accent);
         }
     }
     var body_row: u16 = 1;
@@ -241,21 +269,20 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
         m.desc = @max(m.desc, f.win.gwidth(e.desc));
     }
 
-    const title = " keys ";
+    const title = try tabsOf(f.arena, v.group);
     // The popup's own keys, along the bottom with the filter hint. `<Esc>` is
     // `prompt.zig`'s hardcoded cancel rather than a binding, which is why that
     // one is written out and the rest are generated.
     const foot = try footerOf(f.arena, v.keys, &.{close_key});
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
-    m.title = f.win.gwidth(title);
+    m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
 
     const box = fit(m, v.index, .{ .width = f.width(), .top = top, .height = height }) orelse return;
-    if (v.layout) |hl| hl.* = .{ .cols = box.cols, .per = box.per };
 
     const text_col = box.col + 2;
     const sel = @min(v.index, entries.len -| 1);
-    const blank = try chromeOf(f, box, title, foot, m.footer);
+    const blank = try chromeOf(f, box, title, foot, m.title, m.footer);
 
     f.put(box.top + 1, text_col, query, f.theme.prompt);
 
@@ -413,13 +440,15 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         m.desc = @max(m.desc, countsWidth(e));
     }
 
-    const title = " files ";
+    // No tabs: the file list is one list. A `Footer` with no marked span
+    // is a plain label, which is what the shared chrome wants.
+    const title: Footer = .{ .text = " files ", .keys = &.{} };
     const foot = try footerOf(f.arena, v.keys, &.{
         .{ .keys = "<CR>", .desc = "open" },
         close_key,
     });
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
-    m.title = f.win.gwidth(title);
+    m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
 
     const box = fit(m, v.index, .{ .width = f.width(), .top = top, .height = height }) orelse return;
@@ -427,7 +456,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
 
     const text_col = box.col + 2;
     const sel = @min(v.index, entries.len -| 1);
-    const blank = try chromeOf(f, box, title, foot, m.footer);
+    const blank = try chromeOf(f, box, title, foot, m.title, m.footer);
 
     f.put(box.top + 1, text_col, query, f.theme.prompt);
 

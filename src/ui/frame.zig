@@ -23,6 +23,7 @@ const event = @import("../core/event.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
+const keymap = @import("keymap.zig");
 const rows_mod = @import("rows.zig");
 const theme_mod = @import("theme.zig");
 const anim = @import("anim.zig");
@@ -275,9 +276,10 @@ pub const HelpView = struct {
     /// The popup's own keys, drawn along its bottom border. Generated like
     /// every other row, so remapping the navigation relabels the box.
     keys: []const keytext.HelpEntry = &.{},
-    /// Written by the renderer with the grid it laid out, so the app can move
-    /// the selection by a whole column without duplicating the layout maths.
-    layout: ?*HelpLayout = null,
+    /// The tab the list is narrowed to, drawn as a strip let into the top
+    /// border. Null while a filter is being typed, which is what says the
+    /// filter is searching every tab rather than this one.
+    group: ?keymap.Group = null,
 };
 
 /// One row of the `F` overlay: a changed file, as the reader picks it out.

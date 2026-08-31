@@ -168,10 +168,45 @@ pub const Chord = struct {
     }
 };
 
+/// Which tab of the `?` overlay a binding is listed under.
+///
+/// Five, and no more, for two reasons. The strip is drawn into the top border
+/// of a box that has to fit an 80-column pane, and a reader hunting for a key
+/// already knows which of these five things they are trying to do - so a
+/// sixth tab would cost a column and answer a question nobody asks. The
+/// filter cuts across all of them, because *finding* a key must not require
+/// knowing which tab it was filed under.
+pub const Group = enum {
+    move,
+    jump,
+    send,
+    find,
+    view,
+
+    pub const count = @typeInfo(Group).@"enum".fields.len;
+
+    /// The tab label. The tag itself: a second spelling would be one more
+    /// thing to keep in step for no gain.
+    pub fn label(self: Group) []const u8 {
+        return @tagName(self);
+    }
+
+    /// The next tab along, wrapping. `H`/`L` are a cycle, the way `]h`/`[h`
+    /// already are.
+    pub fn step(self: Group, delta: i32) Group {
+        const n: i64 = @intCast(count);
+        return @enumFromInt(@mod(@as(i64, @intFromEnum(self)) + delta, n));
+    }
+};
+
 pub const Binding = struct {
     chords: []const Chord,
     command: Command,
     modes: Modes = Modes.both,
+    /// Which `?` tab it appears under. The overlay's own navigation keys are
+    /// drawn in the footer rather than the list, so their group is never read
+    /// and the default costs nothing.
+    group: Group = .view,
     /// The word the status-line strip puts after the keys - "move", "hunk",
     /// "quit". A label rather than the finished text, so the strip renders the
     /// keys from the chords and cannot advertise a key the user has remapped
@@ -221,65 +256,65 @@ pub const leader: Chord = c(' ');
 /// The v0.1 set. Only bindings that do something are listed: a hint strip that
 /// advertises keys the build does not implement is worse than a shorter one.
 pub const default_bindings: []const Binding = &.{
-    .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down a line" },
-    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "up a line" },
-    .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "down half a page" },
-    .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page" },
-    .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line" },
-    .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
-    .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left a character" },
-    .{ .chords = &.{c('l')}, .command = .char_right, .desc = "right a character" },
-    .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next word" },
-    .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "previous word" },
-    .{ .chords = &.{c('e')}, .command = .word_end, .desc = "end of word" },
-    .{ .chords = &.{c('W')}, .command = .big_word_next, .desc = "next WORD - only blanks separate" },
-    .{ .chords = &.{c('B')}, .command = .big_word_prev, .desc = "previous WORD" },
-    .{ .chords = &.{c('E')}, .command = .big_word_end, .desc = "end of WORD" },
-    .{ .chords = &.{c('0')}, .command = .line_start, .desc = "first column" },
-    .{ .chords = &.{c('$')}, .command = .line_end, .desc = "last column" },
-    .{ .chords = &.{c('^')}, .command = .first_non_blank, .desc = "first non-blank column" },
-    .{ .chords = &.{c('f')}, .command = .find_char, .desc = "to the next <char> on this line" },
-    .{ .chords = &.{c('t')}, .command = .till_char, .desc = "before the next <char>" },
-    .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "back to the previous <char>" },
-    .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "back to after the previous <char>" },
-    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T" },
-    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat it backwards" },
-    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)" },
-    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
-    .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk },
-    .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk },
-    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .desc = "next file (wraps)" },
-    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)" },
-    .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file },
-    .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file },
-    .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line" },
-    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent" },
-    .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference" },
-    .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines" },
-    .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?" },
-    .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest" },
-    .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this" },
-    .{ .chords = &.{c('x')}, .command = .ask_explain, .desc = "ask: explain what this does" },
-    .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review" },
-    .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match" },
-    .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match" },
-    .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select" },
-    .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select" },
-    .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select" },
-    .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR" },
-    .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
-    .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines" },
-    .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)" },
+    .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down a line", .group = .move },
+    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "up a line", .group = .move },
+    .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "down half a page", .group = .move },
+    .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page", .group = .move },
+    .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line", .group = .move },
+    .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line", .group = .move },
+    .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left a character", .group = .move },
+    .{ .chords = &.{c('l')}, .command = .char_right, .desc = "right a character", .group = .move },
+    .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next word", .group = .move },
+    .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "previous word", .group = .move },
+    .{ .chords = &.{c('e')}, .command = .word_end, .desc = "end of word", .group = .move },
+    .{ .chords = &.{c('W')}, .command = .big_word_next, .desc = "next WORD - only blanks separate", .group = .move },
+    .{ .chords = &.{c('B')}, .command = .big_word_prev, .desc = "previous WORD", .group = .move },
+    .{ .chords = &.{c('E')}, .command = .big_word_end, .desc = "end of WORD", .group = .move },
+    .{ .chords = &.{c('0')}, .command = .line_start, .desc = "first column", .group = .move },
+    .{ .chords = &.{c('$')}, .command = .line_end, .desc = "last column", .group = .move },
+    .{ .chords = &.{c('^')}, .command = .first_non_blank, .desc = "first non-blank column", .group = .move },
+    .{ .chords = &.{c('f')}, .command = .find_char, .desc = "to the next <char> on this line", .group = .move },
+    .{ .chords = &.{c('t')}, .command = .till_char, .desc = "before the next <char>", .group = .move },
+    .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "back to the previous <char>", .group = .move },
+    .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "back to after the previous <char>", .group = .move },
+    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T", .group = .move },
+    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat it backwards", .group = .move },
+    .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)", .group = .jump },
+    .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)", .group = .jump },
+    .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .group = .jump },
+    .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .group = .jump },
+    .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .desc = "next file (wraps)", .group = .jump },
+    .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)", .group = .jump },
+    .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .group = .jump },
+    .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .group = .jump },
+    .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line", .group = .move },
+    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent", .group = .send },
+    .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference", .group = .send },
+    .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines", .group = .send },
+    .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?", .group = .send },
+    .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest", .group = .send },
+    .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this", .group = .send },
+    .{ .chords = &.{c('x')}, .command = .ask_explain, .desc = "ask: explain what this does", .group = .send },
+    .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
+    .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match", .group = .find },
+    .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match", .group = .find },
+    .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select", .group = .send },
+    .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select", .group = .send },
+    .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select", .group = .send },
+    .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR", .group = .view },
+    .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
+    .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
+    .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)", .group = .view },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
     // tmux *root* table and forwards them only to processes matching its vim
     // pattern, which `lgtm` does not match - so under a very common config
     // `<C-l>` never arrived and reloading was unreachable. `<C-r>` is the
     // redo/reload key everywhere else and nothing takes it.
-    .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff" },
-    .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files" },
+    .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff", .group = .view },
+    .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files", .group = .find },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
-    .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help" },
+    .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help", .group = .view },
     // Inside the popup, and arrows first: a Ctrl chord is the one thing a
     // multiplexer takes before the application sees it. vim-tmux-navigator
     // binds C-h/C-j/C-k/C-l at the tmux *root* table and forwards them only to
@@ -290,12 +325,16 @@ pub const default_bindings: []const Binding = &.{
     // Shifted `HJKL`: vim's own motions, and the shifted pair is free where the
     // Ctrl one is not - a multiplexer binds `C-hjkl`, not `H`. Losing capitals
     // from the filter costs nothing, because matching is case-insensitive.
-    // One shared description, which is what collapses them to `H J K L move`
-    // in the footer instead of four rows of chrome.
-    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.lists, .desc = "move" },
+    // A shared description collapses keys into one footer label, which is what
+    // turns four rows of chrome into `J K move  H L tab`. Sideways is listed
+    // after, and separately, because it no longer does the same thing as up
+    // and down: in the `?` overlay it changes tab, and in the file list it is
+    // still a page of the grid. One word for both - the file list has one tab
+    // and so never moves, which is the honest way to say "nothing here".
     .{ .chords = &.{c('J')}, .command = .list_down, .modes = Modes.lists, .desc = "move" },
     .{ .chords = &.{c('K')}, .command = .list_up, .modes = Modes.lists, .desc = "move" },
-    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.lists, .desc = "move" },
+    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.lists, .desc = "tab" },
+    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.lists, .desc = "tab" },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
     .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.lists },

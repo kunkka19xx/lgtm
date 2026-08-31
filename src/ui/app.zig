@@ -556,7 +556,7 @@ pub const App = struct {
 
     fn pageList(self: *App, delta: i32) void {
         switch (self.mode) {
-            .help => self.help.moveColumn(self.km.bindings, delta),
+            .help => self.help.moveGroup(delta),
             .finder => self.file_list.movePage(self.review.files(), delta),
             else => {},
         }
@@ -2549,19 +2549,21 @@ test "every key the popup advertises reaches its command" {
         try testing.expectEqual(2 - i, fx.app.help.index);
     }
 
-    // Sideways moves by a whole column of the grid the last frame drew, which
-    // the app knows only because the renderer wrote it back.
-    fx.app.help.layout = .{ .cols = 2, .per = 11 };
-    fx.app.help.index = 0;
+    // Sideways is the next tab. It used to be a column of the grid, which has
+    // been one column wide since the two-column layout was rejected - so both
+    // keys were bound to a movement that could not happen.
     for ([_][]const u8{ "<Right>", "L" }) |k| {
-        fx.app.help.index = 0;
+        fx.app.help.group = .move;
+        fx.app.help.index = 5;
         try fx.press(k);
-        try testing.expectEqual(@as(usize, 11), fx.app.help.index);
+        try testing.expectEqual(keymap.Group.jump, fx.app.help.group);
+        // A different tab is a different list: start at the top of it.
+        try testing.expectEqual(@as(usize, 0), fx.app.help.index);
     }
     for ([_][]const u8{ "<Left>", "H" }) |k| {
-        fx.app.help.index = 11;
+        fx.app.help.group = .jump;
         try fx.press(k);
-        try testing.expectEqual(@as(usize, 0), fx.app.help.index);
+        try testing.expectEqual(keymap.Group.move, fx.app.help.group);
     }
 }
 
@@ -2570,14 +2572,14 @@ test "typing narrows the list the popup is showing" {
     defer fx.deinit();
 
     try fx.press("?");
-    const all = keytext.helpCount(fx.app.km.bindings, .normal, "");
+    const all = keytext.helpCount(fx.app.km.bindings, .normal, null, "");
     try fx.press("<Down>");
     try testing.expect(fx.app.help.index > 0);
 
     // The keys went into the filter rather than to dispatch, so the list is
     // shorter and the selection is back at the top of the new one.
     try fx.typeIn("file");
-    const narrowed = keytext.helpCount(fx.app.km.bindings, .normal, fx.app.help.filter.text());
+    const narrowed = keytext.helpCount(fx.app.km.bindings, .normal, null, fx.app.help.filter.text());
     try testing.expect(narrowed > 0);
     try testing.expect(narrowed < all);
     try testing.expectEqual(@as(usize, 0), fx.app.help.index);

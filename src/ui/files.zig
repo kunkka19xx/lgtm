@@ -121,7 +121,7 @@ pub const Files = struct {
             .entries = try entries(files, current, filter, arena),
             .query = filter,
             .index = self.index,
-            .keys = try keytext.helpEntries(bindings, .finder, "", arena),
+            .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),
             .layout = &self.layout,
         };
     }

@@ -243,8 +243,12 @@ fn keysFor(bindings: []const Binding, cmd: keymap.Command, mode: event.Mode, buf
     return buf[0..n];
 }
 
-fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, tier: fuzzy.Tier } {
+fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8, kbuf: []u8) ?struct { keys: []const u8, desc: []const u8, tier: fuzzy.Tier } {
     if (!b.modes.has(mode)) return null;
+    // A group narrows; null means every group, which is what a filter asks
+    // for - finding a key must not require knowing which tab it is filed
+    // under.
+    if (group) |g| if (b.group != g) return null;
     // An alias carries no description, so the row its command already has is
     // the one its keys were gathered onto.
     const d = b.desc orelse return null;
@@ -259,11 +263,11 @@ fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, filter: []con
 
 /// How many rows the popup will have. Lets the selection be clamped without
 /// laying the list out first.
-pub fn helpCount(bindings: []const Binding, mode: event.Mode, filter: []const u8) usize {
+pub fn helpCount(bindings: []const Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8) usize {
     var n: usize = 0;
     var kbuf: [max_row_keys_bytes]u8 = undefined;
     for (bindings) |b| {
-        if (ranked(bindings, b, mode, filter, &kbuf) != null) n += 1;
+        if (ranked(bindings, b, mode, group, filter, &kbuf) != null) n += 1;
     }
     return n;
 }
@@ -271,6 +275,7 @@ pub fn helpCount(bindings: []const Binding, mode: event.Mode, filter: []const u8
 pub fn helpEntries(
     bindings: []const Binding,
     mode: event.Mode,
+    group: ?keymap.Group,
     filter: []const u8,
     arena: Allocator,
 ) Allocator.Error![]const HelpEntry {
@@ -278,7 +283,7 @@ pub fn helpEntries(
     var loose: std.ArrayList(HelpEntry) = .empty;
     var kbuf: [max_row_keys_bytes]u8 = undefined;
     for (bindings) |b| {
-        const r = ranked(bindings, b, mode, filter, &kbuf) orelse continue;
+        const r = ranked(bindings, b, mode, group, filter, &kbuf) orelse continue;
         const entry: HelpEntry = .{ .keys = try arena.dupe(u8, r.keys), .desc = r.desc };
         // Two tiers rather than a score: a run of the query as typed comes
         // first, scattered letters after. Without this, "file" pulls up
@@ -407,7 +412,7 @@ test "the overlay lists the mode it was opened from, aliases excluded" {
     defer a.deinit();
     const arena = a.allocator();
 
-    const normal = try helpEntries(default_bindings, .normal, "", arena);
+    const normal = try helpEntries(default_bindings, .normal, null, "", arena);
     var saw_quit = false;
     var saw_leader = false;
     for (normal) |e| {
@@ -427,8 +432,8 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     defer a.deinit();
     const arena = a.allocator();
 
-    const all = try helpEntries(default_bindings, .normal, "", arena);
-    const some = try helpEntries(default_bindings, .normal, "file", arena);
+    const all = try helpEntries(default_bindings, .normal, null, "", arena);
+    const some = try helpEntries(default_bindings, .normal, null, "file", arena);
     try testing.expect(some.len < all.len);
     try testing.expect(some.len > 0);
 
@@ -438,29 +443,35 @@ test "the filter narrows the overlay, run matches before scattered ones" {
 
     // The filter reaches the keys too, so the leader bindings are findable by
     // the name a user would type for them.
-    const leader_hits = try helpEntries(default_bindings, .normal, "space", arena);
+    const leader_hits = try helpEntries(default_bindings, .normal, null, "space", arena);
     try testing.expectEqual(@as(usize, 7), leader_hits.len);
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
     for (leader_hits) |e| try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);
 
-    const none = try helpEntries(default_bindings, .normal, "zzzz", arena);
+    const none = try helpEntries(default_bindings, .normal, null, "zzzz", arena);
     try testing.expectEqual(@as(usize, 0), none.len);
 }
 
 test "the popup's own keys collapse to one label in its footer" {
-    // The footer joins runs of entries that share a description, which is what
-    // turns four bindings into `H J K L move`. That only works while they are
-    // adjacent in the table and their descriptions are identical.
+    // The footer joins *runs* of entries that share a description, which is
+    // what turns four bindings into `J K move  H L tab`. That only works
+    // while the ones sharing a word are adjacent in the table, so the pairs
+    // are ordered rather than interleaved.
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
     defer a.deinit();
 
-    const own = try helpEntries(default_bindings, .help, "", a.allocator());
+    const own = try helpEntries(default_bindings, .help, null, "", a.allocator());
     try testing.expectEqual(@as(usize, 4), own.len);
-    for (own) |e| try testing.expectEqualStrings("move", e.desc);
+    try testing.expectEqualStrings("move", own[0].desc);
+    try testing.expectEqualStrings("move", own[1].desc);
+    // Sideways says something different now: it changes tab in the `?`
+    // overlay rather than moving within one list.
+    try testing.expectEqualStrings("tab", own[2].desc);
+    try testing.expectEqualStrings("tab", own[3].desc);
     // Each row carries every spelling of its action; the footer prints only
-    // the first, which is what keeps the label reading `H J K L move`.
-    try testing.expectEqualStrings("H / <Left>", own[0].keys);
+    // the first, which is what keeps the label short.
+    try testing.expectEqualStrings("J / <Down> / <C-n> / <Tab>", own[0].keys);
     try testing.expectEqualStrings("L / <Right>", own[3].keys);
 }
 
@@ -472,8 +483,8 @@ test "the count and the list agree, whatever the filter" {
     const arena = a.allocator();
 
     for ([_][]const u8{ "", "file", "next", "spc", "zzzz", "<C-" }) |q| {
-        const list = try helpEntries(default_bindings, .normal, q, arena);
-        try testing.expectEqual(list.len, helpCount(default_bindings, .normal, q));
+        const list = try helpEntries(default_bindings, .normal, null, q, arena);
+        try testing.expectEqual(list.len, helpCount(default_bindings, .normal, null, q));
     }
 }
 
