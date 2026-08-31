@@ -134,6 +134,7 @@ Beyond that:
 
 **A TUI cannot set the font.** That is the terminal emulator's job, and `lgtm` should not pretend otherwise. What it *can* control:
 
+- **Soft wrap on/off** (`ui.wrap`, `zw`) - whether a line wider than the pane continues on the next screen row or is cut at the edge. **Ships on.** The pane this tool is designed for is a split one, and a diff that hides the end of every long line is a diff of the part that fit. It stays a rendering decision and never reaches the row model: one body row is one line of the file whatever it wraps onto, so motions, selections and references are unchanged, and the reader who wants the shape of the code back gets it with one key.
 - **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph. **All three ship.** `nerd` adds a file-type icon to the `F` list and changes nothing else: a patched font puts glyphs *in*, it does not move a box corner, and a set that also restyled the borders would be a second theme rather than an icon switch. It stays opt-in because the icons are private-use codepoints, which draw as tofu in a font that lacks them.
 - **The icon is coloured by filetype and the name by status** - the oil.nvim and neo-tree arrangement, where the shape and hue together find the Zig file before any name is read. Both colours come from the theme's palette rather than from six hardcoded brand values, so `[theme] name = "gruvbox"` moves the icons with everything else. `Theme.hues` exists for exactly this: a consumer that wants a raw colour rather than one of the semantic slots.
 - **File status is colour, not a letter column.** Green arrived, red left, amber changed, blue moved, grey cannot be read. A column of `A`/`D`/`M` beside the paths is a second alphabet to learn and a column the path does not get; the colour says the same thing in no space at all. Asserted per theme: no two statuses may share a hue, or two statuses are one status.
@@ -172,7 +173,7 @@ Shifted rather than `<C-j>`/`<C-k>`, deliberately. A Ctrl chord is the one thing
 
 Capitals cost nothing here: inside the popup every other key is filter text, and the filter matches case-insensitively, so `J` was never going to be typed as a query.
 
-The same reasoning applies to `<C-l>` for refresh, which that config also swallows. **It is still bound only to a Ctrl chord, so under that config it cannot be reached at all** - it wants a second, chord-free binding before v0.1.
+The same reasoning applied to `<C-l>` for refresh, which that config also swallows, leaving reload unreachable under it. **Resolved by moving the key rather than adding a second one:** reload is `<C-r>`, which is the reload key everywhere else and which nothing in that config takes, so there is one key to learn instead of two.
 
 Typing filters as you go, over the descriptions **and** the rendered keys, so `space` finds the leader bindings. Matching is a subsequence in two tiers - a run of the query as typed sorts above scattered letters, without which "file" surfaces "gg first line" next to "next file" and the list reads as noise.
 
@@ -260,7 +261,7 @@ These live in an `app.Nav` struct, which `config.zig` now owns and fills from `[
 
 `--config <path>` reads one file instead of both. It exists because a config feature that can only be exercised by editing the user's home directory is a config feature nobody tests.
 
-The format is a small TOML subset - tables, `key = value`, strings, booleans, integers, single-line arrays of strings - and nothing outside `config.zig` knows what the format is, so a real TOML dependency can replace the parser later without touching a call site. What is configurable today: `[nav]`, `[ui] icons`, and `[keys]`. Themes, templates (§4.5) and risk rules (§4.6) add their sections when they land.
+The format is a small TOML subset - tables, `key = value`, strings, booleans, integers, single-line arrays of strings - and nothing outside `config.zig` knows what the format is, so a real TOML dependency can replace the parser later without touching a call site. What is configurable today: `[nav]`, `[ui] icons` and `wrap`, and `[keys]`. Themes, templates (§4.5) and risk rules (§4.6) add their sections when they land.
 
 ### 4.9 Config errors must be excellent - shipped
 

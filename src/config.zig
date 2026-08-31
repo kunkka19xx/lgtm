@@ -43,6 +43,11 @@ pub const Icons = enum { unicode, ascii, nerd };
 
 pub const Ui = struct {
     icons: Icons = .unicode,
+    /// Soft wrap. On, a line wider than the pane continues on the next screen
+    /// row; off, it is cut at the edge. Default on because the pane this is
+    /// designed for is a split one, and a review that hides the end of a line
+    /// is a review of the part that fit (SPEC.md 3).
+    wrap: bool = true,
 };
 
 /// Navigation policy: motions that could reasonably go either way are settings
@@ -189,7 +194,9 @@ pub const Loader = struct {
                 } else self.unknownKey(src, line, section, key);
             },
             .ui => {
-                if (std.mem.eql(u8, key, "icons")) {
+                if (std.mem.eql(u8, key, "wrap")) {
+                    self.cfg.ui.wrap = self.wantBool(src, line, key, value) orelse return;
+                } else if (std.mem.eql(u8, key, "icons")) {
                     const s = self.wantString(src, line, key, value) orelse return;
                     self.cfg.ui.icons = std.meta.stringToEnum(Icons, s) orelse {
                         self.note(src, line, "ui.icons must be \"unicode\", \"ascii\" or \"nerd\", not \"{s}\"", .{s});

@@ -254,6 +254,7 @@ rather than re-laying out the screen. Sign column is 1o option B, classic
 - [x] 5c, part: quitting no longer waits out a poll interval. `io/watch.zig` slept the whole 500 ms uninterruptibly and then ran a `git status` before rechecking the stop flag, so `:q` paid for both: 0.64 s measured. The interval is slept in 25 ms slices with the flag checked between, and again before the tick
 - [x] 5c, part: `<Tab>`/`<S-Tab>` step either overlay's selection, and a step wraps at both ends the way `]h`/`[h` already do. A page (`H`/`L`) still clamps: wrapping a screenful lands nowhere the eye was looking. Shift-Tab needed `Chord` to carry a shift bit, which meant `io/input.zig` had to stop reporting shift for anything that types a character - the shift is already in the codepoint, terminals disagree about whether to send it as well, and keeping it would have made `V` match on one terminal and miss on another. `sameChord` compares the new bit, or `<Tab>` and `<S-Tab>` would read as the same binding twice. **The Linux build links no libc**, so `std.c` is unreachable there and `isatty` had to become `std.posix.tcgetattr`, which asks the same question as a syscall. macOS always links libc and so never saw it; the ubuntu leg of CI did, on its first real outing
 - [x] 5c, part: the seven `test { _ = other_module; }` blocks are not ceremony. The render split lost five tests silently - a module nothing references runs nowhere - and the loss showed up only as a test count dropping from 241 to 236. Every module introduced by these splits is referenced from one, and the count is now part of what a split is checked against
+- [x] 5c, part: **long lines soft wrap, and the row model did not move.** A line wider than the pane was cut at the edge with nothing to say so - at 80 columns in a split pane, with markdown or any prose in the review, that is most of what a hunk says. `ui/wrap.zig` answers which bytes of a line go on which screen row: greedy, breaking at the last space that fits and hard-breaking a word longer than the pane, with an ASCII fast path so the common line costs a length comparison. It is one function for two callers - `ui/body.zig` draws the chunks and `ui/app.zig` counts them - because two implementations would disagree the first time one met a double-width glyph, and the disagreement would look like a scroll bug. Wrapping stays a rendering decision: a body row is still one line of the file, so `j`, visual select and the reference are untouched, and `scrollFor` is what learned to count screen rows instead - it takes the heights it needs from a caller, which keeps it arithmetic with a table in its tests. `<C-d>` moves half a screen rather than half the rows on it, `zz` centres by screen rows, and the body draws into a child window so a wrapped line at the bottom is clipped rather than spilling over the rule. `zw` and `ui.wrap` turn it off for reading the shape of the code
 - [ ] `layout_cache` (PERFORMANCE.md 7.2): not built. Frame cost is 0.171 ms against an 8 ms budget, so there is nothing yet for it to save. `lex_cache` **is** in use and is why `lex` costs 0.053 ms across a whole frame
 - [x] `diff_cache`: **rejected with a measurement.** See the re-measurement under the 5a gate below
 
@@ -486,6 +487,11 @@ are `Enter`, `V`, `j`, `a` and `y`, none of which any common tmux config binds.
 ## v0.1 release gate
 
 All phase gates green, plus the success test: the author uses `lgtm` for a week without falling back to `git diff`. Publish the `--profile` numbers.
+
+
+Run as a week of use rather than a checklist, logged in `DOGFOOD.md`: the
+watchlist there is the set of questions the plan cannot answer from the inside,
+and what it records is what decides v0.2.
 
 ## v0.2 outline (useful to other people)
 

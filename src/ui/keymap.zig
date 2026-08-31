@@ -47,6 +47,10 @@ pub const Command = enum {
     ask_explain,
     /// Hide the chrome and give the body the whole pane.
     toggle_zen,
+    /// Soft wrap on and off. A long line either continues on the next screen
+    /// row or is cut at the edge of the pane; which one a reader wants depends
+    /// on whether they are reading prose or the shape of the code.
+    toggle_wrap,
     /// Open the `?` overlay, and close it again from inside.
     help,
     /// Open the file list.
@@ -195,6 +199,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select" },
     .{ .chords = &.{c('e')}, .command = .open_editor, .desc = "open line in $EDITOR" },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
+    .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines" },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)" },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
     // tmux *root* table and forwards them only to processes matching its vim

@@ -25,6 +25,7 @@ const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
 const rows_mod = @import("rows.zig");
 const theme_mod = @import("theme.zig");
+const wrap = @import("wrap.zig");
 
 pub const Theme = theme_mod.Theme;
 pub const Glyphs = theme_mod.Glyphs;
@@ -84,6 +85,11 @@ pub const View = struct {
     query: []const u8 = "",
     /// Chrome hidden, body full-height.
     zen: bool = false,
+    /// Soft wrap: a line wider than the pane continues on the next screen row
+    /// instead of being cut off at the edge. Off draws one line per row and
+    /// clips, which is what a reader who wants the shape of the code back
+    /// asks for with `zw`.
+    wrap: bool = true,
     /// The `?` popup. Non-null floats a box over the body.
     help: ?HelpView = null,
     /// The `F` popup, the same way. Only one overlay is ever open, because
@@ -118,6 +124,12 @@ pub const Frame = struct {
 
     pub fn width(self: Frame) u16 {
         return self.win.width;
+    }
+
+    /// How this screen counts a grapheme's columns. Handed to `ui/wrap.zig` so
+    /// the rows it measures are the rows vaxis draws.
+    pub fn method(self: Frame) wrap.Method {
+        return self.win.screen.width_method;
     }
 
     /// A rule spanning `cols` columns, built from a possibly multi-byte glyph.

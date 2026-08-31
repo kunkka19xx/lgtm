@@ -140,6 +140,7 @@ cursor_line = "on #313244"
 [ui]
 icons = "unicode"          # "ascii" for a terminal without the glyphs,
                            # "nerd" for file-type icons in the F list
+wrap = true                # soft wrap long lines; zw toggles it live
 
 [nav]
 hunk_crosses_files = true  # ]h walks the whole review, not just this file
@@ -149,9 +150,27 @@ scrolloff = 3              # rows kept between the cursor and the edge
 # Command names come from the `?` popup; keys are spelled the way it spells
 # them. A list binds several, of which the first is the one advertised.
 next_file = ["]w", "<Space>nf"]
-refresh   = ["<C-l>", "<Space>r"]
+refresh   = ["<C-r>", "<Space>r"]
 open_editor = []           # unbind: it stops being offered anywhere
 ```
+
+**File-type icons are off until you ask for them.** `icons = "nerd"` puts a
+per-language glyph beside every path in the `F` list, and the default does not,
+because the default cannot know whether your terminal font has the glyphs. It
+needs a [Nerd Font](https://www.nerdfonts.com); if the icons come out as boxes
+or blank gaps, that is the font rather than the setting, and `"unicode"` puts it
+back. Thirty-seven file types have their own icon and everything else gets a
+generic one, so the column never comes out ragged. `nerd` changes nothing else:
+it patches icons in, and leaves the rules and box borders exactly as `unicode`
+draws them.
+
+**Long lines wrap instead of being cut off.** In a split pane most prose and
+plenty of code runs past the edge, and a review of the half that fit is not a
+review. The continuation sits under the gutter with no sign and no line number,
+so a wrapped line still reads as one line: `j` moves a line of the file, a
+selection is still a range of lines, and the reference you send is unchanged.
+`zw` turns it off for as long as you want to compare the shape of the code
+rather than read it, and `wrap = false` makes that the default.
 
 **A bad config never stops `lgtm` starting.** The offending key keeps its
 default, the file and line are reported on the status line, and everything

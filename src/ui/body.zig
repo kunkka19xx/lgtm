@@ -11,12 +11,12 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
-const diff = @import("../core/diff.zig");
 const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
 const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
+const wrap = @import("wrap.zig");
 
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
@@ -24,16 +24,29 @@ const View = frame_mod.View;
 const Theme = frame_mod.Theme;
 const withBg = frame_mod.withBg;
 
+/// Draws the rows from `v.scroll` down, one body row at a time - which is one
+/// screen row only when the row is not wrapped.
+///
+/// Everything is drawn into a child window covering exactly the body, so a
+/// wrapped line at the bottom is clipped by the window rather than spilling
+/// over the rule beneath it.
 pub fn draw(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
+    if (height == 0) return;
+    const bf: Frame = .{
+        .win = f.win.child(.{ .y_off = top, .height = height }),
+        .arena = f.arena,
+        .theme = f.theme,
+        .glyphs = f.glyphs,
+    };
+
     var screen_row: u16 = 0;
-    while (screen_row < height) : (screen_row += 1) {
-        const idx = v.scroll + screen_row;
-        if (idx >= v.rows.len()) break;
+    var idx = v.scroll;
+    while (screen_row < height and idx < v.rows.len()) : (idx += 1) {
         const mark: Mark = .{
             .cursor = idx == v.cursor,
             .selected = if (v.selection) |sel| sel.contains(idx) else false,
         };
-        try drawRow(f, v, top + screen_row, v.rows.items[idx], mark);
+        screen_row += try drawRow(bf, v, screen_row, v.rows.items[idx], mark);
     }
 }
 
@@ -51,7 +64,9 @@ const Mark = struct {
     }
 };
 
-fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, mark: Mark) Allocator.Error!void {
+/// Returns the screen rows the row took: one for chrome, and for a line as
+/// many as its text wrapped onto.
+fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, mark: Mark) Allocator.Error!u16 {
     switch (r) {
         .gap => {
             const cols = if (f.width() > 6) f.width() - 6 else f.width();
@@ -65,8 +80,9 @@ fn drawRow(f: Frame, v: View, row: u16, r: rows_mod.Row, mark: Mark) Allocator.E
             .{v.file.added + v.file.removed},
         ),
         .hunk_header => |hi| try drawHunkHeader(f, v, row, hi),
-        .line => |li| try drawLine(f, v, row, li, mark),
+        .line => |li| return drawLine(f, v, row, li, mark),
     }
+    return 1;
 }
 
 fn drawHunkHeader(f: Frame, v: View, row: u16, hi: u32) Allocator.Error!void {
@@ -103,24 +119,9 @@ fn drawHunkHeader(f: Frame, v: View, row: u16, hi: u32) Allocator.Error!void {
     }
 }
 
-/// Width of the line-number column, from the largest number this file shows.
-fn numWidth(f: *const diff.FileDiff) u16 {
-    var max: u32 = 1;
-    for (f.hunks) |h| {
-        const end = h.new_start + h.new_count;
-        if (end > max) max = end;
-        const old_end = h.old_start + h.old_count;
-        if (old_end > max) max = old_end;
-    }
-    var w: u16 = 1;
-    var n = max;
-    while (n >= 10) : (n /= 10) w += 1;
-    return @max(w, 2);
-}
-
-fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!void {
+fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u16 {
     const lines = v.file.lines;
-    if (li >= lines.len()) return;
+    if (li >= lines.len()) return 1;
     const kind = lines.kind[li];
     const t = f.theme;
     const g = f.glyphs;
@@ -142,23 +143,36 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!vo
         .del => lines.old_no[li],
         else => lines.new_no[li],
     };
-    const nw = numWidth(v.file);
-    const prefix = try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}  ", .{ sign, no, nw });
+    const col = rows_mod.gutter(v.file);
+    const prefix = try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}  ", .{ sign, no, col - 4 });
+
+    // How many screen rows this line needs. Capped at what is left of the
+    // body: a line taller than the pane is drawn until the pane runs out.
+    const rest = f.win.height -| row;
+    const height: u16 = if (v.wrap)
+        wrap.height(lines.text[li], f.width() -| col, f.method(), rest)
+    else
+        1;
 
     // A highlighted row is filled first so it spans the full width, not just
-    // the columns that happen to carry text.
+    // the columns that happen to carry text - and every row of a wrapped line,
+    // or the cursor would look like it stopped halfway down its own line.
     if (bg) |b| {
-        var c: u16 = 0;
-        while (c < f.width()) : (c += 1) {
-            f.win.writeCell(c, row, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
+        var r: u16 = 0;
+        while (r < height) : (r += 1) {
+            var c: u16 = 0;
+            while (c < f.width()) : (c += 1) {
+                f.win.writeCell(c, row + r, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
+            }
         }
     }
 
+    // The sign and the number go on the first row only. A continuation row
+    // repeating them would read as a second line of the file.
     f.put(row, 0, prefix, sign_style);
-    const col = f.win.gwidth(prefix);
-    try drawCode(f, v, row, col, li, kind, bg);
+    try drawCode(f, v, row, col, li, kind, bg, height);
+    return height;
 }
-
 
 /// Draws one line's text, split into styled segments by the lexer's runs.
 ///
@@ -173,6 +187,7 @@ fn drawCode(
     li: u32,
     kind: hunk.LineKind,
     bg: ?vaxis.Color,
+    height: u16,
 ) Allocator.Error!void {
     const lines = v.file.lines;
     const text = lines.text[li];
@@ -216,7 +231,46 @@ fn drawCode(
     if (v.query.len > 0) {
         segs = try markMatches(f.arena, segs, v.query, f.theme.search_match);
     }
-    _ = f.win.print(segs.items, .{ .row_offset = row, .col_offset = col, .wrap = .none });
+
+    if (height <= 1) {
+        _ = f.win.print(segs.items, .{ .row_offset = row, .col_offset = col, .wrap = .none });
+        return;
+    }
+
+    // The chunks come from the same iterator that measured the height, so the
+    // rows drawn and the rows counted cannot disagree.
+    var it: wrap.Iterator = .init(text, f.width() -| col, f.method());
+    var r = row;
+    while (it.next()) |chunk| : (r += 1) {
+        if (r >= row + height) break;
+        const part = try sliceSegs(f.arena, segs.items, chunk);
+        _ = f.win.print(part, .{ .row_offset = r, .col_offset = col, .wrap = .none });
+    }
+}
+
+/// The part of a line's styled segments covering one wrapped chunk.
+///
+/// Segments are contiguous and cover the line exactly, so this is a walk with
+/// a running offset rather than a search - and a chunk boundary inside a
+/// segment splits it, keeping the style on both halves.
+fn sliceSegs(
+    arena: Allocator,
+    segs: []const vaxis.Segment,
+    chunk: wrap.Chunk,
+) Allocator.Error![]vaxis.Segment {
+    var out: std.ArrayList(vaxis.Segment) = .empty;
+    var at: u32 = 0;
+    for (segs) |seg| {
+        const lo = at;
+        const hi = at + @as(u32, @intCast(seg.text.len));
+        at = hi;
+        if (hi <= chunk.start) continue;
+        if (lo >= chunk.end) break;
+        const a = @max(chunk.start, lo) - lo;
+        const b = @min(chunk.end, hi) - lo;
+        if (b > a) try out.append(arena, .{ .text = seg.text[a..b], .style = seg.style });
+    }
+    return out.items;
 }
 
 /// Splits segments so every occurrence of `query` gets `style`.
@@ -341,16 +395,4 @@ test "run lookup finds only the runs overlapping a line" {
     try testing.expectEqual(@as(usize, 0), runsIn(&runs, 100, 200).len);
     // The first run is found without walking off the front.
     try testing.expectEqual(@as(usize, 1), runsIn(&runs, 0, 3).len);
-}
-
-test "line number column widens with the file" {
-    var small: diff.FileDiff = .{ .old_path = "a", .new_path = "a", .status = .modified };
-    var hs = [_]hunk.Hunk{.{ .old_start = 1, .old_count = 3, .new_start = 1, .new_count = 3, .lo = 0, .hi = 3 }};
-    small.hunks = &hs;
-    try testing.expectEqual(@as(u16, 2), numWidth(&small));
-
-    var big: diff.FileDiff = .{ .old_path = "a", .new_path = "a", .status = .modified };
-    var hb = [_]hunk.Hunk{.{ .old_start = 1, .old_count = 1, .new_start = 12000, .new_count = 40, .lo = 0, .hi = 1 }};
-    big.hunks = &hb;
-    try testing.expectEqual(@as(u16, 5), numWidth(&big));
 }

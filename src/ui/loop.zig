@@ -70,6 +70,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     var app = App.init(gpa, io, &queue);
     defer app.deinit();
     app.nav = opts.cfg.nav;
+    app.wrap = opts.cfg.ui.wrap;
     app.km.bindings = opts.cfg.keys;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
@@ -129,6 +130,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // keystroke repainted every cell. That is what a flickering terminal is.
     var ws = term.winsize() catch tty_mod.Winsize{ .cols = 80, .rows = 26, .x_pixel = 0, .y_pixel = 0 };
     try vx.resize(gpa, w, ws);
+    // Resize events keep this in step from here on; the app needs the width
+    // because a wrapped row is more screen rows than one (`ui/wrap.zig`).
+    app.cols = ws.cols;
 
     try app.rediff();
 
@@ -300,6 +304,9 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer) !void {
 
     const arena = app.frame_arena.allocator();
     const win = vx.window();
+    // Only known once the terminal has answered the capability query, so it is
+    // read per frame rather than captured at startup.
+    app.width_method = vx.screen.width_method;
 
     if (app.view()) |v| {
         var shown = v;

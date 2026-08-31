@@ -109,6 +109,29 @@ pub const Rows = struct {
     }
 };
 
+/// Width of the line-number column, from the largest number this file shows.
+pub fn numWidth(f: *const diff.FileDiff) u16 {
+    var max: u32 = 1;
+    for (f.hunks) |h| {
+        const end = h.new_start + h.new_count;
+        if (end > max) max = end;
+        const old_end = h.old_start + h.old_count;
+        if (old_end > max) max = old_end;
+    }
+    var w: u16 = 1;
+    var n = max;
+    while (n >= 10) : (n /= 10) w += 1;
+    return @max(w, 2);
+}
+
+/// Columns before a line's text: the sign, a space, the number, two spaces.
+/// Every sign glyph is one column wide in all three icon sets, so this is
+/// arithmetic rather than a measurement - which is what lets `ui/app.zig` know
+/// how wide a wrapped line is without a terminal to measure on.
+pub fn gutter(f: *const diff.FileDiff) u16 {
+    return numWidth(f) + 4;
+}
+
 /// Builds the rows for one file: each hunk's header, then its lines, with a
 /// rule between hunks but never before the first or after the last.
 pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {

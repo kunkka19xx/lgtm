@@ -119,9 +119,12 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `<Space>nf` / `<Space>pf` | next / previous file, leader aliases |
 | `V` | visual line select |
 | `zz` | center current line |
+| `zw` | soft wrap on / off |
 | `e` | open current line in `$EDITOR` |
 | `q` | quit |
 | `?` | help popup: every key live in the current mode, fuzzy-filtered as you type, `HJKL` or arrows to move: `J`/`K` a row, `H`/`L` a column |
+
+**A line wider than the pane wraps rather than being cut.** The continuation sits under the gutter with no sign and no line number, so a wrapped line still reads as one line of the file, and the cursor highlight covers every row of it. The row model does not change: `j` moves a line of the file, not a row of the screen, and a selection is still a range of lines - wrapping is a rendering decision, which is what makes `zw` free to turn it off (`ui.wrap = false` for the default). Off, a long line is clipped at the edge, which is what a reader comparing the *shape* of two versions wants. Rows are broken at the last space that fits; a word longer than the pane is broken where the columns run out.
 
 No insert mode. No `:` command mode in v1, except `:q`. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
 
@@ -299,7 +302,7 @@ Side-by-side with responsive layout. Stage/unstage hunks (`s` / `u`), revert a s
 |---|---|
 | Scope creeps into "writing an editor" | §4 is a hard boundary. Re-read it before adding anything. |
 | Half-written files produce flickering diffs | 200 ms debounce. If still bad, require file size/mtime to be stable across two ticks. |
-| 80 columns is not enough | Unified is the default and must be flawless at 80. Split is a bonus for wide panes. Test at 80 from day one. |
+| 80 columns is not enough | Unified is the default and must be flawless at 80. Split is a bonus for wide panes. Test at 80 from day one. Long lines soft wrap (§6.2), so a narrow pane loses no content. |
 | Bridge inserts text while the agent is mid-run | Never send Enter. The user always owns submission. |
 | Every multiplexer behaves differently | Tagged-union `Bridge` with OSC 52 as the floor. A broken backend degrades; it never blocks a release. |
 | Notes drift after further edits | Re-anchor by content hash; never trust line numbers. No match → `stale` and visible, never silent. |

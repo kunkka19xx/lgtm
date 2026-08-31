@@ -36,6 +36,7 @@ const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
 const theme_mod = @import("theme.zig");
+const wrap_mod = @import("wrap.zig");
 
 /// A one-line message on the mode row: a search that found nothing, a command
 /// that is not one, an editor that would not start. Fixed capacity and cleared
@@ -123,6 +124,18 @@ pub const App = struct {
     notice: Notice = .{},
     /// `Tab`: chrome hidden, the body gets the whole pane.
     zen: bool = false,
+    /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
+    /// the pane continues on the next screen row; off, it is cut at the edge.
+    wrap: bool = true,
+    /// The pane width, from the last resize the loop reported. Scrolling has
+    /// to count screen rows, and a wrapped row is more than one of them, so
+    /// the state that decides where the cursor goes needs to know how wide
+    /// the pane it is going onto is. Never read for anything else.
+    cols: u16 = 80,
+    /// How the screen counts a grapheme's columns; see `ui/wrap.zig`. Set by
+    /// the loop from the terminal's answer, because vaxis only knows it after
+    /// the capability query comes back.
+    width_method: wrap_mod.Method = .unicode,
     /// Set by `e`. The run loop owns the terminal, so it - not `run(cmd)` -
     /// is what can hand it to a child process.
     want_editor: bool = false,
@@ -273,6 +286,7 @@ pub const App = struct {
             .torn = self.review.torn,
             .mode = self.mode,
             .zen = self.zen,
+            .wrap = self.wrap,
             .selection = self.selection(),
             .prompt = if (self.prompt.open) .{
                 .prefix = self.prompt.kind.prefix(),
@@ -296,8 +310,8 @@ pub const App = struct {
             .quit => self.quit = true,
             .line_down => self.moveTo(self.cursor +| 1),
             .line_up => self.moveTo(self.cursor -| 1),
-            .page_down => self.moveTo(self.cursor +| @max(1, body / 2)),
-            .page_up => self.moveTo(self.cursor -| @max(1, body / 2)),
+            .page_down => self.moveTo(self.rowBelow(self.cursor, @max(1, body / 2), body)),
+            .page_up => self.moveTo(self.rowAbove(self.cursor, @max(1, body / 2), body)),
             .top => self.moveTo(0),
             .bottom => self.moveTo(self.rows.len() -| 1),
             .next_hunk => try self.stepHunk(1),
@@ -323,6 +337,13 @@ pub const App = struct {
             .ask_test => try self.compose(.send, .{ .ask = self.templates.ask_test }),
             .ask_explain => try self.compose(.send, .{ .ask = self.templates.ask_explain }),
             .toggle_zen => self.zen = !self.zen,
+            .toggle_wrap => {
+                self.wrap = !self.wrap;
+                // Nothing else on screen says which it is until a line is long
+                // enough to show it, and by then the reader has stopped
+                // wondering whether the key did anything.
+                self.notice.set("soft wrap {s}", .{if (self.wrap) "on" else "off"});
+            },
             .help => self.toggleHelp(),
             .file_list => self.toggleFiles(),
             // One set of list keys, two overlays. Which one they move is the
@@ -333,6 +354,61 @@ pub const App = struct {
             .list_left => self.pageList(-1),
         }
         self.clampScroll(body);
+    }
+
+    // -- soft wrap ------------------------------------------------------------
+
+    test "a line wider than the pane is as many screen rows as it needs" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Rows: 0 header, 1..3 lines. The gutter is the sign, a space, a
+        // two-digit number and two spaces.
+        try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0]));
+        fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+        fx.app.cols = 30;
+
+        // 24 columns of text, so a 68-character line is three rows.
+        try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
+        // Chrome never wraps, whatever the width.
+        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(0, body_rows));
+
+        // Wide enough and it is one row again, and so is every row with wrapping
+        // off - which is what makes `zw` a rendering switch and not a row model.
+        fx.app.cols = 200;
+        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
+        fx.app.cols = 30;
+        fx.app.wrap = false;
+        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
+    }
+
+    test "half a page is half a screen, not half the rows on it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+        fx.app.cols = 30;
+
+        // Row 1 is three screen rows, so it alone is more than half of a six-row
+        // body: a page down from the header lands on it rather than past it.
+        try testing.expectEqual(@as(u32, 1), fx.app.rowBelow(0, 3, 6));
+        // The same motion over rows that do not wrap moves by the rows it counts.
+        fx.app.wrap = false;
+        try testing.expectEqual(@as(u32, 3), fx.app.rowBelow(0, 3, 6));
+    }
+
+    test "zw toggles wrapping and says which way it went" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        try testing.expect(fx.app.wrap);
+        try fx.press("zw");
+        try testing.expect(!fx.app.wrap);
+        try fx.expectNotice("off");
+
+        try fx.press("zw");
+        try testing.expect(fx.app.wrap);
+        try fx.expectNotice("on");
     }
 
     // -- visual select -------------------------------------------------------
@@ -847,16 +923,87 @@ pub const App = struct {
         self.notice.set("wrapped to {s} {s}", .{ if (delta > 0) "first" else "last", what });
     }
 
+    // -- screen rows ---------------------------------------------------------
+    //
+    // A body row is one screen row until it wraps, and everything that scrolls
+    // has to count the screen it is scrolling. Measured here rather than in
+    // the renderer because the position is decided before the frame is drawn -
+    // and measured with `ui/wrap.zig`, which is the same code the renderer
+    // draws with, so the two cannot disagree about where a line ends.
+
+    /// Screen rows body row `row` occupies, never more than `cap`. Chrome is
+    /// always one; so is every row when wrapping is off.
+    fn rowHeight(self: *App, row: u32, cap: u16) u16 {
+        if (!self.wrap or cap <= 1) return 1;
+        const f = self.current() orelse return 1;
+        const li = self.rows.lineAt(row) orelse return 1;
+        if (li >= f.lines.text.len) return 1;
+        return wrap_mod.height(
+            f.lines.text[li],
+            self.cols -| rows_mod.gutter(f),
+            self.width_method,
+            cap,
+        );
+    }
+
+    /// The row `screens` screen rows below `from`, and above for the other.
+    /// Both move at least one row: a page motion that cannot move because the
+    /// line under the cursor fills the pane is a key that does nothing.
+    fn rowBelow(self: *App, from: u32, screens: u16, body: u16) u32 {
+        const last = self.rows.len() -| 1;
+        var acc: u32 = 0;
+        var i = from;
+        while (i < last) {
+            i += 1;
+            acc += self.rowHeight(i, body);
+            if (acc >= screens) break;
+        }
+        return i;
+    }
+
+    fn rowAbove(self: *App, from: u32, screens: u16, body: u16) u32 {
+        var acc: u32 = 0;
+        var i = from;
+        while (i > 0) {
+            i -= 1;
+            acc += self.rowHeight(i, body);
+            if (acc >= screens) break;
+        }
+        return i;
+    }
+
+    /// The scroll offset that puts the cursor's row half a pane down, counting
+    /// the screen rows a wrapped line takes rather than the one row it is.
     fn centerCursor(self: *App, body: u16) void {
         const half = body / 2;
-        self.scroll = self.cursor -| half;
+        var top = self.cursor;
+        var acc: u32 = 0;
+        while (top > 0) {
+            const above = self.rowHeight(top - 1, body);
+            if (acc + above > half) break;
+            acc += above;
+            top -= 1;
+        }
+        self.scroll = top;
     }
 
     /// Keeps the cursor inside the body with a margin, and never scrolls past
     /// the end of the rows.
     pub fn clampScroll(self: *App, body: u16) void {
-        self.scroll = scrollFor(self.cursor, self.scroll, self.rows.len(), body, self.nav.scrolloff);
+        const h: Heights = .{ .app = self, .cap = body };
+        self.scroll = scrollFor(h, self.cursor, self.scroll, self.rows.len(), body, self.nav.scrolloff);
     }
+
+    /// What `scrollFor` asks about a row. A struct rather than a closure so
+    /// the scroll arithmetic stays a pure function with a fake in its tests.
+    const Heights = struct {
+        app: *App,
+        cap: u16,
+
+        pub fn at(self: Heights, row: u32) u16 {
+            return self.app.rowHeight(row, self.cap);
+        }
+    };
 
     pub fn handle(self: *App, ev: event.Event, body: u16) !void {
         switch (ev) {
@@ -889,7 +1036,10 @@ pub const App = struct {
             // offset that kept the cursor on screen may no longer. Doing it
             // here rather than only at the top of the loop is what makes a
             // resize testable without a terminal.
-            .resize => self.clampScroll(body),
+            .resize => |size| {
+                self.cols = size.cols;
+                self.clampScroll(body);
+            },
             .agent_quiescent, .snapshot_taken => {},
         }
     }
@@ -920,18 +1070,63 @@ pub fn wrapIndex(raw: i64, len: usize) struct { index: u32, wrapped: bool } {
     return .{ .index = @intCast(i), .wrapped = i != raw };
 }
 
-pub fn scrollFor(cursor: u32, scroll: u32, rows_len: u32, body: u16, scrolloff: u32) u32 {
+/// `heights.at(row)` is the screen rows that row occupies, which is one for
+/// every row until a line wraps. Passed in rather than computed here so this
+/// stays arithmetic: `App.Heights` measures the real thing, and the tests
+/// below hand it a table.
+pub fn scrollFor(
+    heights: anytype,
+    cursor: u32,
+    scroll: u32,
+    rows_len: u32,
+    body: u16,
+    scrolloff: u32,
+) u32 {
     if (body == 0 or rows_len == 0) return 0;
+    const last = rows_len - 1;
     const margin: u32 = @min(scrolloff, body / 3);
     var out = scroll;
 
-    if (cursor < out + margin) out = cursor -| margin;
-    if (cursor + margin >= out + body) out = cursor + margin + 1 -| body;
+    // The row a margin above the cursor has to be on screen.
+    const want_top = cursor -| margin;
+    if (want_top < out) out = want_top;
 
-    const max_scroll = rows_len -| body;
+    // So does the one a margin below it - but never at the cursor's expense.
+    // Walking up from there is what makes the margin a number of *rows* while
+    // the room it needs is a number of screen rows.
+    const target = @min(cursor +| margin, last);
+    var lo = target;
+    var acc: u32 = heights.at(target);
+    while (lo > 0) {
+        const above = heights.at(lo - 1);
+        if (acc + above > body) break;
+        acc += above;
+        lo -= 1;
+    }
+    if (out < lo) out = @min(lo, cursor);
+
+    // And never blank rows below the last one: the largest offset that still
+    // fills the body, found by walking back from the end for the same reason.
+    var max_scroll = rows_len;
+    var tail: u32 = 0;
+    while (max_scroll > 0) {
+        const h = heights.at(max_scroll - 1);
+        if (tail + h > body) break;
+        tail += h;
+        max_scroll -= 1;
+    }
+    if (max_scroll > last) max_scroll = last;
     if (out > max_scroll) out = max_scroll;
     return out;
 }
+
+/// Every row one screen row tall: what `scrollFor` sees with wrapping off, and
+/// what its arithmetic tests measure against.
+pub const flat_heights = struct {
+    pub fn at(_: @This(), _: u32) u16 {
+        return 1;
+    }
+}{};
 
 const testing = std.testing;
 
@@ -961,32 +1156,66 @@ test {
 test "scrolling keeps the cursor inside the body with a margin" {
     // Cursor near the top pins the view to the top rather than showing rows
     // that do not exist above it.
-    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 100, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(2, 0, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 0, 0, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 2, 0, 100, 22, 3));
 
     // Moving down past the bottom margin scrolls by exactly what is needed:
     // cursor 20 with a 3-row margin needs rows 21-23 visible, and 2+22-1 = 23.
-    try testing.expectEqual(@as(u32, 2), scrollFor(20, 0, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 2), scrollFor(flat_heights, 20, 0, 100, 22, 3));
     // Moving back up above the top margin scrolls back.
-    try testing.expectEqual(@as(u32, 7), scrollFor(10, 20, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 7), scrollFor(flat_heights, 10, 20, 100, 22, 3));
 }
 
 test "scrolling never runs past the last row" {
     // A cursor at the end still leaves a full body on screen, not a screen
     // half full of blanks.
-    try testing.expectEqual(@as(u32, 78), scrollFor(99, 90, 100, 22, 3));
+    try testing.expectEqual(@as(u32, 78), scrollFor(flat_heights, 99, 90, 100, 22, 3));
     // Fewer rows than the body means no scrolling at all.
-    try testing.expectEqual(@as(u32, 0), scrollFor(3, 0, 5, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(4, 3, 5, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 3, 0, 5, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 4, 3, 5, 22, 3));
+}
+
+test "a tall row costs the screen rows it takes, not the one row it is" {
+    // Row 3 wraps onto five screen rows; everything else is one.
+    const Table = struct {
+        hs: []const u16,
+        pub fn at(self: @This(), row: u32) u16 {
+            return if (row < self.hs.len) self.hs[row] else 1;
+        }
+    };
+    const t: Table = .{ .hs = &.{ 1, 1, 1, 5, 1, 1, 1, 1, 1, 1 } };
+
+    // Rows 0-9 are exactly ten screen rows, so a ten-row body shows them all.
+    try testing.expectEqual(@as(u32, 0), scrollFor(t, 5, 0, 10, 10, 0));
+
+    // The last row cannot be reached without scrolling the tall one off:
+    // rows 4-9 are six screen rows, rows 3-9 are eleven.
+    try testing.expectEqual(@as(u32, 4), scrollFor(t, 9, 0, 10, 10, 0));
+
+    // Flat rows in the same shape need no scroll at all, which is the whole
+    // difference this arithmetic exists to make.
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 9, 0, 10, 10, 0));
+}
+
+test "a row taller than the body is shown from its top rather than skipped" {
+    const Table = struct {
+        hs: []const u16,
+        pub fn at(self: @This(), row: u32) u16 {
+            return if (row < self.hs.len) self.hs[row] else 1;
+        }
+    };
+    // Row 2 is a generated line: twenty screen rows in a body of ten.
+    const t: Table = .{ .hs = &.{ 1, 1, 20, 1, 1, 1 } };
+    try testing.expectEqual(@as(u32, 2), scrollFor(t, 2, 0, 6, 10, 3));
 }
 
 test "degenerate sizes do not underflow" {
     // A one-row body has no room for a margin; the arithmetic must still hold.
-    try testing.expectEqual(@as(u32, 0), scrollFor(0, 0, 0, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(5, 0, 10, 0, 3));
-    _ = scrollFor(0, 0, 1, 1, 3);
-    _ = scrollFor(9, 0, 10, 1, 3);
-    _ = scrollFor(0, 9, 10, 2, 3);
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 0, 0, 0, 22, 3));
+    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 5, 0, 10, 0, 3));
+    _ = scrollFor(flat_heights, 0, 0, 1, 1, 3);
+    _ = scrollFor(flat_heights, 9, 0, 10, 1, 3);
+    _ = scrollFor(flat_heights, 0, 9, 10, 2, 3);
 }
 
 test "a ring step wraps at both ends and reports only the wrap" {
