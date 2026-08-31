@@ -405,4 +405,5 @@ test {
     _ = bridge;
     _ = editor;
     _ = splash;
+    _ = @import("path.zig");
 }

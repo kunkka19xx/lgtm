@@ -138,6 +138,10 @@ pub const Modes = packed struct(u8) {
     /// Inside either overlay. The two lists move the same way on purpose -
     /// two sets of navigation keys would be two things to learn.
     pub const lists: Modes = .{ .help = true, .finder = true };
+    /// Inside the file list only. Sideways is the one key whose meaning
+    /// differs between the two overlays - a tab in `?`, a page of the grid
+    /// here - so it is bound per overlay and each one says its own word.
+    pub const finder_only: Modes = .{ .finder = true };
 
     pub fn has(self: Modes, mode: event.Mode) bool {
         return switch (mode) {
@@ -333,8 +337,10 @@ pub const default_bindings: []const Binding = &.{
     // and so never moves, which is the honest way to say "nothing here".
     .{ .chords = &.{c('J')}, .command = .list_down, .modes = Modes.lists, .desc = "move" },
     .{ .chords = &.{c('K')}, .command = .list_up, .modes = Modes.lists, .desc = "move" },
-    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.lists, .desc = "tab" },
-    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.lists, .desc = "tab" },
+    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.help_only, .desc = "tab" },
+    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.help_only, .desc = "tab" },
+    .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.finder_only, .desc = "page" },
+    .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.finder_only, .desc = "page" },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
     .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.lists },
@@ -571,9 +577,11 @@ test "every command is reachable from the default bindings" {
 
 test "every binding is live in at least one mode" {
     // An empty mode set is a binding that can never fire, and nothing else in
-    // the file would ever say so.
+    // the file would ever say so. `finder` counts: it was missing here while
+    // no binding was finder-only, so the check would have rejected the first
+    // one that was.
     for (default_bindings) |b| {
-        try testing.expect(b.modes.normal or b.modes.visual or b.modes.help);
+        try testing.expect(b.modes.normal or b.modes.visual or b.modes.help or b.modes.finder);
     }
 }
 

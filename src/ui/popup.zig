@@ -20,6 +20,7 @@ const HelpView = frame_mod.HelpView;
 const devicon = @import("devicon.zig");
 const keytext = @import("keytext.zig");
 const keymap = @import("keymap.zig");
+const path_mod = @import("path.zig");
 const prompt_mod = @import("prompt.zig");
 
 /// A byte range inside a border label.
@@ -39,13 +40,17 @@ const Footer = struct {
 ///
 /// Keys sharing a description collapse into one label - four bindings become
 /// `J K move  H L tab`, because four rows each saying the same word is the
-/// verbose spelling of it. `tail` is for the keys that are not bindings:
+/// verbose spelling of it. `max` is the widest the label may be: a group that
+/// would not fit ends it, so a narrow pane loses the last hint rather than
+/// the whole row. Bytes stand in for columns, which every key name and
+/// description here is - and erring short only ever drops a group early. `tail` is for the keys that are not bindings:
 /// `<CR>` and `<Esc>` are `prompt.zig`'s submit and cancel, the same two every
 /// prompt has, so they are passed in rather than generated.
 fn footerOf(
     arena: Allocator,
     keys: []const keytext.HelpEntry,
     tail: []const keytext.HelpEntry,
+    max: u16,
 ) Allocator.Error!Footer {
     var out: std.ArrayList(u8) = .empty;
     var spans: std.ArrayList(Span) = .empty;
@@ -57,6 +62,8 @@ fn footerOf(
 
     var n: usize = 0;
     while (n < all.items.len) {
+        // Where this group started, to roll back to if it does not fit.
+        const mark = out.items.len;
         var last = n;
         while (last + 1 < all.items.len and
             std.mem.eql(u8, all.items[last + 1].desc, all.items[n].desc)) last += 1;
@@ -71,6 +78,17 @@ fn footerOf(
         }
         try out.appendSlice(arena, all.items[n].desc);
         try out.appendSlice(arena, "  ");
+        // A group that would not fit ends the label rather than overflowing
+        // it. Whole groups, because half of `<Esc> close` says nothing - and
+        // a footer that is dropped altogether for being one column too wide
+        // is the worst of the three, which is what this used to do.
+        if (out.items.len > max) {
+            out.shrinkRetainingCapacity(mark);
+            while (spans.items.len > 0 and spans.items[spans.items.len - 1].start >= mark) {
+                _ = spans.pop();
+            }
+            break;
+        }
         n = last + 1;
     }
     // Trailing separator trimmed: the label sits inside a border, and two
@@ -273,7 +291,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
     // The popup's own keys, along the bottom with the filter hint. `<Esc>` is
     // `prompt.zig`'s hardcoded cancel rather than a binding, which is why that
     // one is written out and the rest are generated.
-    const foot = try footerOf(f.arena, v.keys, &.{close_key});
+    const foot = try footerOf(f.arena, v.keys, &.{close_key}, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -334,7 +352,7 @@ test "the popup footer marks exactly its key names, and no other text" {
         .{ .keys = "J", .desc = "move" },
         .{ .keys = "<Right>", .desc = "column" },
     };
-    const foot = try footerOf(arena, nav, &.{close_key});
+    const foot = try footerOf(arena, nav, &.{close_key}, 200);
 
     // Same description, so `H` and `J` collapse under one label.
     try testing.expectEqualStrings(" type to filter  H J move  <Right> column  <Esc> close ", foot.text);
@@ -344,6 +362,36 @@ test "the popup footer marks exactly its key names, and no other text" {
     for (foot.keys, want) |sp, expected| {
         try testing.expectEqualStrings(expected, foot.text[sp.start..][0..sp.len]);
     }
+}
+
+test "a footer too wide for the box sheds whole groups, and never all of them" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const nav: []const keytext.HelpEntry = &.{
+        .{ .keys = "J", .desc = "move" },
+        .{ .keys = "H", .desc = "tab" },
+    };
+    // Wide: everything is there.
+    const full = try footerOf(arena, nav, &.{close_key}, 200);
+    try std.testing.expect(std.mem.indexOf(u8, full.text, "close") != null);
+
+    // Narrow: the last group goes rather than the whole row. A footer that
+    // vanishes for being one column too wide is the bug this replaced - it is
+    // the only thing on screen saying what the keys are.
+    const cut = try footerOf(arena, nav, &.{close_key}, 30);
+    try std.testing.expect(cut.text.len <= 30);
+    try std.testing.expect(std.mem.indexOf(u8, cut.text, "move") != null);
+    try std.testing.expect(std.mem.indexOf(u8, cut.text, "close") == null);
+
+    // Every span still points inside the text it was trimmed with, or the
+    // accent repaint would read past the end of it.
+    for (cut.keys) |sp| try std.testing.expect(sp.start + sp.len <= cut.text.len);
+
+    // Even a budget of nothing leaves the hint rather than an empty border.
+    const tiny = try footerOf(arena, nav, &.{close_key}, 1);
+    try std.testing.expect(tiny.text.len > 0);
 }
 
 test "one column by default, and the grid still fits two when asked" {
@@ -446,7 +494,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     const foot = try footerOf(f.arena, v.keys, &.{
         .{ .keys = "<CR>", .desc = "open" },
         close_key,
-    });
+    }, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -506,12 +554,18 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
             };
             f.put(row, text_col + 2, icon.glyph, frame_mod.withBg(.{ .fg = hue }, bg));
         }
-        f.put(row, text_col + lead, e.path, on_row);
+        // The counts keep their column and the path takes what is left, then
+        // loses its middle rather than its tail: a terminal clips from the
+        // right, and for a path that removes the file name - the one part
+        // that says which file this is (`ui/path.zig`).
+        const budget = box.content -| (lead + m.desc + gap);
+        const shown = try path_mod.elide(f.arena, e.path, budget, f.glyphs.ellipsis, f.method());
+        f.put(row, text_col + lead, shown, on_row);
 
         // Counts right-aligned inside the box, so the paths stay readable as a
         // column even when one of them is very long.
         const counts_col = text_col + box.content - countsWidth(e);
-        if (counts_col > text_col + lead + f.win.gwidth(e.path)) {
+        if (counts_col > text_col + lead + f.win.gwidth(shown)) {
             var col = counts_col;
             col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
             _ = try f.print(row, col, frame_mod.withBg(f.theme.removed_count, bg), "{s}{d}", .{ f.glyphs.del, e.removed });

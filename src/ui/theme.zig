@@ -48,6 +48,9 @@ pub const Glyphs = struct {
     box_bl: []const u8,
     box_br: []const u8,
 
+    /// Stands in for the part of a path there was no room to draw.
+    ellipsis: []const u8,
+
     /// Whether this set has per-filetype icons to go with it. Only the nerd
     /// set does, because only it can assume the font has them.
     file_icons: bool = false,
@@ -74,6 +77,7 @@ pub const Glyphs = struct {
         .box_tr = "\u{256e}",
         .box_bl = "\u{2570}",
         .box_br = "\u{256f}",
+        .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
         // the README and is why the rows are left-aligned to a common edge
@@ -112,6 +116,7 @@ pub const Glyphs = struct {
         .box_tr = "+",
         .box_bl = "+",
         .box_br = "+",
+        .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.
         .wordmark = &.{

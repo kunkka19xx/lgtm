@@ -130,7 +130,7 @@ pub const Iterator = struct {
 
     const Step = struct { len: u32, cols: u16 };
 
-    fn stepAt(self: *const Iterator, i: u32) Step {
+    fn stepAt(self: Iterator, i: u32) Step {
         if (self.ascii) {
             // Control bytes are what vaxis draws them as: nothing. A tab is
             // one of them, which is why a tab-indented line renders flush
@@ -148,6 +148,45 @@ pub const Iterator = struct {
         };
     }
 };
+
+/// Byte length of the longest prefix of `text` that fits in `cols` display
+/// columns. A grapheme that would straddle the edge is left out entirely: half
+/// a character is not a character.
+pub fn fitFront(text: []const u8, cols: u16, method: Method) usize {
+    if (cols == 0) return 0;
+    const it: Iterator = .init(text, cols, method);
+    var col: u16 = 0;
+    var i: u32 = 0;
+    while (i < text.len) {
+        const step = it.stepAt(i);
+        if (col + step.cols > cols) break;
+        col += step.cols;
+        i += step.len;
+    }
+    return i;
+}
+
+/// Byte offset where the longest *suffix* of `text` that fits in `cols`
+/// begins.
+///
+/// One forward pass rather than a backwards walk: vaxis iterates graphemes in
+/// one direction only, and the strings this is asked about are paths, which
+/// are short enough that measuring twice costs nothing.
+pub fn fitBack(text: []const u8, cols: u16, method: Method) usize {
+    const total = columns(text, method);
+    if (total <= cols) return 0;
+    const drop = total - cols;
+    const it: Iterator = .init(text, cols, method);
+    var col: u16 = 0;
+    var i: u32 = 0;
+    while (i < text.len) {
+        const step = it.stepAt(i);
+        col += step.cols;
+        i += step.len;
+        if (col >= drop) return i;
+    }
+    return text.len;
+}
 
 /// Screen rows `text` occupies in `width` columns, never more than `cap` and
 /// never fewer than one. The cap is the body height: nothing taller than the
