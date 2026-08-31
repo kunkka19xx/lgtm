@@ -52,6 +52,12 @@ pub const Glyphs = struct {
     /// set does, because only it can assume the font has them.
     file_icons: bool = false,
 
+    /// The wordmark on the empty screen, one string per row, left edges
+    /// aligned. It belongs to the icon set rather than to the theme for the
+    /// same reason the box corners do: a terminal that cannot draw block
+    /// elements needs a different picture, not a different colour.
+    wordmark: []const []const u8,
+
     pub const unicode: Glyphs = .{
         .sep = "\u{258f}",
         .rule = "\u{2500}",
@@ -68,6 +74,18 @@ pub const Glyphs = struct {
         .box_tr = "\u{256e}",
         .box_bl = "\u{2570}",
         .box_br = "\u{256f}",
+        // The README's banner. The thumb overhangs the last column of the
+        // `M` rather than being centred under it, which is where it sits in
+        // the README and is why the rows are left-aligned to a common edge
+        // instead of each being centred on its own width.
+        .wordmark = &.{
+            "██╗      ██████╗ ████████╗███╗   ███╗",
+            "██║     ██╔════╝ ╚══██╔══╝████╗ ████║",
+            "██║     ██║  ███╗   ██║   ██╔████╔██║ 👍",
+            "██║     ██║   ██║   ██║   ██║╚██╔╝██║",
+            "███████╗╚██████╔╝   ██║   ██║ ╚═╝ ██║",
+            "╚══════╝ ╚═════╝    ╚═╝   ╚═╝     ╚═╝",
+        },
     };
 
     /// The unicode set plus file-type icons. Everything else is identical:
@@ -94,6 +112,15 @@ pub const Glyphs = struct {
         .box_tr = "+",
         .box_bl = "+",
         .box_br = "+",
+        // No block elements and no emoji: the set exists for the terminal
+        // that would draw both as tofu.
+        .wordmark = &.{
+            " _      ____ _____ __  __ ",
+            "| |    / ___|_   _|  \\/  |",
+            "| |   | |  _  | | | |\\/| |",
+            "| |___| |_| | | | | |  | |",
+            "|_____|\\____| |_| |_|  |_|",
+        },
     };
 };
 
@@ -380,11 +407,16 @@ test "the ascii glyph set stays inside 7-bit ascii" {
     // The point of the fallback is that it survives a terminal that mangles
     // anything above 0x7f, so assert it rather than trusting the literals.
     inline for (@typeInfo(Glyphs).@"struct".fields) |f| {
-        // The set is mostly strings and one flag; only the strings have bytes
-        // a terminal can mangle.
-        if (f.type != []const u8) continue;
-        const g: []const u8 = @field(Glyphs.ascii, f.name);
-        for (g) |c| try std.testing.expect(c < 0x80);
+        // Strings and rows of strings both carry bytes a terminal can mangle;
+        // the one flag does not. The wordmark is checked row by row rather
+        // than skipped, which is what this test missed when it was added.
+        if (f.type == []const u8) {
+            const g: []const u8 = @field(Glyphs.ascii, f.name);
+            for (g) |c| try std.testing.expect(c < 0x80);
+        } else if (f.type == []const []const u8) {
+            const rows: []const []const u8 = @field(Glyphs.ascii, f.name);
+            for (rows) |g| for (g) |c| try std.testing.expect(c < 0x80);
+        }
     }
 }
 

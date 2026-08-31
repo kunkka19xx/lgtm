@@ -28,6 +28,7 @@ const App = app_mod.App;
 const editor = @import("editor.zig");
 const keytext = @import("keytext.zig");
 const render = @import("render.zig");
+const splash = @import("splash.zig");
 const theme_mod = @import("theme.zig");
 
 /// One animation frame. 60 Hz is smooth and is what the terminal can flush;
@@ -374,10 +375,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
-        _ = win.printSegment(
-            .{ .text = " lgtm: no changes against HEAD", .style = app.theme.dim },
-            .{ .row_offset = 0, .wrap = .none },
-        );
+        try splash.draw(frameOf(app, win, arena), app.km.bindings);
         // An empty review is exactly when a reader is most likely to want the
         // key list - there is nothing on screen to learn the keys from.
         // Both overlays float over the empty screen too: a review with nothing
@@ -406,4 +404,5 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
 test {
     _ = bridge;
     _ = editor;
+    _ = splash;
 }

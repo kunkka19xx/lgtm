@@ -215,6 +215,25 @@ pub const Frame = struct {
         );
     }
 
+    /// `put` with an OSC 8 hyperlink behind the text. A terminal without them
+    /// draws the text and ignores the escape, and one behind a tmux older
+    /// than 3.4 has it stripped on the way through, so no caller has to ask
+    /// first: the worst case is the plain text that would have been drawn
+    /// anyway. It occupies no columns, so it cannot change a layout.
+    pub fn putLink(
+        self: Frame,
+        row: u16,
+        col: u16,
+        text: []const u8,
+        style: vaxis.Style,
+        uri: []const u8,
+    ) void {
+        _ = self.win.printSegment(
+            .{ .text = text, .style = style, .link = .{ .uri = uri } },
+            .{ .row_offset = row, .col_offset = col, .wrap = .none },
+        );
+    }
+
     /// Right-aligns using display width, never byte length: the status fields
     /// are full of multi-byte glyphs and `─` is three bytes wide and one
     /// column.

@@ -2,6 +2,11 @@
 
 const std = @import("std");
 
+// One source of truth for the version: the manifest the package manager
+// already reads, rather than a second copy of the string in `main.zig` for
+// the two to drift apart.
+const version = @import("build.zig.zon").version;
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -18,6 +23,7 @@ pub fn build(b: *std.Build) void {
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "profile", profile);
+    build_options.addOption([]const u8, "version", version);
     build_options.addOption(bool, "stack_traces", traces);
 
     const vaxis = b.dependency("vaxis", .{
@@ -59,6 +65,7 @@ pub fn build(b: *std.Build) void {
     // to pass.
     const dist_options = b.addOptions();
     dist_options.addOption(bool, "profile", false);
+    dist_options.addOption([]const u8, "version", version);
     // A panic trace lands in an alt screen the TUI never got to leave, and
     // costs 304 KB to be able to print.
     dist_options.addOption(bool, "stack_traces", false);

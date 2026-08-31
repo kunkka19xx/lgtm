@@ -162,6 +162,18 @@ Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individ
 
 A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
 
+### 4.3b The empty screen - the wordmark, shipped
+
+A clean tree is not a rare state, it is the resting state: a pane running beside an agent sits on it every moment the agent is thinking, and every moment before it has written anything at all. It was one dim sentence in the top-left corner, which is the screen the tool is looked at on most saying the least.
+
+**Shipped:** the README's wordmark, centred, over the version, the author, and the key that opens the help. Four facts and nothing else - a screen this frequent earns its space by staying quiet, so there is no border, no box and no tip of the day.
+
+The wordmark lives in `Glyphs` beside the box corners rather than in the theme, because a terminal that cannot draw block elements needs a different *picture*, not a different colour: `ui.icons = "ascii"` swaps in a 26-column figlet that is pure 7-bit, which the same test that guards the rest of the ascii set now checks row by row. The key is looked up from the bindings rather than written as `?`, so a remapped keymap still documents itself - this screen is the only place a reader who has not opened the popup yet can learn how to.
+
+The name is a **clickable link** to the author's GitHub, as an OSC 8 hyperlink rather than a printed URL: the address itself is noise on a screen this small, the escape occupies no columns so it cannot move the layout, and a terminal that cannot follow it draws the name exactly as it would have anyway. tmux passes OSC 8 through from 3.4 and strips it cleanly before that, so there is nothing for a caller to check. `Frame.putLink` is where it lives, because a file path in the status line is the obvious next thing to want it.
+
+Geometry is a pure function (`splash.place`), which is what makes the awkward sizes testable without a terminal: a pane too narrow for the picture, or too short for the lines under it, falls back to exactly the sentence that was there before rather than spilling over the edge. At 40 columns the unicode wordmark fits precisely, which is the narrowest pane the rest of the UI is tested at.
+
 ### 4.4 The `?` popup - conflict resolved, overlay shipped
 
 `?` opens a **context-aware** help overlay: only the keys valid in the current mode, with the user's *actual* bindings rather than the defaults.

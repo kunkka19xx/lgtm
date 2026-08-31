@@ -29,7 +29,7 @@ const usage =
     \\
 ;
 
-const version = "0.0.0-dev";
+const version = build_options.version;
 
 /// A panic still says what went wrong; what this drops in a release build is
 /// the stack trace under it, and with it the DWARF reader, the inflate for
