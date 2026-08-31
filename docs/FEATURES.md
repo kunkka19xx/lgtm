@@ -135,7 +135,7 @@ Beyond that:
 **A TUI cannot set the font.** That is the terminal emulator's job, and `lgtm` should not pretend otherwise. What it *can* control:
 
 - **Soft wrap on/off** (`ui.wrap`, `zw`) - whether a line wider than the pane continues on the next screen row or is cut at the edge. **Ships on.** The pane this tool is designed for is a split one, and a diff that hides the end of every long line is a diff of the part that fit. It stays a rendering decision and never reaches the row model: one body row is one line of the file whatever it wraps onto, so motions, selections and references are unchanged, and the reader who wants the shape of the code back gets it with one key.
-- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph. **All three ship.** `nerd` adds a file-type icon to the `F` list and changes nothing else: a patched font puts glyphs *in*, it does not move a box corner, and a set that also restyled the borders would be a second theme rather than an icon switch. It stays opt-in because the icons are private-use codepoints, which draw as tofu in a font that lacks them.
+- **Nerd Font icons on/off** (`ui.icons = "nerd" | "unicode" | "ascii"`) - file-type glyphs, note markers, risk indicators. Must degrade to ASCII cleanly; a broken glyph looks worse than no glyph. **All three ship.** `nerd` adds a file-type icon to the file list and changes nothing else: a patched font puts glyphs *in*, it does not move a box corner, and a set that also restyled the borders would be a second theme rather than an icon switch. It stays opt-in because the icons are private-use codepoints, which draw as tofu in a font that lacks them.
 - **The icon is coloured by filetype and the name by status** - the oil.nvim and neo-tree arrangement, where the shape and hue together find the Zig file before any name is read. Both colours come from the theme's palette rather than from six hardcoded brand values, so `[theme] name = "gruvbox"` moves the icons with everything else. `Theme.hues` exists for exactly this: a consumer that wants a raw colour rather than one of the semantic slots.
 - **File status is colour, not a letter column.** Green arrived, red left, amber changed, blue moved, grey cannot be read. A column of `A`/`D`/`M` beside the paths is a second alphabet to learn and a column the path does not get; the colour says the same thing in no space at all. Asserted per theme: no two statuses may share a hue, or two statuses are one status.
 - **Text attributes** - which semantic slots use bold, italic, underline, or dim. Some people want italic comments; some terminals render italics badly. Make it a choice.
@@ -155,6 +155,7 @@ Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individ
 **The leader.** `<Space>` fronts the command namespace, so it can grow without competing for single keys. It is defined once as `keymap.leader`, which is what lets a preset move it to `,` or `\` in one edit instead of a sweep over every sequence. Two rules keep it working:
 
 - **Never bind the leader on its own.** The matcher resolves an exact match as soon as it finds one, so a bare-leader binding would shadow every sequence behind it - the sequences would still be listed, and silently never fire. Pinned by a test rather than a comment.
+- **A motion outranks a command for a direct key, and three keys changed hands to prove it.** `e`, `t` and `F` were `open_editor`, `ask_test` and `file_list`; they are now `word_end`, `till_char` and `find_char_back`, with the commands on `<Space>e`, `<Space>t` and `<Space>f`. Half a set of vim motions is worse than none - a hand that knows `e` does not un-know it because this is a reviewer - and by the rule below, a key pressed dozens of times a minute beats one pressed a few times an hour. All three keep their row in `?`, and `[keys]` puts them back in one line each for anyone who disagrees.
 - **Leader fronts commands, not hot motions.** Anything pressed dozens of times per review earns a direct key; the leader is for what you reach for occasionally. Where both exist (`<Space>nf` alongside `]f`) the leader form is the discoverable alias, not the replacement.
 
 A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
@@ -233,12 +234,12 @@ file_list_size = 0.25
 statusline = "{mode} {file} {change_id} {notes} {risk}"
 ```
 
-**`F` ships as an overlay** rather than as any of the three panes: the same box the `?` popup uses, with the same filter, the same `H J K L`, and `Enter` to jump. It costs rows only while it is open, which is the argument that made `hidden` the default in the first place - a list is navigation, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain unbuilt.
+**The file list ships as an overlay** rather than as any of the three panes: the same box the `?` popup uses, with the same filter, the same `H J K L`, and `Enter` to jump. It costs rows only while it is open, which is the argument that made `hidden` the default in the first place - a list is navigation, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain unbuilt.
 
 **The default changed to `hidden` after the mockups** (`lgtm TUI Mockups.dc.html`,
 option 2a). A persistent list costs about five of twenty-six rows permanently,
 and the list is navigation, which should not hold territory while you read.
-Files are reached with `]f` and the full list on `F`. `top` and `left` remain
+Files are reached with `]f` and the full list on `<Space>f`. `top` and `left` remain
 supported - they are 1a and 1b, and both were drawn.
 
 Two consequences worth recording. The side-by-side view (1c) already uses this

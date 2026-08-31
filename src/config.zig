@@ -582,6 +582,9 @@ test "an empty list unbinds and stops advertising" {
     try testing.expectEqual(@as(usize, 0), l.problems.items.len);
 
     var km: keymap.Keymap = .{ .bindings = l.cfg.keys };
+    // `<Space>e` is what opens the editor; with it unbound the leader is a
+    // prefix of nothing that leads there.
+    try testing.expect(km.feed(.{ .codepoint = ' ', .mods = .{} }, .normal) == .pending);
     try testing.expect(km.feed(.{ .codepoint = 'e', .mods = .{} }, .normal) == .none);
 
     // The hint strip is generated from the bindings, so an unbound command
@@ -622,7 +625,7 @@ test "a remap that would shadow another binding is refused, not accepted" {
     );
     defer l3.deinit();
     try testing.expectEqual(@as(usize, 1), l3.problems.items.len);
-    try testing.expect(std.mem.indexOf(u8, l3.problems.items[0].text, "already bound to open_editor") != null);
+    try testing.expect(std.mem.indexOf(u8, l3.problems.items[0].text, "already bound to word_end") != null);
     try testing.expectEqual(keymap.default_bindings.ptr, l3.cfg.keys.ptr);
 }
 

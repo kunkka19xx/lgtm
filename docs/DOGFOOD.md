@@ -35,6 +35,10 @@ has actually settled it.
       real layout has three, every session needs `--pane %N`. This is the most
       likely daily annoyance in the whole tool.
 - [ ] **80 columns.** Tested there, but a real split pane is the judge.
+- [ ] **The character cursor.** `h l w b e`, `f t F T`, and `v` for a charwise
+      selection. Does pointing at a word actually beat pointing at a line when
+      the agent reads the line either way? And do the three moved keys (`e`,
+      `t`, `F`) cost more than the motions are worth?
 - [ ] **Soft wrap.** On by default. Does a wrapped continuation read as part of
       the line above it, or does the diff start to look like prose? `zw` is
       there for the second answer - if it gets pressed daily, the default is

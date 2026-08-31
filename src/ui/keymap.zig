@@ -16,15 +16,41 @@ pub const Command = enum {
     page_up,
     top,
     bottom,
+    /// Within the line. The cursor is a `(row, column)` pair, so these are the
+    /// half of vim's motions that move the column and leave the row alone.
+    char_left,
+    char_right,
+    word_next,
+    word_prev,
+    word_end,
+    /// The same three over WORDs - vim's capitals, where only whitespace is a
+    /// boundary, so a path or a whole call is one step.
+    big_word_next,
+    big_word_prev,
+    big_word_end,
+    line_start,
+    line_end,
+    first_non_blank,
+    /// `f` `t` `F` `T`: each waits for the character to search for, so the key
+    /// after one of these is data rather than a command (`ui/app.zig`).
+    find_char,
+    till_char,
+    find_char_back,
+    till_char_back,
+    /// `;` and `,`, which repeat the last of those forwards and backwards.
+    find_repeat,
+    find_reverse,
     next_hunk,
     prev_hunk,
     next_file,
     prev_file,
     center,
     refresh,
-    /// Enter and leave visual line select. One command rather than two,
-    /// because `V` in visual mode is what leaves it.
+    /// Enter and leave visual select. One command per kind rather than one
+    /// each way, because `V` in visual mode is what leaves it - and pressing
+    /// the other kind switches rather than doing nothing.
     visual_toggle,
+    visual_char_toggle,
     /// Escape: leave visual mode, and nothing at all in normal mode. Bound
     /// only in visual so that a stray Escape in normal mode stays inert.
     visual_cancel,
@@ -176,6 +202,23 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page" },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line" },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line" },
+    .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left a character" },
+    .{ .chords = &.{c('l')}, .command = .char_right, .desc = "right a character" },
+    .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next word" },
+    .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "previous word" },
+    .{ .chords = &.{c('e')}, .command = .word_end, .desc = "end of word" },
+    .{ .chords = &.{c('W')}, .command = .big_word_next, .desc = "next WORD - only blanks separate" },
+    .{ .chords = &.{c('B')}, .command = .big_word_prev, .desc = "previous WORD" },
+    .{ .chords = &.{c('E')}, .command = .big_word_end, .desc = "end of WORD" },
+    .{ .chords = &.{c('0')}, .command = .line_start, .desc = "first column" },
+    .{ .chords = &.{c('$')}, .command = .line_end, .desc = "last column" },
+    .{ .chords = &.{c('^')}, .command = .first_non_blank, .desc = "first non-blank column" },
+    .{ .chords = &.{c('f')}, .command = .find_char, .desc = "to the next <char> on this line" },
+    .{ .chords = &.{c('t')}, .command = .till_char, .desc = "before the next <char>" },
+    .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "back to the previous <char>" },
+    .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "back to after the previous <char>" },
+    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T" },
+    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat it backwards" },
     .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)" },
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)" },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk },
@@ -190,14 +233,15 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines" },
     .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?" },
     .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest" },
-    .{ .chords = &.{c('t')}, .command = .ask_test, .desc = "ask: add a test covering this" },
+    .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this" },
     .{ .chords = &.{c('x')}, .command = .ask_explain, .desc = "ask: explain what this does" },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review" },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match" },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match" },
+    .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select" },
     .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select" },
     .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select" },
-    .{ .chords = &.{c('e')}, .command = .open_editor, .desc = "open line in $EDITOR" },
+    .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR" },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome" },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines" },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)" },
@@ -207,7 +251,7 @@ pub const default_bindings: []const Binding = &.{
     // `<C-l>` never arrived and reloading was unreachable. `<C-r>` is the
     // redo/reload key everywhere else and nothing takes it.
     .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff" },
-    .{ .chords = &.{c('F')}, .command = .file_list, .desc = "list the changed files" },
+    .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files" },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help" },

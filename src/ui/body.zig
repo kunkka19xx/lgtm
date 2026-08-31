@@ -42,25 +42,40 @@ pub fn draw(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
     var screen_row: u16 = 0;
     var idx = v.scroll;
     while (screen_row < height and idx < v.rows.len()) : (idx += 1) {
-        const mark: Mark = .{
-            .cursor = idx == v.cursor,
-            .selected = if (v.selection) |sel| sel.contains(idx) else false,
-        };
+        const mark: Mark = .{ .row = idx, .cursor = idx == v.cursor, .sel = v.selection };
         screen_row += try drawRow(bf, v, screen_row, v.rows.items[idx], mark);
     }
 }
 
-/// How a body row is standing out, if it is. Two independent bits rather than
-/// one enum: the cursor is *inside* a selection for all but the first row of
-/// it, and both have to be visible at once or the reader loses the cursor.
+/// How a body row is standing out, if it is. The cursor and the selection are
+/// independent, not one enum: the cursor is *inside* a selection for all but
+/// the first row of it, and both have to be visible at once or the reader
+/// loses the cursor.
+///
+/// The selection is carried whole rather than reduced to a bool, because a
+/// charwise one covers part of a row and only the line's own length says
+/// which part.
 const Mark = struct {
+    row: u32,
     cursor: bool = false,
-    selected: bool = false,
+    sel: ?frame_mod.Selection = null,
 
+    /// A whole-row wash. The cursor line always has one; a selection only
+    /// when it is linewise, because a charwise one is drawn on the characters
+    /// it actually covers.
     fn background(self: Mark, t: Theme) ?vaxis.Color {
         if (self.cursor) return t.cursor_line.bg;
-        if (self.selected) return t.selection.bg;
+        if (self.sel) |sel| {
+            if (sel.kind == .line and sel.contains(self.row)) return t.selection.bg;
+        }
         return null;
+    }
+
+    /// The bytes a charwise selection covers on this row, if any.
+    fn span(self: Mark, len: u32) ?frame_mod.Selection.Span {
+        const sel = self.sel orelse return null;
+        if (sel.kind != .char) return null;
+        return sel.span(self.row, len);
     }
 };
 
@@ -170,7 +185,18 @@ fn drawLine(f: Frame, v: View, row: u16, li: u32, mark: Mark) Allocator.Error!u1
     // The sign and the number go on the first row only. A continuation row
     // repeating them would read as a second line of the file.
     f.put(row, 0, prefix, sign_style);
-    try drawCode(f, v, row, col, li, kind, bg, height);
+    try drawCode(f, v, row, col, li, kind, bg, height, mark);
+
+    // The terminal's own cursor rather than a drawn block: it blinks the way
+    // the reader's terminal blinks and screen readers find it, which is the
+    // same argument `drawPrompt` makes. A prompt draws after the body and
+    // takes it back, which is what should happen while one is open.
+    if (mark.cursor) {
+        const avail = if (v.wrap) f.width() -| col else 0;
+        const cell = wrap.locate(lines.text[li], avail, f.method(), v.col);
+        f.win.setCursorShape(.block);
+        f.win.showCursor(col + cell.col, row + cell.row);
+    }
     return height;
 }
 
@@ -188,6 +214,7 @@ fn drawCode(
     kind: hunk.LineKind,
     bg: ?vaxis.Color,
     height: u16,
+    mark: Mark,
 ) Allocator.Error!void {
     const lines = v.file.lines;
     const text = lines.text[li];
@@ -228,6 +255,11 @@ fn drawCode(
     // an unattached file, an unknown language, a line past the buffer.
     if (segs.items.len == 0) try segs.append(f.arena, .{ .text = text, .style = plain });
 
+    // The selection first and the search after it, so a match inside a
+    // selection still reads as a match rather than disappearing into it.
+    if (mark.span(@intCast(text.len))) |sp| {
+        segs = try shade(f.arena, segs, sp.lo, sp.hi, f.theme.selection.bg);
+    }
     if (v.query.len > 0) {
         segs = try markMatches(f.arena, segs, v.query, f.theme.search_match);
     }
@@ -271,6 +303,42 @@ fn sliceSegs(
         if (b > a) try out.append(arena, .{ .text = seg.text[a..b], .style = seg.style });
     }
     return out.items;
+}
+
+/// Puts `bg` behind the bytes in `[lo, hi)`, splitting the segments that
+/// straddle either end so the rest keep the colours the lexer gave them.
+///
+/// A charwise selection is drawn this way rather than by filling cells,
+/// because a byte offset is not a column - the same reason `markMatches`
+/// works on segments - and because it then wraps for free: `sliceSegs` cuts
+/// the result into screen rows afterwards.
+fn shade(
+    arena: Allocator,
+    segs: std.ArrayList(vaxis.Segment),
+    lo: u32,
+    hi: u32,
+    bg: vaxis.Color,
+) Allocator.Error!std.ArrayList(vaxis.Segment) {
+    var out: std.ArrayList(vaxis.Segment) = .empty;
+    var at: u32 = 0;
+    for (segs.items) |seg| {
+        const start = at;
+        const end = at + @as(u32, @intCast(seg.text.len));
+        at = end;
+        if (end <= lo or start >= hi) {
+            try out.append(arena, seg);
+            continue;
+        }
+        var style = seg.style;
+        style.bg = bg;
+        // Up to three pieces: before the selection, inside it, after it.
+        if (start < lo) try out.append(arena, .{ .text = seg.text[0 .. lo - start], .style = seg.style });
+        const a = @max(lo, start) - start;
+        const b = @min(hi, end) - start;
+        try out.append(arena, .{ .text = seg.text[a..b], .style = style });
+        if (end > hi) try out.append(arena, .{ .text = seg.text[hi - start ..], .style = seg.style });
+    }
+    return out;
 }
 
 /// Splits segments so every occurrence of `query` gets `style`.

@@ -14,12 +14,14 @@ const Allocator = std.mem.Allocator;
 
 const event = @import("../core/event.zig");
 const body_mod = @import("body.zig");
+const motion = @import("motion.zig");
 const frame_mod = @import("frame.zig");
 const popup = @import("popup.zig");
 
 pub const Frame = frame_mod.Frame;
 pub const View = frame_mod.View;
 pub const Range = frame_mod.Range;
+pub const Selection = frame_mod.Selection;
 pub const PromptView = frame_mod.PromptView;
 pub const HelpView = frame_mod.HelpView;
 pub const HelpLayout = frame_mod.HelpLayout;
@@ -42,6 +44,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         try body_mod.draw(f, v, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
         if (v.files) |fv| try popup.drawFiles(f, fv, 0, h);
+        hideCursorUnder(f, v);
         return;
     }
     if (h < chrome_rows + 1) return drawTooSmall(f);
@@ -56,6 +59,14 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     // can be open, because each is its own mode.
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
     if (v.files) |fv| try popup.drawFiles(f, fv, 2, bodyHeight(h, false));
+    hideCursorUnder(f, v);
+}
+
+/// The body parks the terminal cursor on the character under it. An overlay is
+/// drawn over that character, so the cursor has to go with it - a block
+/// blinking on top of the popup points at nothing.
+fn hideCursorUnder(f: Frame, v: View) void {
+    if (v.help != null or v.files != null) f.win.hideCursor();
 }
 
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
@@ -113,9 +124,16 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
 fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     const t = f.theme;
 
+    // The two visual modes share a `Mode` and are told apart by what is
+    // selected, which is also the only place the difference matters.
+    const label = if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
+        "VISUAL LINE"
+    else
+        modeLabel(v.mode);
+
     // Flush against the left edge: a leading space reads as the pill being
     // indented rather than as the bar starting there.
-    var col: u16 = try f.print(row, 0, t.mode_badge, " {s} ", .{modeLabel(v.mode)});
+    var col: u16 = try f.print(row, 0, t.mode_badge, " {s} ", .{label});
 
     col += 2;
 
@@ -127,7 +145,7 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     else if (v.notice.len > 0)
         .{ v.notice, t.notice }
     else if (v.selection) |sel|
-        .{ try std.fmt.allocPrint(f.arena, "{d} lines selected", .{sel.count()}), t.dim }
+        .{ try selectionSize(f, v, sel), t.dim }
     else
         .{ try std.fmt.allocPrint(f.arena, "{d} rows", .{v.rows.len()}), t.dim };
 
@@ -137,6 +155,22 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     const room = f.width() -| col -| 1;
     const fitted = fitHints(f, v.hints, room);
     if (fitted.len > 0) f.putRight(row, fitted, t.hint);
+}
+
+/// What the mode row says a selection is. Lines for a linewise one and for a
+/// charwise one that has grown past a line; characters while it is still
+/// inside one, because that is what the reader is choosing at that point.
+fn selectionSize(f: Frame, v: View, sel: Selection) Allocator.Error![]const u8 {
+    if (sel.kind == .char and sel.lo == sel.hi) {
+        const text = v.rows.lineAt(sel.lo) orelse return f.arena.dupe(u8, "1 line selected");
+        if (text >= v.file.lines.len()) return f.arena.dupe(u8, "1 line selected");
+        const line = v.file.lines.text[text];
+        const lo = @min(sel.lo_col, line.len);
+        const hi = @min(sel.hi_col, line.len);
+        const n = motion.graphemeCount(line[lo..hi]);
+        return std.fmt.allocPrint(f.arena, "{d} character{s} selected", .{ n, if (n == 1) "" else "s" });
+    }
+    return std.fmt.allocPrint(f.arena, "{d} lines selected", .{sel.count()});
 }
 
 /// The longest prefix of the hint strip that fits `cols`.

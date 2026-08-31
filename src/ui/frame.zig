@@ -41,6 +41,49 @@ pub fn bodyHeight(win_rows: u16, zen: bool) u16 {
     return if (win_rows > chrome_rows) win_rows - chrome_rows else 0;
 }
 
+/// What is selected: rows always, and for a charwise selection the columns
+/// that bound it at either end.
+///
+/// One type for both kinds rather than two, because every consumer wants the
+/// rows and only the renderer wants the columns - and a `?Selection` that is
+/// sometimes a different shape is a switch at each of them.
+pub const Selection = struct {
+    pub const Kind = enum { line, char };
+
+    /// A half-open byte range of one line's text.
+    pub const Span = struct { lo: u32, hi: u32 };
+
+    /// Inclusive row range, normalised so `lo <= hi`.
+    lo: u32,
+    hi: u32,
+    kind: Kind = .line,
+    /// First selected byte on row `lo`, and the byte *after* the last selected
+    /// one on row `hi`. Half-open at the far end because that is what slicing
+    /// wants; vim's inclusive end is converted once, where the selection is
+    /// built. Both are meaningless when `kind` is `.line`.
+    lo_col: u32 = 0,
+    hi_col: u32 = 0,
+
+    pub fn contains(self: Selection, row: u32) bool {
+        return row >= self.lo and row <= self.hi;
+    }
+
+    pub fn count(self: Selection) u32 {
+        return self.hi - self.lo + 1;
+    }
+
+    /// The selected byte range on `row` of a line `len` bytes long, or null
+    /// when the row is outside the selection. A linewise selection takes the
+    /// whole line; a charwise one takes all of it but the two ends.
+    pub fn span(self: Selection, row: u32, len: u32) ?Span {
+        if (!self.contains(row)) return null;
+        if (self.kind == .line) return .{ .lo = 0, .hi = len };
+        const lo = if (row == self.lo) @min(self.lo_col, len) else 0;
+        const hi = if (row == self.hi) @min(self.hi_col, len) else len;
+        return if (hi > lo) .{ .lo = lo, .hi = hi } else null;
+    }
+};
+
 /// An inclusive range of body rows. Normalised by the caller, so `lo <= hi`.
 pub const Range = struct {
     lo: u32,
@@ -72,10 +115,13 @@ pub const View = struct {
     /// Row index of the cursor, and of the first visible row.
     cursor: u32,
     scroll: u32,
+    /// Byte offset of the cursor within its line, for the cell the terminal
+    /// cursor is parked on.
+    col: u32 = 0,
     mode: event.Mode = .normal,
     hints: []const u8 = "",
-    /// Visual line select, in body-row indexes.
-    selection: ?Range = null,
+    /// What is selected, in body-row indexes, or null outside visual mode.
+    selection: ?Selection = null,
     prompt: ?PromptView = null,
     /// A message about the last keystroke: a search that found nothing, a
     /// command that is not one. Takes the mode row when present.

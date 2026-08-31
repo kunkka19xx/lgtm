@@ -30,6 +30,7 @@ const files_mod = @import("files.zig");
 const help_mod = @import("help.zig");
 const keymap = @import("keymap.zig");
 const keytext = @import("keytext.zig");
+const motion = @import("motion.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
 const review_mod = @import("review.zig");
@@ -103,9 +104,30 @@ pub const App = struct {
     scroll: u32 = 0,
     quit: bool = false,
 
+    /// Byte offset of the cursor within its line's text, always on a grapheme
+    /// boundary. Zero on a row that is chrome, which has no text to be in.
+    col: u32 = 0,
+    /// The column the reader last asked for, kept across `j` and `k` the way
+    /// vim keeps `curswant`: stepping down through a short line and back onto
+    /// a long one returns to where the eye was, not to the short line's end.
+    /// `$` parks it at the maximum, which is what makes the end sticky.
+    want_col: u32 = 0,
+
     mode: event.Mode = .normal,
     /// Row the visual selection started on. Meaningless outside `.visual`.
     anchor: u32 = 0,
+    /// Its column, for a charwise selection. Meaningless for a linewise one.
+    anchor_col: u32 = 0,
+    /// Which of the two visual modes is running. One `Mode` with a kind rather
+    /// than two: every motion is live in both, and a second mode would mean
+    /// spelling that out on every binding in the table.
+    visual_kind: render.Selection.Kind = .line,
+    /// An `f`/`t`/`F`/`T` waiting for the character to search for. The next key
+    /// is data, not a command - the same rule the prompt follows, and why this
+    /// is checked before the keymap ever sees it.
+    pending_find: ?motion.Find = null,
+    /// The last completed one, which is what `;` and `,` repeat.
+    last_find: ?motion.Find = null,
     /// The mode to return to when the prompt closes, so `/` from a selection
     /// does not silently drop it.
     prompt_return: event.Mode = .normal,
@@ -239,6 +261,10 @@ pub const App = struct {
                 }
             },
         };
+        // The row can survive a re-diff while the text on it becomes shorter,
+        // or becomes something else entirely.
+        self.clampCol();
+
         // The rows the anchor pointed at are gone, so the selection it
         // described is gone with them. Silently keeping the range would select
         // whatever now happens to sit at those indexes.
@@ -276,6 +302,7 @@ pub const App = struct {
             .file_count = @intCast(self.files().len),
             .cursor = self.cursor,
             .scroll = self.scroll,
+            .col = self.col,
             .fn_names = self.fn_names,
             .total_hunks = self.review.totalHunks(),
             .hunk_ordinal = self.hunkOrdinal(),
@@ -312,15 +339,48 @@ pub const App = struct {
             .line_up => self.moveTo(self.cursor -| 1),
             .page_down => self.moveTo(self.rowBelow(self.cursor, @max(1, body / 2), body)),
             .page_up => self.moveTo(self.rowAbove(self.cursor, @max(1, body / 2), body)),
-            .top => self.moveTo(0),
+            // The first *line*, which is what the key says: row 0 is the hunk
+            // header, and a cursor parked on chrome points at nothing.
+            .top => self.moveTo(self.rows.firstLineRow()),
             .bottom => self.moveTo(self.rows.len() -| 1),
+
+            // Within the line. Each sets both columns: this is the reader
+            // saying where they want to be, which is what `j` and `k` then
+            // try to honour on the next line.
+            .char_left => if (motion.charLeft(self.cursorText(), self.col)) |at| self.setCol(at),
+            .char_right => if (motion.charRight(self.cursorText(), self.col)) |at| self.setCol(at),
+            .word_next => self.stepWord(true, .word),
+            .word_prev => self.stepWord(false, .word),
+            .word_end => self.stepWordEnd(.word),
+            // The same three over WORDs: whitespace to whitespace, so a path
+            // or a whole call is one step rather than five.
+            .big_word_next => self.stepWord(true, .big),
+            .big_word_prev => self.stepWord(false, .big),
+            .big_word_end => self.stepWordEnd(.big),
+            .line_start => self.setCol(0),
+            // The maximum rather than the offset, so the end stays sticky
+            // down a column of ragged lines - vim's `$`, not "column 47".
+            .line_end => {
+                self.col = motion.lineEnd(self.cursorText());
+                self.want_col = std.math.maxInt(u32);
+            },
+            .first_non_blank => self.setCol(motion.firstNonBlank(self.cursorText())),
+
+            // Each of these needs one more keystroke before it can move.
+            .find_char => self.pending_find = .{ .target = 0, .forward = true, .till = false },
+            .till_char => self.pending_find = .{ .target = 0, .forward = true, .till = true },
+            .find_char_back => self.pending_find = .{ .target = 0, .forward = false, .till = false },
+            .till_char_back => self.pending_find = .{ .target = 0, .forward = false, .till = true },
+            .find_repeat => if (self.last_find) |f| self.applyFind(f),
+            .find_reverse => if (self.last_find) |f| self.applyFind(f.flip()),
             .next_hunk => try self.stepHunk(1),
             .prev_hunk => try self.stepHunk(-1),
             .next_file => try self.stepFile(1),
             .prev_file => try self.stepFile(-1),
             .center => self.centerCursor(body),
             .refresh => try self.rediff(),
-            .visual_toggle => if (self.mode == .visual) self.leaveVisual() else self.enterVisual(),
+            .visual_toggle => self.toggleVisual(.line),
+            .visual_char_toggle => self.toggleVisual(.char),
             .visual_cancel => self.leaveVisual(),
             .search_forward => self.openPrompt(.search_forward),
             .search_next => try self.searchStep(self.finder.dir),
@@ -356,83 +416,53 @@ pub const App = struct {
         self.clampScroll(body);
     }
 
-    // -- soft wrap ------------------------------------------------------------
-
-    test "a line wider than the pane is as many screen rows as it needs" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // Rows: 0 header, 1..3 lines. The gutter is the sign, a space, a
-        // two-digit number and two spaces.
-        try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0]));
-        fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-        fx.app.cols = 30;
-
-        // 24 columns of text, so a 68-character line is three rows.
-        try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
-        // Chrome never wraps, whatever the width.
-        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(0, body_rows));
-
-        // Wide enough and it is one row again, and so is every row with wrapping
-        // off - which is what makes `zw` a rendering switch and not a row model.
-        fx.app.cols = 200;
-        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
-        fx.app.cols = 30;
-        fx.app.wrap = false;
-        try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
-    }
-
-    test "half a page is half a screen, not half the rows on it" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-        fx.app.cols = 30;
-
-        // Row 1 is three screen rows, so it alone is more than half of a six-row
-        // body: a page down from the header lands on it rather than past it.
-        try testing.expectEqual(@as(u32, 1), fx.app.rowBelow(0, 3, 6));
-        // The same motion over rows that do not wrap moves by the rows it counts.
-        fx.app.wrap = false;
-        try testing.expectEqual(@as(u32, 3), fx.app.rowBelow(0, 3, 6));
-    }
-
-    test "zw toggles wrapping and says which way it went" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        try testing.expect(fx.app.wrap);
-        try fx.press("zw");
-        try testing.expect(!fx.app.wrap);
-        try fx.expectNotice("off");
-
-        try fx.press("zw");
-        try testing.expect(fx.app.wrap);
-        try fx.expectNotice("on");
-    }
-
     // -- visual select -------------------------------------------------------
 
-    fn enterVisual(self: *App) void {
+    /// `V` and `v`. Pressing the kind you are already in leaves; pressing the
+    /// other switches, which is what vim does and what stops `v` from being a
+    /// dead key inside a linewise selection.
+    fn toggleVisual(self: *App, kind: render.Selection.Kind) void {
+        if (self.mode == .visual) {
+            if (self.visual_kind == kind) return self.leaveVisual();
+            self.visual_kind = kind;
+            return;
+        }
         self.mode = .visual;
+        self.visual_kind = kind;
         self.anchor = self.cursor;
+        self.anchor_col = self.col;
     }
 
     fn leaveVisual(self: *App) void {
         self.mode = .normal;
         self.anchor = self.cursor;
+        self.anchor_col = self.col;
     }
 
     /// The selected row range, low to high inclusive, or null outside visual
     /// mode. Normalised here rather than at each use, because a selection made
     /// upwards has the anchor below the cursor and every consumer would
     /// otherwise have to remember that.
-    pub fn selection(self: *const App) ?render.Range {
+    pub fn selection(self: *App) ?render.Selection {
         if (self.mode != .visual) return null;
-        return .{
-            .lo = @min(self.anchor, self.cursor),
-            .hi = @max(self.anchor, self.cursor),
-        };
+        const lo = @min(self.anchor, self.cursor);
+        const hi = @max(self.anchor, self.cursor);
+        if (self.visual_kind == .line) return .{ .lo = lo, .hi = hi };
+
+        // Charwise. Which end holds which column depends on which way the
+        // selection was made, and on the same row it is the columns rather
+        // than the rows that say.
+        const backwards = self.cursor < self.anchor or
+            (self.cursor == self.anchor and self.col < self.anchor_col);
+        const lo_col = if (backwards) self.col else self.anchor_col;
+        const hi_col = if (backwards) self.anchor_col else self.col;
+
+        // Vim's charwise selection includes the character under the cursor;
+        // the renderer wants a half-open range, so the conversion happens
+        // once, here.
+        const end_text = self.textOfRow(hi);
+        const end = motion.charRight(end_text, hi_col) orelse @as(u32, @intCast(end_text.len));
+        return .{ .lo = lo, .hi = hi, .kind = .char, .lo_col = lo_col, .hi_col = end };
     }
 
     // -- prompt and search ---------------------------------------------------
@@ -657,6 +687,10 @@ pub const App = struct {
         /// The cursor covers only lines that exist in HEAD and not on disk.
         /// The reference becomes the enclosing hunk, and says why.
         deleted: bool = false,
+        /// The text a charwise selection covers, when it is inside one line.
+        /// Empty otherwise - across two lines it would have to carry the
+        /// newline between them, and a newline is what hard rule 1 forbids.
+        span: []const u8 = "",
     };
 
     /// What the cursor, or the selection, is pointing at.
@@ -694,6 +728,7 @@ pub const App = struct {
                 .path = path,
                 .line = first,
                 .end = if (last > first) last else 0,
+                .span = self.spanText(sel),
             };
         }
 
@@ -709,6 +744,19 @@ pub const App = struct {
             };
         }
         return .{ .change_id = id, .path = path };
+    }
+
+    /// The words a charwise selection covers, trimmed, or empty when there is
+    /// no such thing to point at. Only within one line: the text of a
+    /// selection spanning two would contain the newline between them.
+    fn spanText(self: *App, sel: ?render.Selection) []const u8 {
+        const s = sel orelse return "";
+        if (s.kind != .char or s.lo != s.hi) return "";
+        const text = self.textOfRow(s.lo);
+        const lo = @min(s.lo_col, text.len);
+        const hi = @min(s.hi_col, text.len);
+        if (hi <= lo) return "";
+        return std.mem.trim(u8, text[lo..hi], " \t");
     }
 
     /// The reference as text. Which template applies is decided here and
@@ -730,6 +778,8 @@ pub const App = struct {
             self.templates.ref_hunk
         else if (r.end != 0)
             self.templates.ref_range
+        else if (r.span.len > 0)
+            self.templates.ref_span
         else
             self.templates.ref_single;
 
@@ -739,6 +789,7 @@ pub const App = struct {
             .{ .name = "line", .value = line },
             .{ .name = "start", .value = line },
             .{ .name = "end", .value = end },
+            .{ .name = "span", .value = r.span },
         });
     }
 
@@ -835,9 +886,100 @@ pub const App = struct {
         const n = self.rows.len();
         if (n == 0) {
             self.cursor = 0;
+            self.col = 0;
             return;
         }
         self.cursor = @min(row, n - 1);
+        // The column follows what was last asked for rather than what the
+        // previous line happened to allow, which is the whole point of
+        // keeping the two apart.
+        self.col = motion.clamp(self.cursorText(), self.want_col);
+    }
+
+    // -- the column ----------------------------------------------------------
+
+    /// The text under the cursor, or empty on a row that is chrome. Every
+    /// motion reads through this, so a header is a line of no characters
+    /// rather than a special case at each call site.
+    fn cursorText(self: *App) []const u8 {
+        return self.textOfRow(self.cursor);
+    }
+
+    fn textOfRow(self: *App, row: u32) []const u8 {
+        const f = self.current() orelse return "";
+        const li = self.rows.lineAt(row) orelse return "";
+        if (li >= f.lines.len()) return "";
+        return f.lines.text[li];
+    }
+
+    /// Moves the cursor within its line. Both columns, because this is the
+    /// reader saying where they want to be - the vertical motions are what
+    /// keep `want_col` and let `col` give way.
+    fn setCol(self: *App, at: u32) void {
+        self.col = at;
+        self.want_col = at;
+    }
+
+    /// Puts the column back on a boundary of the line it is now in. Every
+    /// rebuild needs it: the row can survive a re-diff while the text on it
+    /// becomes shorter, or becomes something else entirely.
+    fn clampCol(self: *App) void {
+        self.col = motion.clamp(self.cursorText(), self.col);
+    }
+
+    /// Applies a motion that may have nowhere to go on this line. `w` and `b`
+    /// carry on into the neighbouring line the way vim does; the character
+    /// motions stop, because `h` at column zero has always stopped.
+    fn stepWord(self: *App, forward: bool, width: motion.Width) void {
+        const text = self.cursorText();
+        const found = if (forward)
+            motion.wordNext(text, self.col, width)
+        else
+            motion.wordPrev(text, self.col, width);
+        if (found) |at| return self.setCol(at);
+
+        // Nothing left on this line: cross to the neighbouring one and take
+        // its first or last word. Chrome is stepped over - a hunk header is
+        // not a word - but an empty *line* is one, the way it is in vim, so a
+        // blank between two paragraphs is a place the cursor can be.
+        const last = self.rows.len() -| 1;
+        var row = self.cursor;
+        while (if (forward) row < last else row > 0) {
+            row = if (forward) row + 1 else row - 1;
+            if (self.rows.lineAt(row) == null) continue;
+            const next = self.textOfRow(row);
+            self.cursor = row;
+            self.setCol(if (forward) motion.firstNonBlank(next) else motion.lastWordStart(next, width));
+            return;
+        }
+    }
+
+    /// `e` and `E`, which cross into the next line the way `w` does - but over
+    /// an empty one rather than onto it, because an empty line has no word
+    /// whose end the cursor could sit on.
+    fn stepWordEnd(self: *App, width: motion.Width) void {
+        if (motion.wordEnd(self.cursorText(), self.col, width)) |at| return self.setCol(at);
+
+        const last = self.rows.len() -| 1;
+        var row = self.cursor;
+        while (row < last) {
+            row += 1;
+            if (self.rows.lineAt(row) == null) continue;
+            const at = motion.firstWordEnd(self.textOfRow(row), width) orelse continue;
+            self.cursor = row;
+            self.setCol(at);
+            return;
+        }
+    }
+
+    /// `f`, `t`, `F`, `T`, and the `;`/`,` that repeat them.
+    fn applyFind(self: *App, f: motion.Find) void {
+        self.last_find = f;
+        const text = self.cursorText();
+        if (motion.find(text, self.col, f)) |at| return self.setCol(at);
+        // Saying so beats a key that looks broken: `f` waited for a character
+        // and then nothing moved.
+        self.notice.set("no '{u}' on this line", .{f.target});
     }
 
     /// Wraps within the file, the way `]f` wraps within the review: at the last
@@ -1018,6 +1160,17 @@ pub const App = struct {
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
                 self.notice.clear();
+                // `f` and its three siblings each take the next key as the
+                // character to search for, never as a command. Escape gives up
+                // on one, so a mistyped `f` is not a key that eats the next.
+                if (self.pending_find) |p| {
+                    self.pending_find = null;
+                    if (k.codepoint != event.code.escape) {
+                        self.applyFind(.{ .target = k.codepoint, .forward = p.forward, .till = p.till });
+                    }
+                    self.clampScroll(body);
+                    return;
+                }
                 switch (self.km.feed(k, self.mode)) {
                     .command => |cmd| try self.run(cmd, body),
                     .pending, .none => {},
@@ -1146,6 +1299,7 @@ test {
     _ = prompt_mod;
     _ = render;
     _ = review_mod;
+    _ = motion;
     _ = rows_mod;
     _ = search;
     _ = theme_mod;
@@ -1387,6 +1541,296 @@ const Fixture = struct {
 
 /// The body height every fixture test drives with: a 26-row pane, less chrome.
 const body_rows: u16 = 22;
+
+// -- the column ------------------------------------------------------------
+
+test "the column moves within the line and stops at both ends" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Row 1 is `fn alpha() {`.
+    try fx.expectCursor(1);
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+
+    try fx.press("l");
+    try fx.press("l");
+    try testing.expectEqual(@as(u32, 2), fx.app.col);
+    try fx.press("h");
+    try testing.expectEqual(@as(u32, 1), fx.app.col);
+
+    // `h` at the first column is a key that does nothing, not an underflow.
+    try fx.press("h");
+    try fx.press("h");
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+
+    // `$` is the last character, never the position after it.
+    try fx.press("$");
+    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try fx.press("l");
+    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try fx.press("0");
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+}
+
+test "word motions step by class and carry into the next line" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `fn alpha() {` - a class change is a boundary, so `(` is its own word.
+    try fx.press("w");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try fx.press("w");
+    try testing.expectEqual(@as(u32, 8), fx.app.col);
+    try fx.press("e");
+    try testing.expectEqual(@as(u32, 9), fx.app.col);
+
+    // Off the end of the line, `w` carries into the next one rather than
+    // stopping - and lands on its first non-blank, past the indentation.
+    try fx.press("$");
+    try fx.press("w");
+    try fx.expectCursor(2);
+    try testing.expectEqual(@as(u32, 4), fx.app.col);
+
+    // And `b` comes back to the last word of the line above.
+    try fx.press("0");
+    try fx.press("b");
+    try fx.expectCursor(1);
+    try testing.expectEqual(@as(u32, 11), fx.app.col);
+}
+
+test "an empty line is a word, and a hunk header is not" {
+    const gpa = testing.allocator;
+    var fx = try Fixture.init(gpa);
+    defer fx.deinit();
+
+    // Blank out the middle line: `w` off the end of the first should stop on
+    // it, the way it does in vim, rather than skipping to the third.
+    fx.files[0].lines.text[1] = "";
+    try fx.press("$");
+    try fx.press("w");
+    try fx.expectCursor(2);
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+
+    // And from the blank line, on to the next line that has something.
+    try fx.press("w");
+    try fx.expectCursor(3);
+
+    // `e` passes *over* the blank rather than stopping on it: an empty line is
+    // a word, but it has no end for the cursor to sit on.
+    try fx.press("gg");
+    try fx.press("$");
+    try fx.expectCursor(1);
+    try fx.press("e");
+    try fx.expectCursor(3);
+
+    // Backwards over the blank, and then to the last word of the line above -
+    // never onto row 0, which is the hunk header.
+    try fx.press("b");
+    try fx.expectCursor(2);
+    try fx.press("b");
+    try fx.expectCursor(1);
+    try fx.press("0");
+    try fx.press("b");
+    try fx.expectCursor(1);
+}
+
+test "W steps over punctuation that w stops at" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Row 1 is `fn alpha() {`. `w` stops at the paren; `W` does not see it.
+    try fx.press("w");
+    try fx.press("w");
+    try testing.expectEqual(@as(u32, 8), fx.app.col);
+
+    try fx.press("0");
+    try fx.press("W");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try fx.press("W");
+    try testing.expectEqual(@as(u32, 11), fx.app.col);
+
+    // `E` runs to the end of the blob rather than to the end of `alpha`.
+    try fx.press("0");
+    try fx.press("E");
+    try testing.expectEqual(@as(u32, 1), fx.app.col);
+    try fx.press("E");
+    try testing.expectEqual(@as(u32, 9), fx.app.col);
+
+    // And `B` comes back over the whole of it.
+    try fx.press("$");
+    try fx.press("B");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+}
+
+test "the wanted column survives a short line and comes back on a long one" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Column 10 of `fn alpha() {`, then down onto `}`, which has one column.
+    try fx.press("$");
+    try fx.press("j");
+    try fx.press("j");
+    try fx.expectCursor(3);
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+
+    // Back up, and the column the reader asked for is where they land - the
+    // short line clamped the cursor without forgetting what was wanted.
+    try fx.press("k");
+    try testing.expectEqual(@as(u32, 15), fx.app.col);
+    try fx.press("k");
+    try testing.expectEqual(@as(u32, 11), fx.app.col);
+}
+
+test "f waits for a character, and Escape gives up on it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `fn alpha() {`: `f(` lands on the paren, `t(` one short of it.
+    try fx.press("f");
+    try testing.expect(fx.app.pending_find != null);
+    try fx.press("(");
+    try testing.expectEqual(@as(u32, 8), fx.app.col);
+    try testing.expect(fx.app.pending_find == null);
+
+    try fx.press("0");
+    try fx.press("t");
+    try fx.press("(");
+    try testing.expectEqual(@as(u32, 7), fx.app.col);
+
+    // `;` repeats it and `,` reverses it.
+    try fx.press("0");
+    try fx.press("f");
+    try fx.press("a");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try fx.press(";");
+    try testing.expectEqual(@as(u32, 7), fx.app.col);
+    try fx.press(",");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+
+    // A character that is not on the line says so rather than moving.
+    try fx.press("f");
+    try fx.press("z");
+    try fx.expectNotice("no 'z'");
+    try testing.expectEqual(@as(u32, 3), fx.app.col);
+
+    // Escape abandons a pending find, so a mistyped `f` does not eat the key
+    // after it.
+    try fx.press("f");
+    try fx.press("<Esc>");
+    try testing.expect(fx.app.pending_find == null);
+    try fx.press("0");
+    try testing.expectEqual(@as(u32, 0), fx.app.col);
+}
+
+test "v selects characters, V selects lines, and each toggles the other" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("v");
+    try fx.expectMode(.visual);
+    try testing.expectEqual(render.Selection.Kind.char, fx.app.selection().?.kind);
+    // One character to start with, inclusive of the one under the cursor.
+    try testing.expectEqual(@as(u32, 0), fx.app.selection().?.lo_col);
+    try testing.expectEqual(@as(u32, 1), fx.app.selection().?.hi_col);
+
+    try fx.press("l");
+    try fx.press("l");
+    try testing.expectEqual(@as(u32, 3), fx.app.selection().?.hi_col);
+
+    // `V` switches rather than doing nothing, and the range becomes lines.
+    try fx.press("V");
+    try fx.expectMode(.visual);
+    try testing.expectEqual(render.Selection.Kind.line, fx.app.selection().?.kind);
+    // The same key again leaves.
+    try fx.press("V");
+    try fx.expectMode(.normal);
+
+    // Selecting leftwards puts the anchor on the right; the range comes back
+    // normalised rather than inverted.
+    try fx.press("$");
+    try fx.press("v");
+    try fx.press("h");
+    try fx.press("h");
+    const sel = fx.app.selection().?;
+    try testing.expect(sel.lo_col < sel.hi_col);
+    try testing.expectEqual(@as(u32, 9), sel.lo_col);
+    try testing.expectEqual(@as(u32, 12), sel.hi_col);
+}
+
+test "a charwise selection points the agent at the words, not at a column" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Select `alpha` on `fn alpha() {`.
+    try fx.press("w");
+    try fx.press("v");
+    try fx.press("e");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1 `alpha`", fx.app.payload());
+
+    // Grown past one line, the text would have to carry the newline between
+    // them - so it becomes the line range it always was.
+    try fx.press("w");
+    try fx.press("v");
+    try fx.press("j");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
+}
+
+// -- soft wrap ------------------------------------------------------------
+
+test "a line wider than the pane is as many screen rows as it needs" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Rows: 0 header, 1..3 lines. The gutter is the sign, a space, a
+    // two-digit number and two spaces.
+    try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0]));
+    fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+
+    // 24 columns of text, so a 68-character line is three rows.
+    try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
+    // Chrome never wraps, whatever the width.
+    try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(0, body_rows));
+
+    // Wide enough and it is one row again, and so is every row with wrapping
+    // off - which is what makes `zw` a rendering switch and not a row model.
+    fx.app.cols = 200;
+    try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
+    fx.app.cols = 30;
+    fx.app.wrap = false;
+    try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
+}
+
+test "half a page is half a screen, not half the rows on it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
+    fx.app.cols = 30;
+
+    // Row 1 is three screen rows, so it alone is more than half of a six-row
+    // body: a page down from the header lands on it rather than past it.
+    try testing.expectEqual(@as(u32, 1), fx.app.rowBelow(0, 3, 6));
+    // The same motion over rows that do not wrap moves by the rows it counts.
+    fx.app.wrap = false;
+    try testing.expectEqual(@as(u32, 3), fx.app.rowBelow(0, 3, 6));
+}
+
+test "zw toggles wrapping and says which way it went" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try testing.expect(fx.app.wrap);
+    try fx.press("zw");
+    try testing.expect(!fx.app.wrap);
+    try fx.expectNotice("off");
+
+    try fx.press("zw");
+    try testing.expect(fx.app.wrap);
+    try fx.expectNotice("on");
+}
 
 // -- visual select -------------------------------------------------------
 
@@ -1713,18 +2157,18 @@ test "F opens the file list on the file the review is showing" {
 
     try fx.press("]f");
     try fx.expectFile(1);
-    try fx.press("F");
+    try fx.press("<Space>f");
     try fx.expectMode(.finder);
     // Opened on the current file, so the list says where the reader is before
     // it offers to move them.
     try testing.expectEqual(@as(u32, 1), fx.app.file_list.selected(fx.app.files()).?);
 
-    // `F` does *not* close it: inside the overlay a keystroke is filter text,
-    // and `F` is a letter that appears in paths. Escape closes, the way it
+    // The key that opened it does *not* close it: inside the overlay a
+    // keystroke is filter text, letters included. Escape closes, the way it
     // does in the `?` overlay and in every prompt.
-    try fx.press("F");
+    try fx.press("b");
     try fx.expectMode(.finder);
-    try testing.expectEqualStrings("F", fx.app.file_list.filter.text());
+    try testing.expectEqualStrings("b", fx.app.file_list.filter.text());
     try fx.press("<Esc>");
     try fx.expectMode(.normal);
     try fx.expectFile(1);
@@ -1734,7 +2178,7 @@ test "Enter jumps to the selected file, Escape leaves the review alone" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.press("F");
+    try fx.press("<Space>f");
     try fx.press("J");
     try fx.press("<CR>");
     try fx.expectMode(.normal);
@@ -1744,7 +2188,7 @@ test "Enter jumps to the selected file, Escape leaves the review alone" {
     try fx.expectCursor(fx.app.rows.firstLineRow());
 
     // Escape closes without moving.
-    try fx.press("F");
+    try fx.press("<Space>f");
     try fx.press("K");
     try fx.press("<Esc>");
     try fx.expectMode(.normal);
@@ -1757,7 +2201,7 @@ test "keys under the file list filter it rather than reaching the review" {
 
     try fx.press("j");
     const moved = fx.app.cursor;
-    try fx.press("F");
+    try fx.press("<Space>f");
 
     // `j` and `q` are a motion and a quit in the review; in here they are
     // letters, and the review must not move behind the overlay.
@@ -1777,14 +2221,14 @@ test "the file list filters by path and opens what it is showing" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.press("F");
+    try fx.press("<Space>f");
     try fx.typeIn("b.z");
     try testing.expectEqual(@as(usize, 1), files_mod.count(fx.app.files(), fx.app.file_list.filter.text()));
     try fx.press("<CR>");
     try fx.expectFile(1);
 
     // Closing cleared the query, so `F` never reopens onto a stale filter.
-    try fx.press("F");
+    try fx.press("<Space>f");
     try testing.expectEqual(@as(usize, 0), fx.app.file_list.filter.text().len);
 }
 
@@ -1927,7 +2371,7 @@ test "e sets a request rather than acting, because the loop owns the terminal" {
     defer fx.deinit();
 
     try testing.expect(!fx.app.want_editor);
-    try fx.press("e");
+    try fx.press("<Space>e");
     try testing.expect(fx.app.want_editor);
 }
 
@@ -2088,7 +2532,7 @@ test "the ask presets are the reference plus a question" {
     try testing.expectEqualStrings("#1 a.zig:1 - why this approach?", fx.app.payload());
     try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
 
-    try fx.press("t");
+    try fx.press("<Space>t");
     try testing.expectEqualStrings("#1 a.zig:1 - add a test covering this", fx.app.payload());
 
     try fx.press("x");

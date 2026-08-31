@@ -166,6 +166,54 @@ pub fn height(text: []const u8, width: u16, method: Method, cap: u16) u16 {
     return @max(n, 1);
 }
 
+/// Where one byte offset of a line is drawn: which of the line's screen rows,
+/// and how many columns into it. Relative to the line, so the caller adds its
+/// own row and gutter.
+pub const Cell = struct {
+    row: u16 = 0,
+    col: u16 = 0,
+};
+
+/// Locates `offset` in the wrapped line. A `width` of zero measures the line
+/// unwrapped, which is what a caller with wrapping off wants: one row, and a
+/// column that may run past the pane for it to clamp.
+///
+/// An offset inside a seam - a space the wrap dropped - belongs to the end of
+/// the row before it, which is where a cursor sitting on that space is drawn.
+pub fn locate(text: []const u8, width: u16, method: Method, offset: u32) Cell {
+    var it: Iterator = .init(text, width, method);
+    var row: u16 = 0;
+    var prev: Chunk = .{ .start = 0, .end = 0 };
+    while (it.next()) |chunk| {
+        // Skipped over: the offset is a space this row dropped, so it is drawn
+        // at the end of the row before it.
+        if (offset < chunk.start) {
+            return .{ .row = row -| 1, .col = columns(prev.slice(text), method) };
+        }
+        if (offset < chunk.end) {
+            return .{ .row = row, .col = columns(text[chunk.start..offset], method) };
+        }
+        prev = chunk;
+        row += 1;
+    }
+    // Past the last byte: the cell just after the final row's text, which is
+    // where an offset at the end of the line belongs.
+    return .{ .row = row -| 1, .col = columns(prev.slice(text), method) };
+}
+
+/// Display columns of a run of text, with the same ASCII shortcut the wrap
+/// itself takes.
+pub fn columns(text: []const u8, method: Method) u16 {
+    if (isAscii(text)) {
+        var n: u16 = 0;
+        for (text) |b| {
+            if (b >= 0x20 and b != 0x7f) n += 1;
+        }
+        return n;
+    }
+    return vaxis.gwidth.gwidth(text, method);
+}
+
 fn isSpace(b: u8) bool {
     return b == ' ' or b == '\t';
 }
@@ -294,6 +342,39 @@ test "a wide glyph counts two columns and never stalls in a one-column pane" {
     const narrow = try rowsOf(gpa, "\u{4f60}\u{597d}", 1);
     defer gpa.free(narrow);
     try testing.expectEqual(@as(usize, 2), narrow.len);
+}
+
+test "an offset is located on the row and column it is drawn at" {
+    const text = "the block is a different thing";
+
+    // Unwrapped: one row, and the column is the display width before it.
+    try testing.expectEqual(@as(u16, 0), locate(text, 0, .unicode, 10).row);
+    try testing.expectEqual(@as(u16, 10), locate(text, 0, .unicode, 10).col);
+
+    // Wrapped at 14: "the block is a" / "different" / "thing".
+    try testing.expectEqual(Cell{ .row = 0, .col = 4 }, locate(text, 14, .unicode, 4));
+    // "different" starts at byte 15, the first column of the second row.
+    try testing.expectEqual(Cell{ .row = 1, .col = 0 }, locate(text, 14, .unicode, 15));
+    try testing.expectEqual(Cell{ .row = 1, .col = 3 }, locate(text, 14, .unicode, 18));
+    // "thing" starts at byte 25.
+    try testing.expectEqual(Cell{ .row = 2, .col = 0 }, locate(text, 14, .unicode, 25));
+
+    // Byte 14 is the seam - a space no row draws - so it belongs to the end of
+    // the row before it rather than to the start of the next.
+    try testing.expectEqual(Cell{ .row = 0, .col = 14 }, locate(text, 14, .unicode, 14));
+
+    // Past the end is the cell after the last character, not a trap.
+    try testing.expectEqual(Cell{ .row = 2, .col = 5 }, locate(text, 14, .unicode, 99));
+    // An empty line has one cell, at the origin.
+    try testing.expectEqual(Cell{ .row = 0, .col = 0 }, locate("", 14, .unicode, 0));
+}
+
+test "a wide glyph is measured in columns, not bytes" {
+    const text = "a\u{4f60}b";
+    // The glyph at byte 1 is two columns, so `b` at byte 4 sits at column 3.
+    try testing.expectEqual(@as(u16, 1), locate(text, 0, .unicode, 1).col);
+    try testing.expectEqual(@as(u16, 3), locate(text, 0, .unicode, 4).col);
+    try testing.expectEqual(@as(u16, 4), columns(text, .unicode));
 }
 
 test "the height cap stops counting rather than walking a generated line" {

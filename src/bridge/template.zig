@@ -17,6 +17,10 @@ pub const Table = struct {
     ref_single: []const u8 = "#{change_id} {path}:{line}",
     /// A visual selection, resolved against the new file.
     ref_range: []const u8 = "#{change_id} {path}:{start}-{end}",
+    /// A charwise selection inside one line: the line, and the text itself.
+    /// A column number would be no use to an agent - it does not count
+    /// columns, it reads the line - but the words do the pointing.
+    ref_span: []const u8 = "#{change_id} {path}:{line} `{span}`",
     /// The cursor on a deleted line: the new file has no such line, so the
     /// reference is the enclosing hunk plus a note saying why (SPEC.md 6.3).
     ref_hunk: []const u8 = "#{change_id} {path}:{line} (deleted lines in this hunk)",

@@ -47,7 +47,7 @@ Not an agent. No embedded terminal. No plugin runtime. See `docs/SPEC.md` §4.
 
 ## Status
 
-Pre-alpha, and now the whole loop: `zig build run` shows this repository's own uncommitted changes, with syntax highlighting, hunk headers naming the enclosing function, vim motions across the whole review, search, visual select, a `?` key overlay, an `F` file list, seven themes and a config file - and `Enter` puts a reference into the agent's pane, which is the thing it exists for. Every v0.1 phase is now green; what is left is a week of using it.
+Pre-alpha, and now the whole loop: `zig build run` shows this repository's own uncommitted changes, with syntax highlighting, hunk headers naming the enclosing function, vim motions across the whole review, search, visual select, a `?` key overlay, a `<Space>f` file list, seven themes and a config file - and `Enter` puts a reference into the agent's pane, which is the thing it exists for. Every v0.1 phase is now green; what is left is a week of using it.
 
 The parts below the terminal were built first, because that is the order the dependency graph demands rather than the order a demo would want - each one is testable headless, and a wrong decision is far cheaper to find before a TUI is attached to it.
 
@@ -104,10 +104,11 @@ On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: ru
 ## Sending
 
 With the cursor on a line, `Enter` puts `#3 src/auth.zig:47` into the agent's
-pane. `V` selects a range first and sends `:47-52`. `y` copies the reference,
-`Y` copies it with the lines under it, and `a` `!` `t` `x` send the reference
-with a question attached - "why this approach?", "revert this, keep the rest",
-"add a test covering this", "explain what this does".
+pane. `V` selects a range first and sends `:47-52`; `v` selects within the line
+and sends the words themselves. `y` copies the reference, `Y` copies it with the
+lines under it, and `a` `!` `<Space>t` `x` send the reference with a question
+attached - "why this approach?", "revert this, keep the rest", "add a test
+covering this", "explain what this does".
 
 **It inserts text and never presses Enter.** The payload ends with a trailing
 space; you type your question and decide when to submit. A payload containing a
@@ -139,7 +140,7 @@ cursor_line = "on #313244"
 
 [ui]
 icons = "unicode"          # "ascii" for a terminal without the glyphs,
-                           # "nerd" for file-type icons in the F list
+                           # "nerd" for file-type icons in the file list
 wrap = true                # soft wrap long lines; zw toggles it live
 
 [nav]
@@ -155,7 +156,7 @@ open_editor = []           # unbind: it stops being offered anywhere
 ```
 
 **File-type icons are off until you ask for them.** `icons = "nerd"` puts a
-per-language glyph beside every path in the `F` list, and the default does not,
+per-language glyph beside every path in the file list, and the default does not,
 because the default cannot know whether your terminal font has the glyphs. It
 needs a [Nerd Font](https://www.nerdfonts.com); if the icons come out as boxes
 or blank gaps, that is the font rather than the setting, and `"unicode"` puts it
@@ -163,6 +164,15 @@ back. Thirty-seven file types have their own icon and everything else gets a
 generic one, so the column never comes out ragged. `nerd` changes nothing else:
 it patches icons in, and leaves the rules and box borders exactly as `unicode`
 draws them.
+
+**Point at a word, not just a line.** The cursor is a character: `h l w b e`
+and `W B E` for the whitespace-delimited kind, `0 ^ $`, and `f t F T` with `;`
+and `,` to repeat. `v` selects within a line and
+`V` selects lines. A charwise selection sends the text you highlighted rather
+than a column number - ``#3 src/auth.rs:47 `verify_token` `` - because a column
+number is no use to an agent, and the word is what you would have said out loud.
+Three keys moved to make room: `e`, `t` and `F` are motions now, and the editor,
+the test preset and the file list are `<Space>e`, `<Space>t` and `<Space>f`.
 
 **Long lines wrap instead of being cut off.** In a split pane most prose and
 plenty of code runs past the edge, and a review of the half that fit is not a

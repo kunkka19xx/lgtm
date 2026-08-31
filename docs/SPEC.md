@@ -87,7 +87,7 @@ Deliberately out of scope for v1. Written down so scope creep has something to b
 - **Change detection:** v0.1 polls every 500 ms; v0.2 replaces it with native filesystem events. Either way, **debounce 200 ms before re-diffing** - agents write in bursts and often leave a file half-written for a few milliseconds. Without debounce you render torn states and the screen flickers.
 - Only re-diff files that changed. Never re-diff the whole repo.
 - Hunk headers show the **enclosing function name** (from the lexer's brace-depth scan, not git's regex heuristic) plus a **change id** (`#3`) for referring to it in conversation. See §6.5 for how ids stay stable.
-- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `F` - an overlay, not a pane, so it costs rows only while it is open (both shipped). Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain supported (options 1a and 1b). `Tab` toggles a full-screen diff.
+- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `<Space>f` - an overlay, not a pane, so it costs rows only while it is open (both shipped). Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain supported (options 1a and 1b). `Tab` toggles a full-screen diff.
 - Files with more than 5,000 changed lines render a summary; the diff loads lazily on open.
 
 **Unified vs side-by-side - responsive**
@@ -108,7 +108,11 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 
 | Key | Action |
 |---|---|
-| `h j k l` | move |
+| `h j k l` | move: a character sideways, a line up or down |
+| `w` / `b` / `e` | next / previous word, end of word - a change of character class is a boundary; `w` and `b` carry into the neighbouring line |
+| `W` / `B` / `E` | the same over WORDs, where only blanks are a boundary, so a path or a whole call is one step |
+| `0` / `^` / `$` | first column / first non-blank / last column |
+| `f` `t` `F` `T` | to, or up to, a character on this line; `;` and `,` repeat it |
 | `Ctrl-d` / `Ctrl-u` | half page |
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; `N` runs it backwards |
@@ -117,12 +121,16 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
 | `]f` / `[f` | next / previous file (wraps at either end) |
 | `<Space>nf` / `<Space>pf` | next / previous file, leader aliases |
-| `V` | visual line select |
+| `v` / `V` | visual select, by character or by line; either switches to the other |
 | `zz` | center current line |
 | `zw` | soft wrap on / off |
-| `e` | open current line in `$EDITOR` |
+| `<Space>e` | open current line in `$EDITOR` |
 | `q` | quit |
 | `?` | help popup: every key live in the current mode, fuzzy-filtered as you type, `HJKL` or arrows to move: `J`/`K` a row, `H`/`L` a column |
+
+**Word motions cross lines, and know what a line is.** `w`, `b`, `e` and their capitals carry into the neighbouring diff line rather than stopping at the end of one, which is what vim does and what a hand expects. Two rules come with that: a hunk header is not a word, so the motions step over it; and an empty line *is* a word, so `w` and `b` stop on one - but `e` and `E` pass over it, because an empty line has no word end for a cursor to sit on. `gg` lands on the first line for the same reason: it says "first line", and row zero is a hunk header.
+
+**The cursor is a character, not a line.** It is a `(row, column)` pair drawn as the terminal's own cursor inside the line highlight, and the column survives a vertical motion the way vim's `curswant` does: down through a short line and back onto a long one returns to where the eye was, not to the short line's end. Word motions treat a change of character class as a boundary, so `w` steps through `foo.bar(baz)` a piece at a time. What the column is *for* is §6.3: pointing at a word rather than at a line.
 
 **A line wider than the pane wraps rather than being cut.** The continuation sits under the gutter with no sign and no line number, so a wrapped line still reads as one line of the file, and the cursor highlight covers every row of it. The row model does not change: `j` moves a line of the file, not a row of the screen, and a selection is still a range of lines - wrapping is a rendering decision, which is what makes `zw` free to turn it off (`ui.wrap = false` for the default). Off, a long line is clipped at the edge, which is what a reader comparing the *shape* of two versions wants. Rows are broken at the last space that fits; a word longer than the pane is broken where the columns run out.
 
@@ -136,8 +144,11 @@ With the cursor on a diff line:
 
 - `Enter` → send `#3 src/auth.rs:47`
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
+- `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
 - `y` → copy the reference to the clipboard
 - `Y` → copy the reference **and** the line contents
+
+**A charwise selection sends the words, not the columns.** `47:12` is no use to an agent - it does not count columns, it reads the line - so the reference carries the selected text instead, which is what a human would have said. Only within one line: across two, the text would have to carry the newline between them, and that is what hard rule 1 forbids, so a selection that grows past a line falls back to the line range it always was.
 
 **Inviolable rule: insert text, never press Enter.** The payload ends with a trailing space; the user types their question and decides when to submit. `lgtm` never submits on the user's behalf.
 
