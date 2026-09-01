@@ -144,6 +144,23 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     try app.rediff();
 
     while (!app.quit) {
+        // A SIGWINCH that never reached the queue leaves the screen wider
+        // than the pane, and the terminal then wraps every row vaxis writes:
+        // one rule becomes two, one line of code becomes two. The reader
+        // services the flag on its own wake, so this only catches the pane
+        // with no pollable descriptor - but there it is the difference
+        // between correcting on the next event and staying wrong all session.
+        if (term.winsize()) |now| {
+            if (now.cols != ws.cols or now.rows != ws.rows) {
+                ws = now;
+                try vx.resize(gpa, w, ws);
+                try app.handle(
+                    .{ .resize = .{ .cols = ws.cols, .rows = ws.rows } },
+                    render.bodyHeight(ws.rows, app.zen),
+                );
+            }
+        } else |_| {}
+
         // Once for the iteration: every use below is the same answer, and a
         // resize inside `applyEvents` is picked up by the next pass.
         const body = render.bodyHeight(ws.rows, app.zen);

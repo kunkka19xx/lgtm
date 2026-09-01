@@ -16,6 +16,7 @@ const event = @import("../core/event.zig");
 const body_mod = @import("body.zig");
 const motion = @import("motion.zig");
 const frame_mod = @import("frame.zig");
+const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
 
 pub const Frame = frame_mod.Frame;
@@ -98,27 +99,93 @@ fn drawTooSmall(f: Frame) void {
     f.put(0, 0, "lgtm: window too small", f.theme.dim);
 }
 
+/// Columns the path keeps before a status field is dropped to pay for them,
+/// and the floor below which nothing but the path is drawn at all.
+const min_path = 16;
+const min_name = 8;
+
 fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
     const t = f.theme;
     const g = f.glyphs;
 
-    var col: u16 = 1;
-    col += try f.print(row, col, t.path, "{s}", .{v.file.path()});
-    col += try f.print(row, col, t.dim, " {s} {d}/{d} {s} ", .{
-        g.sep, v.file_index + 1, v.file_count, g.sep,
+    // Which hunk the cursor is in, out of how many in the review.
+    const right: []const u8 = blk: {
+        const hi = v.rows.hunkAt(v.cursor) orelse break :blk "";
+        if (hi >= v.file.hunks.len) break :blk "";
+        break :blk try std.fmt.allocPrint(f.arena, "#{d} {s} {d}/{d} ", .{
+            v.file.hunks[hi].id, g.sep, v.hunk_ordinal, v.total_hunks,
+        });
+    };
+    const counter = try std.fmt.allocPrint(f.arena, " {s} {d}/{d}", .{
+        g.sep, v.file_index + 1, v.file_count,
     });
-    col += try f.print(row, col, t.added_count, "+{d}", .{v.file.added}) + 1;
-    _ = try f.print(row, col, t.removed_count, "{s}{d}", .{ g.del, v.file.removed });
+    const bar = try std.fmt.allocPrint(f.arena, " {s} ", .{g.sep});
+    const added = try std.fmt.allocPrint(f.arena, "+{d}", .{v.file.added});
+    const removed = try std.fmt.allocPrint(f.arena, "{s}{d}", .{ g.del, v.file.removed });
 
-    // Right side: which hunk the cursor is in, out of how many in this file.
-    if (v.rows.hunkAt(v.cursor)) |hi| {
-        if (hi < v.file.hunks.len) {
-            const right = try std.fmt.allocPrint(f.arena, "#{d} {s} {d}/{d} ", .{
-                v.file.hunks[hi].id, g.sep, v.hunk_ordinal, v.total_hunks,
-            });
-            f.putRight(row, right, t.hunk_id);
-        }
+    const counter_w = f.win.gwidth(counter);
+    const counts_w = f.win.gwidth(bar) + f.win.gwidth(added) + 1 + f.win.gwidth(removed);
+
+    const fit = statusFit(
+        f.width(),
+        if (right.len > 0) f.win.gwidth(right) + 1 else 0,
+        counter_w,
+        counts_w,
+    );
+
+    var col: u16 = 1;
+    const shown = try path_mod.elide(f.arena, v.file.path(), fit.path, g.ellipsis, f.method());
+    col += try f.print(row, col, t.path, "{s}", .{shown});
+    if (fit.counter) {
+        f.put(row, col, counter, t.dim);
+        col += counter_w;
     }
+    if (fit.counts) {
+        f.put(row, col, bar, t.dim);
+        col += f.win.gwidth(bar);
+        f.put(row, col, added, t.added_count);
+        col += f.win.gwidth(added) + 1;
+        f.put(row, col, removed, t.removed_count);
+    }
+    if (fit.right and right.len > 0) f.putRight(row, right, t.hunk_id);
+}
+
+const StatusFit = struct {
+    path: u16,
+    right: bool = true,
+    counter: bool = true,
+    counts: bool = true,
+};
+
+/// Which status fields fit `total` columns, and what is left for the path.
+///
+/// The path is what names the file, so it is the field the others are dropped
+/// for rather than the one that gets clipped by whatever is right-aligned over
+/// it - which is what a 60-column pane used to do, silently eating `+3 −3` and
+/// half the name with it. The hunk position goes first because `@@ #id` on the
+/// header row below already says which hunk this is; the file counter next;
+/// the change counts last, and only when even a bare name will not fit.
+///
+/// Pure, so hard rule 9 is checked at every width without a pane to draw in.
+fn statusFit(total: u16, right_w: u16, counter_w: u16, counts_w: u16) StatusFit {
+    // One leading column, always: a path flush against the edge reads as
+    // clipped even when it is whole.
+    var out: StatusFit = .{ .path = 0, .right = right_w > 0 };
+    var used: u16 = 1 + right_w + counter_w + counts_w;
+    if (total -| used < min_path) {
+        out.right = false;
+        used = 1 + counter_w + counts_w;
+    }
+    if (total -| used < min_path) {
+        out.counter = false;
+        used = 1 + counts_w;
+    }
+    if (total -| used < min_name) {
+        out.counts = false;
+        used = 1;
+    }
+    out.path = total -| used;
+    return out;
 }
 
 fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
@@ -202,6 +269,59 @@ test {
     _ = body_mod;
     _ = frame_mod;
     _ = popup;
+}
+
+test "the status row drops fields rather than drawing them over the path" {
+    // `path ▏ 1/2 ▏ +1 −1` with `#1 ▏ 1/2 ` right-aligned: 10, 6 and 8.
+    const right: u16 = 10;
+    const counter: u16 = 6;
+    const counts: u16 = 8;
+
+    // 80 columns is the pane the layout is designed for: everything fits.
+    const wide = statusFit(80, right, counter, counts);
+    try testing.expect(wide.right and wide.counter and wide.counts);
+    try testing.expectEqual(@as(u16, 55), wide.path);
+
+    // Narrow enough that the right block would eat the name, so it goes.
+    const mid = statusFit(34, right, counter, counts);
+    try testing.expect(!mid.right);
+    try testing.expect(mid.counter and mid.counts);
+
+    // Narrower still: the file counter follows it.
+    const tight = statusFit(26, right, counter, counts);
+    try testing.expect(!tight.right and !tight.counter);
+    try testing.expect(tight.counts);
+
+    // The change counts are last to go, so they survive the narrowest pane
+    // that draws a layout at all - `+1 −1` is why the file is open.
+    const tiny = statusFit(20, right, counter, counts);
+    try testing.expect(tiny.counts);
+    try testing.expectEqual(@as(u16, 11), tiny.path);
+
+    // Below that there is no honest row, and the name is all that is left.
+    try testing.expect(!statusFit(16, right, counter, counts).counts);
+}
+
+test "the status fields never claim more columns than the row has" {
+    // The invariant the old layout broke: whatever is drawn has to fit
+    // beside the path, at every width, with no field overwriting another.
+    var total: u16 = 20;
+    while (total <= 200) : (total += 1) {
+        const fit = statusFit(total, 10, 6, 8);
+        var used: u16 = 1 + fit.path;
+        if (fit.right) used += 10;
+        if (fit.counter) used += 6;
+        if (fit.counts) used += 8;
+        try testing.expect(used <= total);
+        // And the path is never squeezed below what still names a file.
+        try testing.expect(fit.path >= min_name);
+    }
+
+    // No hunk under the cursor is a right block of nothing, not a gap held
+    // open for one.
+    const none = statusFit(40, 0, 6, 8);
+    try testing.expect(!none.right);
+    try testing.expectEqual(@as(u16, 25), none.path);
 }
 
 test "every mode has a label, including the ones v0.1 cannot reach" {
