@@ -35,6 +35,66 @@ pub fn writeFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
+/// The one directory lgtm writes durable state into (ARCHITECTURE.md 1).
+pub const state_dir = ".lgtm";
+
+/// What lgtm puts in `.lgtm/.gitignore` the first time it writes anything.
+///
+/// The state directory is created inside the user's repository, so without
+/// this the pane id lgtm has just saved comes back as an untracked file in the
+/// diff lgtm is drawing: the tool adding noise to its own review, in the first
+/// five minutes, before anyone has formed an opinion about it. Written here
+/// rather than into the repository's own `.gitignore`, which lgtm does not own
+/// and has no business editing.
+///
+/// `config.toml` is re-included deliberately: it is per-repo configuration
+/// meant to be committed and shared (FEATURES.md 4.8), and everything else
+/// here is machine-local - a tmux pane id, a git index, a session id.
+///
+/// Two spellings that look right and are not. The pattern is `*` rather than
+/// the directory itself, because git does not descend into an excluded
+/// directory and a negation underneath one silently does nothing. And there is
+/// no `!.gitignore`: the usual reason to exempt an ignore file is to commit it
+/// so a team shares the rules, but lgtm writes this one on every machine it
+/// runs on, so exempting it buys nothing and costs the exact thing the file
+/// exists to prevent - one untracked file, in the review, from the tool. Git
+/// reads ignore rules off the working tree whether or not the file is tracked,
+/// so ignoring itself changes nothing about what it does.
+const self_ignore =
+    \\# Written by lgtm on first use. Everything here is machine-local except
+    \\# config.toml, which is per-repo config and meant to be committed.
+    \\*
+    \\!config.toml
+    \\
+;
+
+/// Whole-file write into `.lgtm/`, creating the directory and its self-ignore
+/// the first time.
+///
+/// Every durable write goes through here rather than `writeFile`, so the next
+/// writer - notes, snapshots, the session file - cannot forget the ignore and
+/// put the noise back.
+pub fn writeStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
+    std.debug.assert(std.mem.startsWith(u8, path, state_dir ++ "/"));
+
+    Dir.cwd().createDirPath(io, state_dir) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+    ensureSelfIgnore(io);
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
+/// Best effort, and never an overwrite: a user who has edited the file, or
+/// deleted it on purpose, has said what they want and the tool does not argue.
+/// A failure is silent for the same reason `saveTarget` is - a read-only
+/// checkout should not break a send that has already worked.
+fn ensureSelfIgnore(io: Io) void {
+    const path = state_dir ++ "/.gitignore";
+    if (fileExists(io, path)) return;
+    Dir.cwd().writeFile(io, .{ .sub_path = path, .data = self_ignore }) catch {};
+}
+
 /// Entry names of a directory, sorted. Caller owns the slice and each name.
 pub fn listDir(io: Io, gpa: Allocator, path: []const u8) ![][]u8 {
     var dir = try Dir.cwd().openDir(io, path, .{ .iterate = true });
@@ -113,6 +173,46 @@ pub fn fileExists(io: Io, path: []const u8) bool {
     const file = Dir.cwd().openFile(io, path, .{}) catch return false;
     file.close(io);
     return true;
+}
+
+test "the self-ignore hides the state and shares the config" {
+    const testing = std.testing;
+
+    // Exactly two rules, because every extra one has a way of being subtly
+    // wrong. `*` rather than the directory: git will not descend into an
+    // excluded directory, so a negation under it does nothing. Then
+    // `config.toml` back, so a repo can commit its own config.
+    var it = std.mem.tokenizeScalar(u8, self_ignore, '\n');
+    var rules: [2][]const u8 = undefined;
+    var n: usize = 0;
+    while (it.next()) |line| {
+        if (std.mem.startsWith(u8, line, "#")) continue;
+        try testing.expect(n < rules.len);
+        rules[n] = line;
+        n += 1;
+    }
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqualStrings("*", rules[0]);
+    try testing.expectEqualStrings("!config.toml", rules[1]);
+
+    // A blanket `.lgtm/` is the tempting spelling and the broken one.
+    try testing.expect(std.mem.indexOf(u8, self_ignore, state_dir) == null);
+
+    // And no `!.gitignore`: exempting it puts the file back in the review,
+    // which is the noise this whole thing exists to remove.
+    try testing.expect(std.mem.indexOf(u8, self_ignore, "!.gitignore") == null);
+}
+
+test "state paths agree with the directory that ignores them" {
+    // `writeStateFile` asserts its path is under `state_dir`, so a path
+    // constant that drifts is a panic at the first send rather than a file
+    // written somewhere nothing ignores.
+    const testing = std.testing;
+    const bridge = @import("../bridge/bridge.zig");
+    const config = @import("../config.zig");
+
+    try testing.expect(std.mem.startsWith(u8, bridge.target_path, state_dir ++ "/"));
+    try testing.expect(std.mem.startsWith(u8, config.repo_path, state_dir ++ "/"));
 }
 
 test "readFile returns file contents" {

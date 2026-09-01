@@ -450,7 +450,7 @@ fn protoFor(cmd: keymap.Command) keymap.Binding {
 /// Where the config lives. `$XDG_CONFIG_HOME` first, as every other tool on
 /// the user's machine does, `~/.config` after it, and the repo's own file
 /// last so that it wins (FEATURES.md 4.8).
-pub const repo_path = ".lgtm/config.toml";
+pub const repo_path = fs.state_dir ++ "/config.toml";
 
 pub fn globalPath(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
     if (environ.get("XDG_CONFIG_HOME")) |xdg| {

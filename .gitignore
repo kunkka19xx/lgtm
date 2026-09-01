@@ -1,7 +1,6 @@
 .zig-cache/
 zig-out/
 zig-pkg/
-.lgtm/
 *.o
 .DS_Store
 CLAUDE.md

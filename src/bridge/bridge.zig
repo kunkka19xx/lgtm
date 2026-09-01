@@ -191,7 +191,7 @@ fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
 
 /// Durable state lives in `.lgtm/` and nowhere else (ARCHITECTURE.md 1). One
 /// pane id, one line, so it is readable and deletable by hand.
-pub const target_path = ".lgtm/target";
+pub const target_path = fs.state_dir ++ "/target";
 
 /// One pane id and a newline. The cap is a sanity bound on a file the user can
 /// edit by hand, not a budget.
@@ -217,7 +217,7 @@ fn parseTarget(bytes: []const u8, buf: []u8) ?[]const u8 {
 /// Best effort: a read-only checkout should not stop a send that has already
 /// worked, so a failure here is silent and the target lasts the session.
 pub fn saveTarget(io: std.Io, pane: []const u8) void {
-    fs.writeFile(io, target_path, pane) catch {};
+    fs.writeStateFile(io, target_path, pane) catch {};
 }
 
 const testing = std.testing;
