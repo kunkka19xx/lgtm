@@ -115,7 +115,8 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `f` `t` `F` `T` | to, or up to, a character on this line; `;` and `,` repeat it |
 | `Ctrl-d` / `Ctrl-u` | half page |
 | `gg` / `G` | top / bottom |
-| `/` `n` `N` | search within the diff; `N` runs it backwards |
+| `/` `n` `N` | search within the diff; matches light up as the query is typed; `N` runs it backwards |
+| `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
 | `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
@@ -144,7 +145,9 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 
 **A line wider than the pane wraps rather than being cut.** The continuation sits under the gutter with no sign and no line number, so a wrapped line still reads as one line of the file, and the cursor highlight covers every row of it. The row model does not change: `j` moves a line of the file, not a row of the screen, and a selection is still a range of lines - wrapping is a rendering decision, which is what makes `zw` free to turn it off (`ui.wrap = false` for the default). Off, a long line is clipped at the edge, which is what a reader comparing the *shape* of two versions wants. Rows are broken at the last space that fits; a word longer than the pane is broken where the columns run out.
 
-No insert mode. No `:` command mode in v1, except `:q`. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
+No insert mode. No `:` command mode in v1, except `:q` and `:noh` - the second because a search highlight with no way off the screen is a search you stop using. `<Esc>` does the same thing and is the discoverable half: it was unbound in normal mode, and the highlight is the only thing there to cancel. Both keep the pattern, so `n` still works and repaints, which is vim's split exactly. No `?` reverse search: it is redundant with `/` plus `N`, and `?` belongs to the help popup (FEATURES.md 4.4).
+
+**Matches highlight while the query is being typed**, vim's `incsearch`. It earns its place by answering two questions a keystroke earlier than Enter would: whether the query is already unambiguous, and whether it matches anything at all - a query that has gone one character too far goes dark while there is still a backspace left to fix it. The cursor does **not** preview-jump to the first match yet; the highlight is the half that costs nothing and cannot lose the reader's place.
 
 Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing into the next file at the end of one - the status line already counts hunks across all files ("4 of 17"), so stopping at a file boundary would leave the primary motion unable to reach most of what it advertises. It wraps only at the far end of the last file. `nav.hunk_crosses_files = false` keeps hunk motions inside the current file, wrapping there instead. `]f` from the last file lands on the first, `[f` from the first lands on the last, and the wrap is announced in the status line the way a wrapped search is. A review is a ring; stopping dead at the end reads as a dropped keystroke.
 

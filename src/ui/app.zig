@@ -333,8 +333,27 @@ pub const App = struct {
                 .text = self.prompt.text(),
             } else null,
             .notice = self.notice.text(),
-            .query = self.finder.query(),
+            .query = self.liveQuery(),
         };
+    }
+
+    /// The pattern the renderer highlights this frame.
+    ///
+    /// While a `/` prompt is open it is the text being typed, so matches light
+    /// up as the query is built rather than only once Enter is pressed. That
+    /// is vim's `incsearch`, and the reason it earns its place: you find out
+    /// you have typed enough to be unambiguous *before* committing to it, and
+    /// a query that matches nothing says so while there is still a keystroke
+    /// left to fix it.
+    ///
+    /// A `:` prompt highlights nothing. Its text is a command, not a pattern,
+    /// and painting `noh` across the diff while it is typed is exactly the
+    /// noise this feature is supposed to reduce.
+    fn liveQuery(self: *App) []const u8 {
+        if (self.prompt.open and self.prompt.kind == .search_forward) {
+            return self.prompt.text();
+        }
+        return self.finder.shown();
     }
 
     /// 1-based position of the cursor's hunk across the whole review.
@@ -410,6 +429,7 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.compose(.send, .ref),
+            .clear_search => self.finder.hide(),
             .copy_text => try self.yank(.selection),
             .copy_text_lines => try self.yank(.lines),
             .copy_ref => try self.compose(.copy, .ref),
@@ -654,6 +674,14 @@ pub const App = struct {
             self.quit = true;
             return;
         }
+        // Every spelling vim answers to, because the muscle memory is for
+        // whichever one the reader happens to have learned.
+        if (std.mem.eql(u8, cmd, "noh") or std.mem.eql(u8, cmd, "nohl") or
+            std.mem.eql(u8, cmd, "nohlsearch"))
+        {
+            self.finder.hide();
+            return;
+        }
         self.notice.set("not an editor command: :{s}", .{cmd});
     }
 
@@ -672,6 +700,9 @@ pub const App = struct {
 
         self.finder.wrapped = false;
         self.finder.failed = false;
+        // `n` after `:noh` paints again, which is what vim does: the reader
+        // asked to be shown the next one.
+        self.finder.show();
 
         const start_file = self.file_index;
         var fi: u32 = start_file;
@@ -3009,6 +3040,46 @@ test "a one-row selection is a single line, not a range of one" {
 
     try fx.press("V<CR>");
     try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+}
+
+test "matches light up while the query is still being typed" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Nothing to paint before a search exists.
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+
+    // Mid-type, with no Enter yet: this is the whole feature.
+    try fx.press("/co");
+    try testing.expectEqualStrings("co", fx.app.view(body_rows).?.query);
+    try fx.press("n");
+    try testing.expectEqualStrings("con", fx.app.view(body_rows).?.query);
+
+    // Cancelling puts the screen back the way it was, rather than leaving the
+    // abandoned query painted across the diff.
+    try fx.press("<Esc>");
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+
+    // Submitting hands over to the stored query, and `:noh` still clears it.
+    try fx.press("/co");
+    try fx.press("ns");
+    try fx.press("t");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("const", fx.app.view(body_rows).?.query);
+    try fx.press(":noh");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+}
+
+test "a command being typed is not painted across the diff" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `:` text is a command, not a pattern. Highlighting it would paint `noh`
+    // over the review while the reader types the thing that turns painting off.
+    try fx.press(":noh");
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+    try fx.press("<Esc>");
 }
 
 test "y yanks the text, the way the key means in vim" {

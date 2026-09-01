@@ -62,6 +62,7 @@ pub const Command = enum {
     /// The bridge. `send_ref` inserts the reference into the agent's input
     /// box; the two copies go to the clipboard whatever the backend is.
     send_ref,
+    clear_search,
     copy_text,
     copy_text_lines,
     copy_ref,
@@ -306,6 +307,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match", .group = .find },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match", .group = .find },
+    .{ .chords = &.{c(event.code.escape)}, .command = .clear_search, .modes = Modes.normal_only, .desc = "clear the search highlight (:noh)", .group = .find },
     .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select", .group = .send },
     .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select", .group = .send },
     .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select", .group = .send },
@@ -596,11 +598,15 @@ test "motions work in visual mode, so selecting is moving with an anchor" {
     try testing.expectEqual(Command.next_hunk, km.feed(tap('h'), .visual).command);
 }
 
-test "a visual-only binding is invisible in normal mode, prefix included" {
+test "one key, two modes, two commands" {
+    // Escape is bound in both, and the mode is the only thing that tells them
+    // apart: it leaves a selection where there is one, and clears the search
+    // highlight where there is not. Getting this backwards would make `<Esc>`
+    // silently drop a selection the reader was still building.
     var km: Keymap = .{};
     try testing.expectEqual(Command.visual_cancel, km.feed(tap(event.code.escape), .visual).command);
-    try testing.expect(km.feed(tap(event.code.escape), .normal) == .none);
-    // Having been dropped, it does not strand the next keystroke either.
+    try testing.expectEqual(Command.clear_search, km.feed(tap(event.code.escape), .normal).command);
+    // And neither strands the next keystroke.
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 

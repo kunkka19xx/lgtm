@@ -120,6 +120,11 @@ pub const State = struct {
     /// Set when the last search found nothing, so the status line can say so
     /// rather than leaving the cursor mysteriously still.
     failed: bool = false,
+    /// `:noh`. The query is still here - `n` repeats it - but the renderer is
+    /// told there is nothing to paint. Vim's split exactly: the highlight and
+    /// the remembered pattern are two things, and only one of them is in the
+    /// reader's way once they have found what they were looking for.
+    hidden: bool = false,
 
     pub fn set(self: *State, text: []const u8, dir: Direction) void {
         self.len = @min(text.len, self.buf.len);
@@ -127,10 +132,28 @@ pub const State = struct {
         self.dir = dir;
         self.wrapped = false;
         self.failed = false;
+        self.hidden = false;
     }
 
+    /// The pattern, for repeating a search. Survives `:noh`.
     pub fn query(self: *const State) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    /// The pattern the renderer should highlight, which is nothing after
+    /// `:noh` until the next search or `n`.
+    pub fn shown(self: *const State) []const u8 {
+        return if (self.hidden) "" else self.query();
+    }
+
+    /// `:noh`: stop painting, keep the pattern.
+    pub fn hide(self: *State) void {
+        self.hidden = true;
+    }
+
+    /// Any search step paints again, the way `n` does in vim after `:noh`.
+    pub fn show(self: *State) void {
+        self.hidden = false;
     }
 
     pub fn active(self: *const State) bool {
@@ -154,6 +177,29 @@ fn linesOf(gpa: std.mem.Allocator, texts: []const []const u8) !hunk.DiffLines {
         l.text[i] = t;
     }
     return l;
+}
+
+test "noh stops the painting and keeps the pattern" {
+    // Vim's split, and the point of the whole thing: after `:noh` the screen
+    // is quiet but `n` still knows what it is looking for. Clearing the query
+    // instead would be a second bug wearing the fix's clothes.
+    var st: State = .{};
+    st.set("layout", .forward);
+    try testing.expectEqualStrings("layout", st.shown());
+
+    st.hide();
+    try testing.expectEqualStrings("", st.shown());
+    try testing.expectEqualStrings("layout", st.query());
+    try testing.expect(st.active());
+
+    // `n` paints again: the reader asked to be shown the next one.
+    st.show();
+    try testing.expectEqualStrings("layout", st.shown());
+
+    // And a fresh search always paints, whatever the last one left behind.
+    st.hide();
+    st.set("payload", .forward);
+    try testing.expectEqualStrings("payload", st.shown());
 }
 
 test "smart case: lowercase matches either, a capital pins it" {
