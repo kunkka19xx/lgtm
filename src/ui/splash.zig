@@ -6,9 +6,12 @@
 // time the tree is clean, which is most of the day and all of the time before
 // the agent has written anything, so it is the screen the tool is looked at on
 // most and it was one dim sentence in a corner. It says what the thing is,
-// which version of it is running and whose it is, and then how to find the
-// keys - and nothing else, because a screen that appears this often earns
-// its space by being quiet.
+// what it is for, which version of it is running and whose it is, and then
+// how to find the keys - and nothing else, because a screen that appears
+// this often earns its space by being quiet.
+//
+// `writeBanner` is the same block written to stdout for `-v`, so the flag and
+// the pane are one identity rather than two that drift.
 //
 // No state and no input of its own: the wordmark comes from the icon set
 // (`ui/theme.zig`), the key comes from the keymap, and the geometry is a pure
@@ -24,10 +27,17 @@ const Frame = frame_mod.Frame;
 const keymap = @import("keymap.zig");
 const theme_mod = @import("theme.zig");
 const keytext = @import("keytext.zig");
+const preview = @import("preview.zig");
+const wrap = @import("wrap.zig");
 
 /// From `build.zig.zon` by way of a build option, which is the same string
 /// `--version` prints: two places saying the version is one place too many.
 pub const version = build_options.version;
+
+/// The version as it is shown. Prefixed here rather than in the manifest,
+/// which has to hold a bare semver for the package manager: `v0.0.0` reads as
+/// a version and `0.0.0` beside a name reads as a count.
+pub const version_label = "v" ++ version;
 
 /// Whose it is. Hardcoded rather than read from `git config`: it is the
 /// author of `lgtm`, not whoever happens to be running it.
@@ -38,8 +48,22 @@ pub const author = "kunkka19xx";
 /// that cannot follow it shows the name exactly as it would have anyway.
 pub const author_url = "https://github.com/" ++ author;
 
+/// Built from the author's, so a rename cannot leave one of them behind.
+pub const repo_url = author_url ++ "/lgtm";
+
+/// The same address without the scheme, for a terminal with no room for the
+/// whole one. Eight columns shorter, still a link to any terminal that finds
+/// them, and still the address if it is typed out by hand.
+pub const repo_short = "github.com/" ++ author ++ "/lgtm";
+
+/// What the tool is for, in the one sentence the name is a joke about. Worded
+/// and punctuated as the README's subtitle: the pitch is one sentence, and two
+/// copies of it that differ is two pitches.
+pub const tagline = "Read what your agent wrote - before you say LGTM.";
+
 /// Rows the block needs under the wordmark: a blank, the byline, a blank, the
-/// state, and where the keys are.
+/// state, and where the keys are. The tagline is the sixth when the pane is
+/// wide enough to hold the sentence whole - clipped it says something else.
 const under: u16 = 5;
 
 pub const Place = struct { top: u16, left: u16 };
@@ -50,8 +74,8 @@ pub const Place = struct { top: u16, left: u16 };
 /// Pure, because this is the part that goes wrong: hard rule 9 asks for 80
 /// columns, but a split pane is dragged through every width on the way there
 /// and the wordmark must clip to a sentence rather than spill over the edge.
-pub fn place(win_w: u16, win_h: u16, art_w: u16, art_h: u16) ?Place {
-    const rows = art_h +| under;
+pub fn place(win_w: u16, win_h: u16, art_w: u16, art_h: u16, extra: u16) ?Place {
+    const rows = art_h +| under +| extra;
     if (win_w < art_w or win_h < rows) return null;
     return .{ .top = (win_h - rows) / 2, .left = (win_w - art_w) / 2 };
 }
@@ -64,7 +88,11 @@ pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
     var art_w: u16 = 0;
     for (art) |row| art_w = @max(art_w, f.win.gwidth(row));
 
-    const at = place(f.width(), f.win.height, art_w, @intCast(art.len)) orelse {
+    // The sentence is what the name means, so it is dropped whole or not at
+    // all: half of it clipped at the edge reads as a different claim.
+    const tag = f.win.gwidth(tagline) <= f.width();
+
+    const at = place(f.width(), f.win.height, art_w, @intCast(art.len), @intFromBool(tag)) orelse {
         f.put(0, 0, " lgtm: no changes against HEAD", f.theme.dim);
         return;
     };
@@ -73,11 +101,16 @@ pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
     // each row on its own width would shear the thumb off the M.
     for (art, 0..) |row, i| f.put(at.top + @as(u16, @intCast(i)), at.left, row, f.theme.accent);
 
+    var row = at.top + @as(u16, @intCast(art.len)) + 1;
+    if (tag) {
+        _ = try centre(f, row, f.theme.dim, "{s}", .{tagline});
+        row += 1;
+    }
+
     // Two draws rather than one, so the name carries the link and the version
     // does not. Centred on the pair: the link is part of the line, not a
     // thing appended to it.
-    var row = at.top + @as(u16, @intCast(art.len)) + 1;
-    const lead = try std.fmt.allocPrint(f.arena, "{s} {s} ", .{ version, f.glyphs.sep });
+    const lead = try std.fmt.allocPrint(f.arena, "{s} {s} ", .{ version_label, f.glyphs.sep });
     const lead_w = f.win.gwidth(lead);
     const byline = lead_w + f.win.gwidth(author);
     const col: u16 = if (byline >= f.width()) 0 else (f.width() - byline) / 2;
@@ -95,6 +128,132 @@ pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
     if (keyFor(bindings, .help, &buf)) |key| {
         _ = try centre(f, row, f.theme.dim, "{s} for keys", .{key});
     }
+}
+
+/// The `-v` banner: the same picture the empty screen draws, written to
+/// stdout before any terminal exists.
+///
+/// Not the screen itself - there is no window at this point and no reason to
+/// make one - but the same wordmark, the same byline and the address they
+/// belong to, so the flag and the pane look like one tool.
+///
+/// `cols` is what stdout has to draw in, or null when it is a pipe and there
+/// is no edge to wrap at. It is the whole of the narrow-terminal behaviour:
+/// the block is fitted to it rather than drawn at a fixed width and left to
+/// the terminal's own wrapping, which turns the wordmark into confetti.
+/// `colour` is off for a pipe too: this is the output that gets pasted into a
+/// bug report.
+pub fn writeBanner(
+    w: *std.Io.Writer,
+    t: theme_mod.Theme,
+    g: theme_mod.Glyphs,
+    colour: bool,
+    cols: ?u16,
+) std.Io.Writer.Error!void {
+    const margin = 2;
+    // A pipe has no width, so nothing has to be fitted to it.
+    const width = cols orelse std.math.maxInt(u16);
+
+    // The widest wordmark that fits, then the 26-column fallback, then none:
+    // an `M` wrapped onto the next row is not a letter.
+    const art: []const []const u8 = if (wordmarkWidth(g) + margin <= width)
+        g.wordmark
+    else if (wordmarkWidth(theme_mod.Glyphs.ascii) + margin <= width)
+        theme_mod.Glyphs.ascii.wordmark
+    else
+        &.{};
+
+    // The picture is one width, not one per row, for the reason `draw` gives:
+    // centring each row on its own would shear the thumb off the M.
+    var art_w: u16 = 0;
+    for (art) |r| art_w = @max(art_w, wrap.columns(r, .unicode));
+
+    var buf: [64]u8 = undefined;
+    const sep = std.fmt.bufPrint(&buf, " {s} ", .{g.sep}) catch " | ";
+    const byline_w = wrap.columns(version_label, .unicode) +
+        wrap.columns(sep, .unicode) + wrap.columns(author, .unicode);
+    // The scheme goes when it is what puts the address over the edge: a
+    // wrapped URL is not a link and not copyable in one gesture.
+    const url = if (wrap.columns(repo_url, .unicode) <= width) repo_url else repo_short;
+    const url_w = wrap.columns(url, .unicode);
+
+    // Dropped whole rather than wrapped, the same rule the screen follows.
+    const tag_w = wrap.columns(tagline, .unicode);
+    const tag = tag_w + margin <= width;
+
+    // Everything centres on the widest line rather than on the wordmark: the
+    // sentence is longer than the picture, and hanging it off one edge of a
+    // block that is otherwise centred reads as a mistake.
+    const block = @max(art_w, @max(if (tag) tag_w else 0, @max(byline_w, url_w)));
+    // Both the margin and the centring go when the block is what the terminal
+    // has, rather than being spent on space that pushes a line over the edge.
+    const pad: u16 = if (block + margin <= width) margin else 0;
+    const room = width -| pad;
+
+    try w.writeByte('\n');
+    for (art) |r| {
+        try w.splatByteAll(' ', startCol(pad, block, room, art_w));
+        try paint(w, colour, t.accent, r);
+        try w.writeByte('\n');
+    }
+    if (art.len > 0) try w.writeByte('\n');
+
+    if (tag) {
+        try w.splatByteAll(' ', startCol(pad, block, room, tag_w));
+        try paint(w, colour, t.text, tagline);
+        try w.writeAll("\n\n");
+    }
+
+    // Three runs rather than one: this is the command someone runs to find
+    // out the version, so the version is what is lit and the rest is context.
+    try w.splatByteAll(' ', startCol(pad, block, room, byline_w));
+    try paint(w, colour, bold(t.accent), version_label);
+    try paint(w, colour, t.dim, sep);
+    try paint(w, colour, t.dim, author);
+    try w.writeByte('\n');
+
+    // Printed rather than hidden behind the name: on the screen the address
+    // is noise, but this is the output someone reads to find the repo.
+    try w.splatByteAll(' ', startCol(pad, block, room, url_w));
+    try paint(w, colour, t.dim, url);
+    try w.writeAll("\n\n");
+}
+
+/// The column a line of `line_w` starts at. Flush left once the block is
+/// wider than the room it has: an indent that pushes a line over the edge
+/// costs a wrapped row to buy nothing.
+fn startCol(pad: u16, block: u16, room: u16, line_w: u16) u16 {
+    if (block > room) return 0;
+    return pad + indent(block, line_w);
+}
+
+/// Columns that centre `inner` under `outer`, and none when it is the wider
+/// of the two - a line pushed left is still readable, a negative one is not.
+fn indent(outer: u16, inner: u16) u16 {
+    return if (inner >= outer) 0 else (outer - inner) / 2;
+}
+
+fn bold(style: theme_mod.Style) theme_mod.Style {
+    var out = style;
+    out.bold = true;
+    return out;
+}
+
+/// The wordmark's display width: one width for the picture, not one per row.
+fn wordmarkWidth(g: theme_mod.Glyphs) u16 {
+    var out: u16 = 0;
+    for (g.wordmark) |r| out = @max(out, wrap.columns(r, .unicode));
+    return out;
+}
+
+fn paint(
+    w: *std.Io.Writer,
+    colour: bool,
+    style: theme_mod.Style,
+    text: []const u8,
+) std.Io.Writer.Error!void {
+    if (!colour) return w.writeAll(text);
+    return preview.styled(w, style, text);
 }
 
 /// How a command is typed, or null when nothing is bound to it.
@@ -126,11 +285,106 @@ test "the author and the link cannot be renamed apart" {
     // built from it rather than being pasted in beside it and left behind.
     try testing.expect(std.mem.endsWith(u8, author_url, author));
     try testing.expect(std.mem.startsWith(u8, author_url, "https://"));
+    try testing.expect(std.mem.startsWith(u8, repo_url, author_url));
+}
+
+test "the banner says what it is, whose it is and where it lives" {
+    var buf: [4 << 10]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeBanner(&w, theme_mod.default, theme_mod.Glyphs.unicode, false, null);
+    const out = w.buffered();
+
+    try testing.expect(std.mem.indexOf(u8, out, version_label) != null);
+    try testing.expect(std.mem.indexOf(u8, out, author) != null);
+    try testing.expect(std.mem.indexOf(u8, out, repo_url) != null);
+    try testing.expect(std.mem.indexOf(u8, out, tagline) != null);
+    for (theme_mod.Glyphs.unicode.wordmark) |r| {
+        try testing.expect(std.mem.indexOf(u8, out, r) != null);
+    }
+
+    // Piped, there is nothing to interpret the escapes: the output goes into
+    // a bug report as the picture it looks like, not as SGR noise.
+    try testing.expect(std.mem.indexOfScalar(u8, out, 0x1b) == null);
+}
+
+test "the banner colours only when it is going to a terminal" {
+    var buf: [4 << 10]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeBanner(&w, theme_mod.default, theme_mod.Glyphs.unicode, true, 80);
+    try testing.expect(std.mem.indexOfScalar(u8, w.buffered(), 0x1b) != null);
+
+    // And the ascii set draws it without one block element or emoji, for the
+    // terminal that would make tofu of both.
+    var plain: [4 << 10]u8 = undefined;
+    var pw: std.Io.Writer = .fixed(&plain);
+    try writeBanner(&pw, theme_mod.default, theme_mod.Glyphs.ascii, false, null);
+    for (pw.buffered()) |b| try testing.expect(b < 0x80);
+}
+
+test "the version is what the version command lights up" {
+    var buf: [4 << 10]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeBanner(&w, theme_mod.default, theme_mod.Glyphs.unicode, true, 80);
+    const out = w.buffered();
+
+    // The run the version is printed in is bold: `-v` is asked because
+    // someone wants the number, so the number is not the dim part.
+    const at = std.mem.indexOf(u8, out, version_label).?;
+    const esc = std.mem.lastIndexOf(u8, out[0..at], "\x1b[").?;
+    try testing.expect(std.mem.indexOf(u8, out[esc..at], ";1") != null);
+}
+
+test "a narrow terminal gets a banner rather than a wrapped one" {
+    // 35 columns: no room for the 38-column wordmark or the 49-column
+    // sentence, and the terminal would have wrapped both into confetti.
+    var buf: [4 << 10]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try writeBanner(&w, theme_mod.default, theme_mod.Glyphs.unicode, false, 35);
+    const narrow = w.buffered();
+
+    try testing.expect(std.mem.indexOf(u8, narrow, theme_mod.Glyphs.unicode.wordmark[0]) == null);
+    try testing.expect(std.mem.indexOf(u8, narrow, theme_mod.Glyphs.ascii.wordmark[0]) != null);
+    try testing.expect(std.mem.indexOf(u8, narrow, tagline) == null);
+    try testing.expect(std.mem.indexOf(u8, narrow, version_label) != null);
+    try noLineOver(narrow, 35);
+
+    // 28: the address loses its scheme rather than its second half.
+    var small: [4 << 10]u8 = undefined;
+    var sw: std.Io.Writer = .fixed(&small);
+    try writeBanner(&sw, theme_mod.default, theme_mod.Glyphs.unicode, false, 28);
+    try testing.expect(std.mem.indexOf(u8, sw.buffered(), repo_short) != null);
+    try testing.expect(std.mem.indexOf(u8, sw.buffered(), repo_url) == null);
+    try noLineOver(sw.buffered(), 28);
+
+    // 24: not even the fallback picture fits, so there is no picture. What
+    // is left still answers the question the flag asked.
+    var tiny: [4 << 10]u8 = undefined;
+    var tw: std.Io.Writer = .fixed(&tiny);
+    try writeBanner(&tw, theme_mod.default, theme_mod.Glyphs.unicode, false, 24);
+    try testing.expect(std.mem.indexOf(u8, tw.buffered(), theme_mod.Glyphs.ascii.wordmark[0]) == null);
+    try testing.expect(std.mem.indexOf(u8, tw.buffered(), version_label) != null);
+    try testing.expect(std.mem.indexOf(u8, tw.buffered(), author) != null);
+}
+
+/// Every line fits, or the terminal wraps it and the layout was pointless.
+/// The address is exempt: below 26 columns there is nothing left to trim.
+fn noLineOver(text: []const u8, cols: u16) !void {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (std.mem.indexOf(u8, line, "github.com") != null) continue;
+        try testing.expect(wrap.columns(line, .unicode) <= cols);
+    }
+}
+
+test "a line wider than the wordmark is not indented off the left edge" {
+    try testing.expectEqual(@as(u16, 0), indent(26, 34));
+    try testing.expectEqual(@as(u16, 0), indent(10, 10));
+    try testing.expectEqual(@as(u16, 10), indent(38, 18));
 }
 
 test "the block is centred when it fits" {
     // 80x24, which is the pane hard rule 9 is about.
-    const at = place(80, 24, 40, 6).?;
+    const at = place(80, 24, 40, 6, 0).?;
     try testing.expectEqual(@as(u16, 20), at.left);
     try testing.expectEqual(@as(u16, 6), at.top);
     // Centred means the same margin either side, give or take the odd column.
@@ -140,14 +394,28 @@ test "the block is centred when it fits" {
 
 test "a pane too narrow or too short gets the sentence instead" {
     // One column short of the wordmark is one column too few: it would spill.
-    try testing.expect(place(39, 24, 40, 6) == null);
-    try testing.expect(place(40, 24, 40, 6) != null);
+    try testing.expect(place(39, 24, 40, 6, 0) == null);
+    try testing.expect(place(40, 24, 40, 6, 0) != null);
     // And a pane with no room under it for the byline and the hint.
-    try testing.expect(place(80, 10, 40, 6) == null);
-    try testing.expect(place(80, 11, 40, 6) != null);
+    try testing.expect(place(80, 10, 40, 6, 0) == null);
+    try testing.expect(place(80, 11, 40, 6, 0) != null);
     // The degenerate sizes a drag passes through resolve rather than trap.
-    try testing.expect(place(0, 0, 40, 6) == null);
-    try testing.expect(place(1, 1, 26, 5) == null);
+    try testing.expect(place(0, 0, 40, 6, 0) == null);
+    try testing.expect(place(1, 1, 26, 5, 0) == null);
+
+    // The tagline is a row like any other: a pane one short of holding it
+    // gets the sentence instead of a block with the bottom cut off.
+    try testing.expect(place(80, 11, 40, 6, 1) == null);
+    try testing.expect(place(80, 12, 40, 6, 1) != null);
+}
+
+test "the tagline is dropped whole rather than clipped" {
+    // 49 columns of sentence: it fits the pane hard rule 9 is about, and it
+    // does not fit the narrow split the ascii wordmark exists for. Half of
+    // "before you say LGTM" is advice nobody asked for.
+    const w = wordmarkWidth(theme_mod.Glyphs.unicode);
+    try testing.expect(wrap.columns(tagline, .unicode) > w);
+    try testing.expect(wrap.columns(tagline, .unicode) <= 80);
 }
 
 test "every wordmark row is the same width, or the picture shears" {
@@ -173,6 +441,6 @@ test "every wordmark row is the same width, or the picture shears" {
 test "the ascii wordmark fits a pane the unicode one does not" {
     // 26 columns against 40, measured in `theme.zig`: the fallback is not
     // only tofu-free, it is the one that still fits a narrow split.
-    try testing.expect(place(30, 24, 40, 6) == null);
-    try testing.expect(place(30, 24, 26, 5) != null);
+    try testing.expect(place(30, 24, 40, 6, 0) == null);
+    try testing.expect(place(30, 24, 26, 5, 0) != null);
 }

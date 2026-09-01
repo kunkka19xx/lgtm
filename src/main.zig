@@ -11,6 +11,7 @@ pub const preview = @import("ui/preview.zig");
 pub const tty = @import("io/tty.zig");
 pub const app = @import("ui/app.zig");
 pub const loop = @import("ui/loop.zig");
+pub const splash = @import("ui/splash.zig");
 const metrics = lib.metrics;
 
 const usage =
@@ -24,12 +25,10 @@ const usage =
     \\  --theme-preview  draw every bundled theme and exit
     \\  --once           render one frame and exit, for screenshots and CI
     \\  --profile        print timing spans on exit (requires -Dprofile build)
-    \\  --version        print version and exit
+    \\  -v, --version    print the banner and exit
     \\  -h, --help       print this help and exit
     \\
 ;
-
-const version = build_options.version;
 
 /// A panic still says what went wrong; what this drops in a release build is
 /// the stack trace under it, and with it the DWARF reader, the inflate for
@@ -56,6 +55,7 @@ pub fn main(init: std.process.Init) !void {
     var theme_name: ?[]const u8 = null;
     var pane: ?[]const u8 = null;
     var want_preview = false;
+    var want_version = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
@@ -63,10 +63,8 @@ pub fn main(init: std.process.Init) !void {
             try w.writeAll(usage);
             try w.flush();
             return;
-        } else if (std.mem.eql(u8, arg, "--version")) {
-            try w.print("lgtm {s}\n", .{version});
-            try w.flush();
-            return;
+        } else if (std.mem.eql(u8, arg, "-v") or std.mem.eql(u8, arg, "--version")) {
+            want_version = true;
         } else if (std.mem.eql(u8, arg, "--profile")) {
             want_profile = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
@@ -129,6 +127,16 @@ pub fn main(init: std.process.Init) !void {
             try w.flush();
             return;
         };
+    }
+
+    // After the theme is resolved, so `lgtm -v --theme <name>` prints in the
+    // theme it names and the icon set the config asked for: the banner is the
+    // empty screen, and it should look like the one this run would draw.
+    if (want_version) {
+        const term = tty.stdoutIsTerminal(io);
+        try splash.writeBanner(w, cfg.cfg.theme, glyphs, term, if (term) tty.stdoutColumns() else null);
+        try w.flush();
+        return;
     }
 
     try loop.run(gpa, io, init.environ_map, .{

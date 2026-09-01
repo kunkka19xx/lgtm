@@ -16,6 +16,27 @@ pub const default_buffer_bytes = 256 << 10;
 
 pub const Winsize = vaxis.Winsize;
 
+/// Whether stdout is a terminal, for the output that should be plain once it
+/// is piped into a file or an issue.
+///
+/// `File.isTty` rather than `tcgetattr`: on macOS a pipe answers `ENODEV`
+/// there, which std maps to `unexpectedErrno` and which prints a stack trace
+/// to stderr on its way to the error - under a pipe, which is exactly the
+/// case this is asking about.
+pub fn stdoutIsTerminal(io: Io) bool {
+    return Io.File.stdout().isTty(io) catch false;
+}
+
+/// Columns stdout has, or null when it is not a terminal and so has no edge
+/// to wrap at. The banner is the only caller: everything else draws into a
+/// vaxis window, which knows its own size.
+pub fn stdoutColumns() ?u16 {
+    var ws: std.posix.winsize = .{ .row = 0, .col = 0, .xpixel = 0, .ypixel = 0 };
+    const err = std.posix.system.ioctl(1, std.posix.T.IOCGWINSZ, @intFromPtr(&ws));
+    if (std.posix.errno(err) != .SUCCESS) return null;
+    return if (ws.col == 0) null else ws.col;
+}
+
 pub const Tty = struct {
     inner: vaxis.tty.Tty,
     buffer: []u8,

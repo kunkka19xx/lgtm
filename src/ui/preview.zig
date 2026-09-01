@@ -160,7 +160,10 @@ fn on(style: Style, bg: ?theme_mod.Color) Style {
     return out;
 }
 
-fn styled(w: *std.Io.Writer, style: Style, text: []const u8) std.Io.Writer.Error!void {
+/// `text` in `style`, as one SGR run. Public because `ui/splash.zig` writes
+/// the `-v` banner to the same stdout by the same rule: this file is the only
+/// one that encodes an escape sequence by hand.
+pub fn styled(w: *std.Io.Writer, style: Style, text: []const u8) std.Io.Writer.Error!void {
     try sgr(w, style);
     try w.writeAll(text);
     try w.writeAll("\x1b[0m");
