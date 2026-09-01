@@ -85,13 +85,28 @@ pub fn writeStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!vo
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
-/// Best effort, and never an overwrite: a user who has edited the file, or
-/// deleted it on purpose, has said what they want and the tool does not argue.
-/// A failure is silent for the same reason `saveTarget` is - a read-only
-/// checkout should not break a send that has already worked.
-fn ensureSelfIgnore(io: Io) void {
+/// Puts the self-ignore in place if it is not there already.
+///
+/// Called at startup as well as from `writeStateFile`, because writing is not
+/// enough on its own: the pane id is only saved when it *changes*, so a repo
+/// whose saved target is still correct never writes again. A `.lgtm/` created
+/// by a version of lgtm without this file would keep showing its own state in
+/// its own review, for good. Startup is where that gets repaired.
+///
+/// Nothing happens when the directory does not exist. lgtm has no business
+/// creating one in a repo it has never written to, and a review pane opened in
+/// someone else's checkout should leave no trace.
+///
+/// Best effort, and never an overwrite: a user who edited the file, or deleted
+/// it on purpose, has said what they want and the tool does not argue. Failure
+/// is silent for the same reason `saveTarget` is - a read-only checkout should
+/// not break a session that otherwise works.
+pub fn ensureSelfIgnore(io: Io) void {
     const path = state_dir ++ "/.gitignore";
     if (fileExists(io, path)) return;
+
+    var dir = Dir.cwd().openDir(io, state_dir, .{}) catch return;
+    dir.close(io);
     Dir.cwd().writeFile(io, .{ .sub_path = path, .data = self_ignore }) catch {};
 }
 

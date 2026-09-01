@@ -14,6 +14,7 @@ const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
 const event = @import("../core/event.zig");
+const fs = @import("../io/fs.zig");
 const input = @import("../io/input.zig");
 const metrics = @import("../io/metrics.zig");
 const proc = @import("../io/proc.zig");
@@ -140,6 +141,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // Resize events keep this in step from here on; the app needs the width
     // because a wrapped row is more screen rows than one (`ui/wrap.zig`).
     app.cols = ws.cols;
+
+    // Before the first diff, so lgtm's own state never appears in it. Repairs
+    // a `.lgtm/` left behind by a version that did not write the ignore; a no-op
+    // in a repo lgtm has never written to.
+    fs.ensureSelfIgnore(io);
 
     try app.rediff();
 
