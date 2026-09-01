@@ -45,28 +45,45 @@ pub fn caseSensitive(query: []const u8) bool {
     return false;
 }
 
-pub fn contains(haystack: []const u8, needle: []const u8, sensitive: bool) bool {
-    if (needle.len == 0) return false;
-    if (sensitive) return std.mem.indexOf(u8, haystack, needle) != null;
-    if (needle.len > haystack.len) return false;
+/// Where `needle` first occurs in `haystack`, or null.
+///
+/// The offset rather than a bool, because every caller wants it: `n` puts the
+/// cursor on the match, and the renderer highlights it. Returning `bool` here
+/// meant the scan was run twice and the answer thrown away once - and the
+/// cursor landed on whatever column the last vertical motion had asked for,
+/// which on a long line is nowhere near the text that matched.
+pub fn indexOf(haystack: []const u8, needle: []const u8, sensitive: bool) ?u32 {
+    if (needle.len == 0 or needle.len > haystack.len) return null;
+    if (sensitive) {
+        const at = std.mem.indexOf(u8, haystack, needle) orelse return null;
+        return @intCast(at);
+    }
 
     var i: usize = 0;
     while (i + needle.len <= haystack.len) : (i += 1) {
         var j: usize = 0;
         while (j < needle.len) : (j += 1) {
             if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
-        } else return true;
+        } else return @intCast(i);
     }
-    return false;
+    return null;
 }
 
-/// The first line index matching `query`, scanning from `from`.
+pub fn contains(haystack: []const u8, needle: []const u8, sensitive: bool) bool {
+    return indexOf(haystack, needle, sensitive) != null;
+}
+
+/// A match: which line, and where in it. The column is what puts the cursor on
+/// the match rather than merely on its line.
+pub const Hit = struct { line: u32, col: u32 };
+
+/// The first line matching `query`, scanning from `from`.
 ///
 /// `from` null means "start at the edge": the top going forward, the bottom
 /// going backward. That is how a search continues into the *next* file, where
 /// there is no cursor to start after. A non-null `from` is exclusive, so `n`
 /// advances instead of finding the line it is already sitting on.
-pub fn findLine(lines: hunk.DiffLines, from: ?u32, dir: Direction, query: []const u8) ?u32 {
+pub fn findLine(lines: hunk.DiffLines, from: ?u32, dir: Direction, query: []const u8) ?Hit {
     const n: u32 = @intCast(lines.len());
     if (n == 0 or query.len == 0) return null;
     const sensitive = caseSensitive(query);
@@ -75,14 +92,14 @@ pub fn findLine(lines: hunk.DiffLines, from: ?u32, dir: Direction, query: []cons
         .forward => {
             var i: u32 = if (from) |f| f + 1 else 0;
             while (i < n) : (i += 1) {
-                if (contains(lines.text[i], query, sensitive)) return i;
+                if (indexOf(lines.text[i], query, sensitive)) |at| return .{ .line = i, .col = at };
             }
         },
         .backward => {
             var i: u32 = if (from) |f| f else n;
             while (i > 0) {
                 i -= 1;
-                if (contains(lines.text[i], query, sensitive)) return i;
+                if (indexOf(lines.text[i], query, sensitive)) |at| return .{ .line = i, .col = at };
             }
         },
     }
@@ -156,15 +173,61 @@ test "matching handles the edges without reading past the end" {
     try testing.expect(contains("abc", "c", false));
 }
 
+test "a hit carries where in the line it matched, not just which line" {
+    // The bug this exists for: the column was computed and thrown away, so
+    // `n` put the cursor wherever the last vertical motion had asked for.
+    const gpa = testing.allocator;
+    var lines = try linesOf(gpa, &.{ "fn a() void {}", "    const token = validateToken(x);" });
+    defer lines.deinit(gpa);
+
+    const hit = findLine(lines, null, .forward, "token").?;
+    try testing.expectEqual(@as(u32, 1), hit.line);
+    try testing.expectEqual(@as(u32, 10), hit.col);
+    try testing.expectEqualStrings("token", lines.text[hit.line][hit.col..][0..5]);
+
+    // Smart case picks the later occurrence when a capital pins it, and the
+    // column has to follow the match rather than the line.
+    const strict = findLine(lines, null, .forward, "Token").?;
+    try testing.expectEqual(@as(u32, 26), strict.col);
+    try testing.expectEqualStrings("Token", lines.text[strict.line][strict.col..][0..5]);
+
+    // A match at the very start is column zero, not "no column".
+    const first = findLine(lines, null, .forward, "fn ").?;
+    try testing.expectEqual(@as(u32, 0), first.line);
+    try testing.expectEqual(@as(u32, 0), first.col);
+}
+
+test "indexOf and contains cannot disagree" {
+    // `contains` is now a thin wrapper, and this is what keeps it one: two
+    // scans that drift are how the cursor and the highlight end up in
+    // different places.
+    const cases = [_][2][]const u8{
+        .{ "validateToken", "token" },
+        .{ "validateToken", "TOKEN" },
+        .{ "abc", "" },
+        .{ "", "a" },
+        .{ "ab", "abc" },
+        .{ "abc", "c" },
+    };
+    for (cases) |c| {
+        for ([_]bool{ true, false }) |sensitive| {
+            try testing.expectEqual(
+                indexOf(c[0], c[1], sensitive) != null,
+                contains(c[0], c[1], sensitive),
+            );
+        }
+    }
+}
+
 test "forward search starts after the cursor, and from the top when there is none" {
     const gpa = testing.allocator;
     var lines = try linesOf(gpa, &.{ "let a = 1;", "let b = 2;", "let a = 3;" });
     defer lines.deinit(gpa);
 
     // No cursor: a file the search has just entered starts at its first line.
-    try testing.expectEqual(@as(u32, 0), findLine(lines, null, .forward, "let a").?);
+    try testing.expectEqual(@as(u32, 0), findLine(lines, null, .forward, "let a").?.line);
     // With a cursor, `n` must advance rather than re-find the current line.
-    try testing.expectEqual(@as(u32, 2), findLine(lines, 0, .forward, "let a").?);
+    try testing.expectEqual(@as(u32, 2), findLine(lines, 0, .forward, "let a").?.line);
     try testing.expect(findLine(lines, 2, .forward, "let a") == null);
 }
 
@@ -173,8 +236,8 @@ test "backward search starts before the cursor, and from the bottom when there i
     var lines = try linesOf(gpa, &.{ "one", "two", "one" });
     defer lines.deinit(gpa);
 
-    try testing.expectEqual(@as(u32, 2), findLine(lines, null, .backward, "one").?);
-    try testing.expectEqual(@as(u32, 0), findLine(lines, 2, .backward, "one").?);
+    try testing.expectEqual(@as(u32, 2), findLine(lines, null, .backward, "one").?.line);
+    try testing.expectEqual(@as(u32, 0), findLine(lines, 2, .backward, "one").?.line);
     try testing.expect(findLine(lines, 0, .backward, "one") == null);
 }
 

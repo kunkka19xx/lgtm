@@ -395,7 +395,7 @@ fn markMatches(
 
     for (segs.items) |seg| {
         var rest = seg.text;
-        while (indexOfMatch(rest, query, sensitive)) |at| {
+        while (search.indexOf(rest, query, sensitive)) |at| {
             if (at > 0) try out.append(arena, .{ .text = rest[0..at], .style = seg.style });
             try out.append(arena, .{ .text = rest[at..][0..query.len], .style = style });
             rest = rest[at + query.len ..];
@@ -403,20 +403,6 @@ fn markMatches(
         if (rest.len > 0) try out.append(arena, .{ .text = rest, .style = seg.style });
     }
     return out;
-}
-
-fn indexOfMatch(haystack: []const u8, needle: []const u8, sensitive: bool) ?usize {
-    if (needle.len == 0 or needle.len > haystack.len) return null;
-    if (sensitive) return std.mem.indexOf(u8, haystack, needle);
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
-        } else return i;
-    }
-    return null;
 }
 
 /// Runs overlapping `[lo, hi)`. Binary search for the first, then a walk:

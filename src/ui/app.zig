@@ -678,12 +678,20 @@ pub const App = struct {
 
         var step: usize = 0;
         while (step <= fs.len) : (step += 1) {
-            if (search.findLine(fs[fi].lines, from, dir, q)) |li| {
+            if (search.findLine(fs[fi].lines, from, dir, q)) |hit| {
                 if (fi != self.file_index) {
                     self.file_index = fi;
                     try self.rebuildRows(.reset);
                 }
-                if (self.rows.rowForLine(li)) |row| self.moveTo(row);
+                if (self.rows.rowForLine(hit.line)) |row| {
+                    self.moveTo(row);
+                    // After `moveTo`, which sets the column from `want_col`:
+                    // the match is where the reader is going, so it becomes
+                    // the desired column too, the way vim's `n` does. Without
+                    // this the cursor lands on the right line at the wrong
+                    // end of it, and on a long line that reads as a miss.
+                    self.setCol(motion.clamp(self.cursorText(), hit.col));
+                }
                 self.finder.wrapped = wrapped;
                 if (wrapped) self.notice.set("search wrapped", .{});
                 return;

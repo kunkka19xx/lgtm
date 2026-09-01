@@ -84,5 +84,64 @@ Not worth writing down: ideas for features you have not missed while using it.
 
 Installed `zig build dist` (603 KB) to `~/.local/bin/lgtm`. Nothing used yet.
 
+### 2026-09-01 - day 3
+
+Three findings, all from using it in the `look` repo rather than from testing it.
+
+**`.lgtm/target` shows up in its own review.** The first send writes the pane id
+into `.lgtm/`, git reports it as untracked, and lgtm renders it as a changed
+file - `+1 %102`, one line, sitting between real files at 7/8. The tool adding
+noise to the diff it exists to keep clean, in the first five minutes.
+
+Fixed rather than logged-and-left, because it is the first thing a new user
+would see and it costs them a `.gitignore` edit to a file lgtm does not own.
+`.lgtm/.gitignore` is now written by lgtm itself (`*`, then `!config.toml`, so a
+repo can still commit its own config). Two things that were wrong on the first
+attempt and are worth remembering: a blanket `.lgtm/` cannot work, because git
+does not descend into an excluded directory and a negation underneath one does
+nothing; and `!.gitignore` put the ignore file straight back into the review,
+which is the noise it was written to remove.
+
+The migration is the part that was nearly missed. Writing the ignore only on the
+write path is not enough: the pane id is saved only when it *changes*, so a repo
+whose target is still correct never writes again and would have stayed noisy
+for good. It is now written at startup too.
+
+**Search: `n` lands on the line, not on the match.** `/` finds the right line and
+the cursor arrives on it, but at whatever column `want_col` was carrying, so on a
+long line the cursor is nowhere near the text that matched. Vim puts it on the
+first character of the match, which is what makes `n` readable at speed - you
+follow the cursor, not the highlight.
+
+Root cause is in the code rather than in the feel: `search.contains` returns a
+bool and throws away the offset it has just computed, `findLine` returns a line
+index only, and `searchStep` calls `moveTo(row)`, which sets the column from
+`want_col`. The offset never reaches the caller. `ui/body.zig` has a second copy
+of the same case-insensitive scan (`indexOfMatch`) that already computes the
+offset for highlighting, so the fix collapses two scans into one.
+
+**`y` says "copied to the clipboard" and the clipboard is empty.** Selected
+lines, pressed `y`, got the notice, pasted nothing.
+
+Not yet root-caused, and the environment is the prime suspect rather than the
+code: the OSC 52 encoder is unit-tested and correct, and `osc52.zig` already
+records that inside tmux the sequence only reaches the outer terminal if tmux
+forwards it. What was checked so far - `set-clipboard external` (which does
+forward), `allow-passthrough on`, `default-terminal screen-256color`, client
+termname `xterm-ghostty` matching tmux's built-in `xterm*:clipboard` feature.
+That combination should work, so the next step is a bare probe from the pane:
+
+```
+printf '\033]52;c;%s\033\\' "$(printf probe | base64)"; sleep 1; pbpaste
+```
+
+If that prints `probe`, the bug is lgtm's. If not, it is tmux or Ghostty, and
+the real finding is a different one: **lgtm claims a success it cannot verify.**
+There is no reply to an OSC 52, so "copied to the clipboard" is an assertion
+about something the tool never learns the answer to. Inside tmux there is a
+check available that the bare escape does not have - `tmux load-buffer` sets a
+buffer that can be read back - and that is worth considering before the message
+is trusted.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->
