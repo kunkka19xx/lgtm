@@ -81,6 +81,20 @@ zig build dist       # the distribution binary: ReleaseSmall, stripped
 
 `dist` is the one the 1 MB budget is about, because it is what a user downloads. It comes in around 600 KB, and CI fails if it ever crosses the budget rather than leaving that to be noticed.
 
+### Installing your own build
+
+There are no packages yet (see `docs/DISTRIBUTION.md` for why, and what would have to be true first). Until then:
+
+```
+make local           # build dist and install it to ~/.local/bin
+make local PREFIX=/usr/local
+make clean-local     # remove it, restoring whatever it displaced
+```
+
+`make local` is careful about one thing, because a local build is not a release. If an lgtm from a release tarball or a package manager is already on that path, it is saved first and put back by `make clean-local`; if a release has been installed over the top since, the file is left alone rather than deleted; and a symlinked path - how Homebrew, nix and stow all install - is refused outright rather than replaced with a regular file.
+
+`clean` and `clean-local` are separate on purpose: an installed binary is not build output, so clearing the build directories never takes one away.
+
 Commits are gated by [pre-commit](https://pre-commit.com): `zig fmt` on the staged `.zig` files, then `zig build check`, around 0.75s warm. Once per clone:
 
 ```

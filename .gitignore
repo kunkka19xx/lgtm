@@ -4,3 +4,4 @@ zig-pkg/
 *.o
 .DS_Store
 CLAUDE.md
+.make/
