@@ -62,6 +62,8 @@ pub const Command = enum {
     /// The bridge. `send_ref` inserts the reference into the agent's input
     /// box; the two copies go to the clipboard whatever the backend is.
     send_ref,
+    copy_text,
+    copy_text_lines,
     copy_ref,
     copy_ref_lines,
     /// Ask presets: one keystroke, a whole question (FEATURES.md 2.1). Each
@@ -293,8 +295,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .group = .jump },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line", .group = .move },
     .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent", .group = .send },
-    .{ .chords = &.{c('y')}, .command = .copy_ref, .desc = "copy the reference", .group = .send },
-    .{ .chords = &.{c('Y')}, .command = .copy_ref_lines, .desc = "copy the reference and the lines", .group = .send },
+    .{ .chords = &.{c('y')}, .command = .copy_text, .desc = "yank the selected text", .group = .send },
+    .{ .chords = &.{c('Y')}, .command = .copy_text_lines, .desc = "yank whole lines", .group = .send },
+    .{ .chords = &.{ leader, c('y') }, .command = .copy_ref, .desc = "copy the reference", .group = .send },
+    .{ .chords = &.{ leader, c('Y') }, .command = .copy_ref_lines, .desc = "copy the reference and the lines", .group = .send },
     .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?", .group = .send },
     .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest", .group = .send },
     .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this", .group = .send },

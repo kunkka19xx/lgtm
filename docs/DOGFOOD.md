@@ -123,25 +123,67 @@ offset for highlighting, so the fix collapses two scans into one.
 **`y` says "copied to the clipboard" and the clipboard is empty.** Selected
 lines, pressed `y`, got the notice, pasted nothing.
 
-Not yet root-caused, and the environment is the prime suspect rather than the
-code: the OSC 52 encoder is unit-tested and correct, and `osc52.zig` already
-records that inside tmux the sequence only reaches the outer terminal if tmux
-forwards it. What was checked so far - `set-clipboard external` (which does
-forward), `allow-passthrough on`, `default-terminal screen-256color`, client
-termname `xterm-ghostty` matching tmux's built-in `xterm*:clipboard` feature.
-That combination should work, so the next step is a bare probe from the pane:
+Root-caused, and it was never lgtm's encoder. A bare probe from the pane -
+`printf '\033]52;c;%s\033\\' "$(printf probe | base64)"` - left the clipboard
+untouched, so OSC 52 from inside a pane does not reach macOS here at all.
 
-```
-printf '\033]52;c;%s\033\\' "$(printf probe | base64)"; sleep 1; pbpaste
-```
+The cause is tmux's **default**, not a local misconfiguration: `set-clipboard`
+is not in `~/.tmux.conf`, and its built-in default `external` means *tmux may
+set the terminal clipboard itself, but ignores an application that tries*. lgtm
+was the application. Measured on tmux 3.7b: the escape from a pane sets nothing,
+while `printf x | tmux load-buffer -w -` sets both the system clipboard and the
+paste buffer, exit 0. Same operation, from the side tmux permits.
 
-If that prints `probe`, the bug is lgtm's. If not, it is tmux or Ghostty, and
-the real finding is a different one: **lgtm claims a success it cannot verify.**
-There is no reply to an OSC 52, so "copied to the clipboard" is an assertion
-about something the tool never learns the answer to. Inside tmux there is a
-check available that the bare escape does not have - `tmux load-buffer` sets a
-buffer that can be read back - and that is worth considering before the message
-is trusted.
+So `y` was broken for every tmux user on defaults, which is most of them, and
+the tool said it had worked. Fixed: inside tmux the clipboard now goes through
+`tmux load-buffer -w -`, falling back to the escape outside tmux or on a tmux
+too old for `-w`. Driven live afterwards - `y` on a diff line, and `pbpaste`
+returns `#1 s.zig:2`.
+
+Three things came with it. `prefix + ]` now pastes a reference, which the escape
+never gave. The degrade path in `sendText` uses the same route, which is the case
+where losing the text silently hurts most - the agent's pane died and the
+clipboard is the only copy left. And the notice is finally checkable: a command
+has an exit code, where an escape sequence has no reply at all.
+
+The general lesson is worth more than the fix. **The tool asserted a success it
+had no way to observe**, and did it for months. Any future backend that reports
+an outcome it cannot read back should be treated as suspect on the same grounds.
+
+**`y` gave a reference where vim gives text.** Selected `normalizeLayout` with
+`v`, pressed `y`, pasted somewhere else, and got
+``#11 apps/linows/src/js/ipc.js:245 `normalizeLayout` ``. Behaving exactly as
+FEATURES.md specified, so not a bug - a wrong decision, which is the kind of
+thing only use finds.
+
+Two arguments settled it. The surprise is **silent**: nothing looks wrong at the
+time, and the paste lands somewhere else long after the selection is gone.
+And `y` never needed to carry the reference, because pointing at code already
+had its own key: `Enter` sends one to the agent, which is the whole thesis.
+Overloading the most-known key in vim after `hjkl` bought nothing.
+
+The deciding fact was that no keybinding could fix it. There were only two
+commands, `copy_ref` and `copy_ref_lines`, and both wrapped the text. A user who
+wanted vim's yank could not get it by remapping, which made this a gap rather
+than a preference.
+
+Split, and the reference kept a home rather than being taken away:
+
+| key | now |
+| --- | --- |
+| `y` | yank the selection - characters under `v`, lines under `V`, cursor line with none |
+| `Y` | yank whole lines, whatever `v` selected (vim's linewise yank) |
+| `<Space>y` | copy the reference |
+| `<Space>Y` | copy the reference and the lines under it |
+
+The yanked text drops the diff's sign column: `+` is lgtm's, not the file's, and
+code pasted into an editor should still compile. Newlines are allowed on this
+path and only this path - hard rule 1 is about what `send-keys` does with one,
+and a yank never reaches `send-keys`. The test that guards the rule now drives
+`<Space>y` instead of `y`, so it still covers everything that can reach a pane.
+
+Worth noting what this cost to find: nothing but using it. No test would have
+caught it, because every test asserted the behaviour that turned out to be wrong.
 
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

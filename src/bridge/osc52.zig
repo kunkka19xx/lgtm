@@ -12,10 +12,13 @@
 // The encoder below is `std.base64` and one `print`, and it keeps `bridge/`
 // free of vaxis, which is what lets these tests run without a terminal.
 //
-// One caveat worth writing down rather than discovering: inside tmux this
-// reaches the outer terminal only when tmux forwards it - `set-clipboard on`
-// or the default `external`. Nothing here can detect that, and there is no
-// reply to wait for, so a send always reports success.
+// One caveat, discovered the hard way rather than written down in time: inside
+// tmux this reaches nothing at all under the default `set-clipboard external`,
+// which lets tmux set the terminal clipboard itself but ignores an application
+// that tries. There is no reply to an OSC 52, so `y` reported a success that
+// had not happened. `bridge.clipboard` now prefers `tmux load-buffer -w -`
+// there, and this file is the fallback for everything outside tmux - where it
+// is still the right answer, because it works over SSH.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

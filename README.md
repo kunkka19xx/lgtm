@@ -119,8 +119,11 @@ On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: ru
 
 With the cursor on a line, `Enter` puts `#3 src/auth.zig:47` into the agent's
 pane. `V` selects a range first and sends `:47-52`; `v` selects within the line
-and sends the words themselves. `y` copies the reference, `Y` copies it with the
-lines under it, and `a` `!` `<Space>t` `x` send the reference with a question
+and sends the words themselves.
+
+`y` is the vim key doing the vim thing: it yanks the selected text, and `Y`
+yanks whole lines. The reference lives on `<Space>y`, with `<Space>Y` for the
+reference plus the lines under it. `a` `!` `<Space>t` `x` send the reference with a question
 attached - "why this approach?", "revert this, keep the rest", "add a test
 covering this", "explain what this does".
 

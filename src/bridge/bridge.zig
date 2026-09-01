@@ -124,7 +124,7 @@ pub const Bridge = union(enum) {
                     // the retry sets `tried` again on its way through.
                     t.pane_len = 0;
                     t.tried = false;
-                    try osc52.copy(cx.gpa, cx.w, payload);
+                    try self.clipboard(cx, payload);
                     return .{ .copied = switch (err) {
                         error.PaneGone => "pane is gone",
                         else => "tmux failed",
@@ -140,9 +140,47 @@ pub const Bridge = union(enum) {
     /// an agent, and unlike a send it may legitimately contain newlines - the
     /// no-newline rule is about what `send-keys` does with one.
     pub fn copyText(self: *Bridge, cx: Ctx, text: []const u8) Error!Outcome {
-        _ = self;
-        try osc52.copy(cx.gpa, cx.w, text);
+        try self.clipboard(cx, text);
         return .{ .copied = null };
+    }
+
+    /// Text onto the clipboard: the backend's own route if it has one that
+    /// works, the OSC 52 escape underneath it if not.
+    ///
+    /// Every clipboard path in the bridge comes through here, including the
+    /// degrade in `sendText` - a reference that lands on the clipboard because
+    /// the agent's pane died is the case where losing it silently hurts most.
+    fn clipboard(self: *Bridge, cx: Ctx, text: []const u8) Error!void {
+        if (self.backendCopy(cx, text)) |_| return else |_| {}
+        try osc52.copy(cx.gpa, cx.w, text);
+    }
+
+    /// The backend's own way of reaching the clipboard, above the escape.
+    ///
+    /// This exists because the escape is not always enough, and finding that
+    /// out cost a bug that shipped: inside tmux, the default `set-clipboard
+    /// external` lets tmux set the terminal clipboard *itself* but ignores an
+    /// application that tries - so `y` put nothing on the clipboard and said
+    /// it had. Asking tmux to do the copy is the same operation from the side
+    /// tmux permits. Every multiplexer has a rule like this, and none of them
+    /// are the same rule, so the answer belongs per backend rather than in one
+    /// clever escape sequence.
+    ///
+    /// The switch is exhaustive on purpose. A new variant does not compile
+    /// until someone has decided how it reaches the clipboard, which is the
+    /// only mechanism here that stops the next backend inheriting this bug by
+    /// saying nothing.
+    fn backendCopy(self: *Bridge, cx: Ctx, text: []const u8) error{ Unsupported, Failed }!void {
+        switch (self.*) {
+            // Falls back rather than failing outright: a tmux too old for
+            // `load-buffer -w` is the same tmux whose `set-clipboard` is
+            // likely to be `on` and forwarding the escape anyway.
+            .tmux => tmux.copy(cx.gpa, cx.io, text) catch return error.Failed,
+            // The escape *is* this backend. There is nothing above it to try,
+            // and it is the right answer outside a multiplexer: it is the one
+            // route that survives SSH.
+            .osc52 => return error.Unsupported,
+        }
     }
 
     /// The chosen pane, inferring one on first use. Null when the window holds

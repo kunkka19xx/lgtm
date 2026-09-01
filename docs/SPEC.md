@@ -155,8 +155,18 @@ With the cursor on a diff line:
 - `Enter` → send `#3 src/auth.rs:47`
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
 - `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
-- `y` → copy the reference to the clipboard
-- `Y` → copy the reference **and** the line contents
+- `y` → yank the selected text (the characters under `v`, the lines under `V`, the cursor line with no selection)
+- `Y` → yank whole lines, whatever `v` selected - vim's linewise yank
+- `<Space>y` → copy the reference to the clipboard
+- `<Space>Y` → copy the reference **and** the line contents
+
+`y` carried the reference until day 3 of the dogfood week, and it was the wrong
+key for it. The tool advertises vim motions, `y` is the most-known key in vim
+after `hjkl`, and the surprise was silent: nothing looks wrong until the paste
+lands somewhere else, by which time the selection is gone. Pointing at code
+already had its own key (`Enter`), so `y` did not need to carry it too. The
+yanked text drops the diff's sign column, because code pasted into an editor
+should still compile.
 
 **A charwise selection sends the words, not the columns.** `47:12` is no use to an agent - it does not count columns, it reads the line - so the reference carries the selected text instead, which is what a human would have said. Only within one line: across two, the text would have to carry the newline between them, and that is what hard rule 1 forbids, so a selection that grows past a line falls back to the line range it always was.
 

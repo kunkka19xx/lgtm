@@ -393,6 +393,9 @@ Two invariants enforced in `bridge.zig` rather than in each backend, so no backe
 
 - `sendText` **rejects any payload containing `\n`.** Documented here, and enforced by a returned `error.Multiline` rather than by `std.debug.assert` - assert is compiled out in ReleaseFast, which is precisely the build where the mistake would be silent. Review submission goes through `review.zig`, which writes a file and hands the bridge a single line.
 - Payloads end with a trailing space and never include a carriage return. The space is added by `bridge.zig`, so no caller can forget it or double it.
+- **Never report an outcome the backend cannot observe.** This one was learned rather than designed, and it cost a bug that shipped: `copyText` wrote an OSC 52, flushed, and returned `.copied` unconditionally, because an escape sequence has no reply. Inside tmux the default `set-clipboard external` drops an application's OSC 52 entirely, so `y` put nothing on the clipboard and the status line said it had. A route with an exit code is worth more than a shorter one: `tmux load-buffer -w -` both works under that default and can fail visibly. Any backend that reports success it cannot read back should be treated as suspect on the same grounds.
+
+**Each backend brings its own clipboard route,** and they are not variations on one escape sequence. tmux needs `load-buffer` because of `set-clipboard`; the others will each have a rule of their own, and none of them are the same rule. `Bridge.backendCopy` is where that lives, and its switch is deliberately exhaustive: a new variant does not compile until someone has decided how it reaches the clipboard. That is the only mechanism stopping the next backend from inheriting the bug above by saying nothing. OSC 52 stays underneath all of them as the floor, because it is the one route that survives SSH.
 
 **Three places the shipped v0.1 differs from the sketch above,** each recorded rather than quietly absorbed:
 

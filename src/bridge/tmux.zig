@@ -123,6 +123,40 @@ pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) Send
 
 /// The panes of the current window, or of every session. Caller owns nothing:
 /// the panes point into `arena`.
+/// `load-buffer -w -`: fills the tmux paste buffer and asks tmux to put the
+/// text on the system clipboard as well.
+///
+/// This exists because the bare OSC 52 does not work under tmux's defaults.
+/// `set-clipboard` defaults to `external`, which means tmux will set the
+/// terminal clipboard *itself* but ignores an application that tries - and
+/// lgtm is the application. Asking tmux to do it is the same operation from
+/// the side tmux permits. Measured on tmux 3.7b with the default setting: the
+/// escape from a pane sets nothing, this sets both the clipboard and the
+/// buffer.
+///
+/// Two things come free. `prefix + ]` pastes it, which the escape never gave.
+/// And this is a command with an exit code, so a failure is knowable rather
+/// than reported as a success nobody can check.
+///
+/// Stdin rather than `set-buffer <data>`, so the payload is never an argv:
+/// `Y` copies the lines under a reference and has no business meeting ARG_MAX.
+pub fn copyArgv(arena: Allocator) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "tmux", "load-buffer", "-w", "-" });
+}
+
+pub fn copy(gpa: Allocator, io: std.Io, text: []const u8) SendError!void {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+
+    const argv = try copyArgv(scratch.allocator());
+    const out = proc.runWithInput(gpa, io, argv, text, send_output_max) catch
+        return error.TmuxFailed;
+    defer out.deinit(gpa);
+    // A tmux older than 3.2 has no `-w` and says so. The caller falls back to
+    // the escape, which is what that tmux was going to need anyway.
+    if (out.exit_code != 0) return error.TmuxFailed;
+}
+
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all_sessions: bool) SendError![]Pane {
     const argv = try listArgv(arena, all_sessions);
     const out = proc.run(gpa, io, argv, list_output_max) catch return error.TmuxFailed;
@@ -147,6 +181,21 @@ test "send-keys is literal, and options stop before the payload" {
     try testing.expectEqualStrings("-l", argv[4]);
     try testing.expectEqualStrings("--", argv[5]);
     try testing.expectEqualStrings("#3 src/auth.rs:47 ", argv[6]);
+}
+
+test "the clipboard copy asks tmux to do it, and takes the payload on stdin" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    const argv = try copyArgv(a.allocator());
+    try testing.expectEqualSlices([]const u8, &.{ "tmux", "load-buffer", "-w", "-" }, argv);
+
+    // `-w` is the whole point: without it the text reaches the tmux paste
+    // buffer and never the system clipboard, which is the bug this replaced.
+    try testing.expect(std.mem.eql(u8, argv[2], "-w"));
+    // And `-`, so the payload arrives on stdin rather than as an argv that
+    // `Y` could grow past ARG_MAX.
+    try testing.expectEqualStrings("-", argv[argv.len - 1]);
 }
 
 test "a payload that looks like an option is still the payload" {

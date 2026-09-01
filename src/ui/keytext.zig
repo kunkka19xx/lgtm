@@ -444,7 +444,7 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     // The filter reaches the keys too, so the leader bindings are findable by
     // the name a user would type for them.
     const leader_hits = try helpEntries(default_bindings, .normal, null, "space", arena);
-    try testing.expectEqual(@as(usize, 7), leader_hits.len);
+    try testing.expectEqual(@as(usize, 9), leader_hits.len);
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
     for (leader_hits) |e| try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);

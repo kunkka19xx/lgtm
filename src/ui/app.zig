@@ -410,6 +410,8 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.compose(.send, .ref),
+            .copy_text => try self.yank(.selection),
+            .copy_text_lines => try self.yank(.lines),
             .copy_ref => try self.compose(.copy, .ref),
             .copy_ref_lines => try self.compose(.copy, .ref_lines),
             .ask_why => try self.compose(.send, .{ .ask = self.templates.ask_why }),
@@ -870,6 +872,66 @@ pub const App = struct {
     /// Builds the payload and hands it to the loop. Nothing here talks to a
     /// bridge: `core/` and `ui/app.zig` are both testable without one, and
     /// this is the file the tests are in.
+    /// How much of the line a yank takes.
+    const Extent = enum {
+        /// What is actually selected: the characters under a charwise
+        /// selection, the whole lines under a linewise one.
+        selection,
+        /// Whole lines regardless, which is what vim's `Y` does to a charwise
+        /// selection.
+        lines,
+    };
+
+    /// `y` and `Y`: the selected text itself, onto the clipboard.
+    ///
+    /// This is the vim key doing the vim thing, and it is separate from
+    /// `<leader>y` on purpose. `y` used to copy a *reference* - the text
+    /// wrapped in `#3 path:47` - which is what the tool is for but not what
+    /// the most-known key in vim means. The surprise was silent: nothing looks
+    /// wrong until the paste lands somewhere else, and by then the selection
+    /// is gone. Pointing at code has its own key and always did (`Enter`), so
+    /// `y` does not need to carry it too.
+    ///
+    /// Newlines are fine here. Hard rule 1 is about what `send-keys` does with
+    /// one, and this never reaches `send-keys`: `y` is the clipboard whatever
+    /// the backend is.
+    fn yank(self: *App, extent: Extent) Allocator.Error!void {
+        const f = self.current() orelse {
+            self.notice.set("nothing here to yank", .{});
+            return;
+        };
+        const sel = self.selection();
+        const lo = if (sel) |s| s.lo else self.cursor;
+        const hi = if (sel) |s| s.hi else self.cursor;
+
+        self.outgoing.clearRetainingCapacity();
+        var rows: u32 = 0;
+        var row = lo;
+        while (row <= hi) : (row += 1) {
+            const li = self.rows.lineAt(row) orelse continue;
+            if (li >= f.lines.len()) continue;
+            const text = f.lines.text[li];
+
+            // The diff's sign column is lgtm's, not the file's: a yanked line
+            // pasted into an editor should compile, so the `+` goes nowhere.
+            const part = if (extent == .selection and sel != null) blk: {
+                const span = sel.?.span(row, @intCast(text.len)) orelse break :blk "";
+                break :blk text[span.lo..span.hi];
+            } else text;
+
+            if (rows > 0) try self.outgoing.append(self.gpa, '\n');
+            try self.outgoing.appendSlice(self.gpa, part);
+            rows += 1;
+        }
+
+        if (self.outgoing.items.len == 0) {
+            self.notice.set("nothing here to yank", .{});
+            return;
+        }
+        self.want_send = .copy;
+        if (self.mode == .visual) self.leaveVisual();
+    }
+
     fn compose(self: *App, how: Delivery, what: What) Allocator.Error!void {
         const r = self.refAt() orelse {
             self.notice.set("nothing here to point at", .{});
@@ -2949,23 +3011,56 @@ test "a one-row selection is a single line, not a range of one" {
     try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
 }
 
-test "y copies where Enter sends, and the payload is the same" {
+test "y yanks the text, the way the key means in vim" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
+    // No selection: the cursor line, and without the diff's sign column -
+    // yanked code should paste into an editor and still compile.
     try fx.press("y");
+    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
+    try testing.expectEqualStrings("fn alpha() {", fx.app.payload());
+
+    // Charwise: exactly the characters under the selection, which is the case
+    // that sent people a reference when they wanted a word.
+    try fx.press("vll");
+    try fx.press("y");
+    try testing.expectEqualStrings("fn ", fx.app.payload());
+
+    // Linewise across two rows, joined by the newline the clipboard allows.
+    try fx.press("Vj");
+    try fx.press("y");
+    try testing.expectEqualStrings("fn alpha() {\n    const x = 1;", fx.app.payload());
+}
+
+test "Y yanks whole lines even from a charwise selection" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // vim's `Y` is linewise whatever `v` selected.
+    try fx.press("vll");
+    try fx.press("Y");
+    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
+    try testing.expectEqualStrings("fn alpha() {", fx.app.payload());
+}
+
+test "the reference moved to <leader>y rather than being lost" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<Space>y");
     try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
     try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
 }
 
-test "Y puts the lines under the reference, markers kept" {
+test "<leader>Y puts the lines under the reference, markers kept" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
     // The marker is what says which side of the change a line is on; a mixed
     // range pasted without them reads as nonsense.
     try fx.press("Vj");
-    try fx.press("Y");
+    try fx.press("<Space>Y");
     try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
     try testing.expectEqualStrings(
         "#1 a.zig:1-2\n fn alpha() {\n     const x = 1;",
@@ -3017,12 +3112,12 @@ test "the ask presets are the reference plus a question" {
 test "nothing sent to the agent ever contains a newline" {
     // Hard rule 1, checked where the payload is built as well as where it is
     // sent: in `tmux send-keys` a newline is Enter, and Enter submits the
-    // user's half-written message. `Y` is exempt by design - it is the
-    // clipboard, which no send-keys ever sees.
+    // user's half-written message. The yanks and `<leader>Y` are exempt by
+    // design - they are the clipboard, which no send-keys ever sees.
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    for ([_][]const u8{ "<CR>", "y", "a", "!", "t", "x" }) |keys| {
+    for ([_][]const u8{ "<CR>", "<Space>y", "a", "!", "t", "x" }) |keys| {
         try fx.press("Vj");
         try fx.press(keys);
         try testing.expect(std.mem.indexOfScalar(u8, fx.app.payload(), '\n') == null);
