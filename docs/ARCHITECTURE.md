@@ -214,7 +214,9 @@ place against a real file rather than a hypothetical one:
   literal. This is what stops a Rust lifetime (`'a`) from being read as an
   unterminated char literal and painting the rest of the line as a string.
 - `hashed` - `r#"..."#`, where the closing quote only counts with a matching
-  `#` count.
+  `#` count. Swift's `#"..."#` has no prefix before the `#` run, so `open` is
+  allowed to be empty; a prefixless spec requires at least one `#`, or it would
+  claim every plain `"`.
 - `line_string` - Zig's `\\`, a literal that runs to the end of the line.
 - `blocks: .braces | .indent` - Python closes a function span on a column, not
   a brace.
@@ -242,6 +244,11 @@ pub const Highlighter = union(enum) {
 Selected per language *and* per file size. A language with a lexer uses it; anything else falls back to tree-sitter if linked, otherwise `plain`. The user never sees an unhighlighted screen as a failure - it is just a fallback.
 
 **v0.1 ships four lexers: Zig, Rust, Go, Python.** Zero C dependencies for highlighting, nothing to profile.
+
+Swift landed after, on dogfooding evidence rather than plan: a `look` diff is
+mostly `.swift`, and reviewing it unhighlighted was the complaint. It cost one
+`LangDef` plus the empty-`open` case in `hashed` above, which is the shape this
+section predicted a fifth language would have.
 
 Zig was written first, against the plan, for one reason: every fixture, every
 recorded session and every file in this repository is Zig, so a Rust-first

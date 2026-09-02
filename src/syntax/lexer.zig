@@ -313,7 +313,19 @@ const Scan = struct {
         for (self.def.line_comment) |lc| if (self.match(lc)) return true;
         for (self.def.line_string) |ls| if (self.match(ls)) return true;
         if (self.def.block_comment) |bc| if (self.match(bc.open)) return true;
-        for (self.def.strings) |spec| if (self.match(spec.open)) return true;
+        for (self.def.strings) |spec| {
+            // A prefixless hashed spec has nothing for `match` to compare, and
+            // the '#' run alone is not enough: Swift's `#available` is not a
+            // literal, `#"` is.
+            if (spec.open.len == 0) {
+                if (self.text[self.i] != '#') continue;
+                var j = self.i;
+                while (j < self.end and self.text[j] == '#') j += 1;
+                if (j < self.end and self.text[j] == '"') return true;
+                continue;
+            }
+            if (self.match(spec.open)) return true;
+        }
         return false;
     }
 
@@ -367,10 +379,13 @@ const Scan = struct {
             for (self.def.strings, 0..) |spec, si| {
                 const start = self.i;
                 if (spec.hashed) {
-                    if (!self.match(spec.open)) continue;
+                    if (spec.open.len > 0 and !self.match(spec.open)) continue;
                     var j = self.i + spec.open.len;
                     var hashes: usize = 0;
                     while (j < self.end and self.text[j] == '#') : (j += 1) hashes += 1;
+                    // Swift's `#"`: with no prefix the '#' run is the whole
+                    // opener, so an empty one would match every plain `"`.
+                    if (spec.open.len == 0 and hashes == 0) continue;
                     if (j >= self.end or self.text[j] != '"') continue;
                     if (hashes > std.math.maxInt(u8)) continue;
                     self.i = j + 1;
@@ -675,6 +690,7 @@ const zig_lang = @import("lang/zig.zig");
 const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
+const swift_lang = @import("lang/swift.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
@@ -794,6 +810,86 @@ test "raw strings close only on a matching hash count" {
     try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
     // The literal ended, so the next line lexes normally.
     try testing.expectEqual(Kind.number, kindOf(runs, src, "1;").?);
+}
+
+test "runs tile the span and classify swift source" {
+    const src =
+        \\/// A doc comment.
+        \\@MainActor
+        \\final class Tile {
+        \\    private let name: String = "hello"
+        \\
+        \\    func isPressable(_ actionID: Int) -> Bool {
+        \\        return actionID > 0
+        \\    }
+        \\}
+        \\
+    ;
+    var lx: Lexer = .init(&swift_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/// A doc").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "func").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "String").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "Bool").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"hello\"").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "isPressable").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0").?);
+}
+
+test "a swift raw string closes only on a matching hash count" {
+    const src =
+        \\let a = #"a "quoted" thing"#
+        \\let b = 1
+        \\
+    ;
+    var lx: Lexer = .init(&swift_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // The inner quotes do not close it; `"#` does.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "1").?);
+}
+
+test "a swift pound directive is not a raw string" {
+    const src =
+        \\if #available(macOS 14, *) {
+        \\    let n = 2
+        \\}
+        \\
+    ;
+    var lx: Lexer = .init(&swift_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // A '#' run opens a literal only when a quote follows it.
+    try testing.expect(kindOf(runs, src, "#available").? != .string);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "2").?);
+}
+
+test "a swift multiline string spans lines and holds bare quotes" {
+    const src =
+        \\let s = """
+        \\line one
+        \\a "quoted" word
+        \\"""
+        \\let n = 3
+        \\
+    ;
+    var lx: Lexer = .init(&swift_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "line one").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
+    // The literal ended, so the next line lexes normally.
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
 }
 
 test "an unterminated string recovers at the end of the line" {

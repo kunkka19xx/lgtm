@@ -26,12 +26,14 @@ const zig_lang = @import("lang/zig.zig");
 const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
+const swift_lang = @import("lang/swift.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
     &rust_lang.def,
     &go_lang.def,
     &python_lang.def,
+    &swift_lang.def,
 };
 
 /// Extension match, lower-cased. Everything unrecognised renders plain.
@@ -318,6 +320,7 @@ test "extensions map to languages, case-insensitively" {
     try testing.expectEqualStrings("rust", byExtension("src/main.RS").?.name);
     try testing.expectEqualStrings("go", byExtension("cmd/serve.go").?.name);
     try testing.expectEqualStrings("python", byExtension("tools/run.py").?.name);
+    try testing.expectEqualStrings("swift", byExtension("Views/Launchpad.swift").?.name);
     try testing.expect(byExtension("Makefile") == null);
     try testing.expect(byExtension("notes.txt") == null);
     // A dot in a directory name is not an extension.

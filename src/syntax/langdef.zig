@@ -31,6 +31,10 @@ pub const StringSpec = struct {
     multiline: bool = false,
     /// Rust's `r#"..."#`: after `open` count the '#'s, require a '"', and
     /// require the same number of '#'s after the closing quote.
+    ///
+    /// `open` may be empty, which is Swift's `#"..."#` - the '#' run is the
+    /// whole opener. A prefixless spec needs at least one '#', or it would
+    /// match every plain `"` and impose the raw literal's escape rules on it.
     hashed: bool = false,
     /// A literal that does not close within this many bytes was never a
     /// literal. This is what stops a Rust lifetime (`'a`) from being read as
@@ -129,7 +133,15 @@ pub fn define(comptime d: LangDef) LangDef {
             if (bc.open.len > 0) delim[bc.open[0]] = true;
         }
         for (d.strings) |sp| {
-            if (sp.open.len > 0) delim[sp.open[0]] = true;
+            // A prefixless hashed spec opens on the '#' run itself, so that is
+            // the byte the scanner's inner loop has to stop on.
+            const first: ?u8 = if (sp.open.len > 0)
+                sp.open[0]
+            else if (sp.hashed)
+                '#'
+            else
+                @compileError("string spec with an empty opener must be hashed: " ++ d.name);
+            if (first) |b| delim[b] = true;
         }
         out.delim_start = delim;
 
