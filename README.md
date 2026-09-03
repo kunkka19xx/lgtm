@@ -111,7 +111,13 @@ mark_on_submit = true   # Ctrl-s marks what you just read
 
 [keys]
 next_hunk = ["]h", "<Space>nh"]
+compose_presets = ["<C-p>"]   # the box's keys are bindings too
 ```
+
+Every key is remappable, inside the compose box as well as outside it - only
+the vim motions are fixed, because in a text box every printable key is data.
+The `?` popup and the box's own footer are generated from your bindings, so a
+remap moves the key and everything that names it together.
 
 ## Not this
 

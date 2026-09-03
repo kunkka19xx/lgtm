@@ -505,6 +505,7 @@ lgtm/
 │   │   ├── hunk.zig       # change ids: assigned, inherited, kept still
 │   │   ├── linemap.zig    # matching two versions line to line
 │   │   ├── anchor.zig     # the tiers built on it: mapped, hashed, stale
+│   │   ├── checkpoint.zig # the mark, and which rows arrived after it
 │   │   ├── comments.zig   # the store, its jsonl, and carrying it across a re-diff
 │   │   ├── review.zig     # open comments as one markdown file
 │   │   ├── source.zig     # the two buffers a file is drawn from
@@ -627,7 +628,20 @@ Rule, written down now and enforced by review: **byte offsets everywhere interna
 pub const Mode = enum { normal, visual, note_input, finder, insert, command };
 ```
 
-v0.1 uses the first three. Declaring all six costs nothing; writing `if (in_visual_mode)` across the codebase makes adding insert mode a full dispatch refactor.
+v0.1 uses five of the six - `insert` is the one still waiting. Declaring them all cost nothing, and the bet paid twice over: `note_input` was the compose box's mode the day the box was written, and `keymap.Modes` grew a `compose` bit out of its pad bits when the box's keys became bindings, without a dispatch refactor anywhere.
+
+`Modes` is the other half of that. A binding says which modes it is live in, so a key can mean one thing in the review, another in a list, and a third inside the compose box, without a single `if (in_the_box)` in dispatch:
+
+```zig
+pub const Modes = packed struct(u8) {
+    normal: bool = false,
+    visual: bool = false,
+    help: bool = false,
+    finder: bool = false,
+    compose: bool = false,
+    _pad: u3 = 0,
+};
+```
 
 Same argument for the event queue. It already exists for the watch thread - make it a general union rather than a `FilesChanged` channel:
 
