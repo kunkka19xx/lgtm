@@ -185,7 +185,7 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
         col += icon_w;
     }
     const shown = try path_mod.elide(f.arena, v.file.path(), fit.path, g.ellipsis, f.method());
-    col += try f.print(row, col, statusStyle(t, v.file.status), "{s}", .{shown});
+    col += try f.print(row, col, if (v.preview) t.file_plain else statusStyle(t, v.file.status), "{s}", .{shown});
     if (fit.counter) {
         f.put(row, col, counter, t.dim);
         col += counter_w;

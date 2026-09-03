@@ -197,6 +197,11 @@ pub const Theme = struct {
     /// column: the list is paths, and a second alphabet beside them is one
     /// more thing to learn and one less column for the path. Slots rather than
     /// borrowed styles, so a theme moves them together with everything else.
+    /// A file with no status at all: one the review does not contain, listed
+    /// by `<Space>d` or opened for reading. Its own slot rather than a status
+    /// colour, because it has no status - and rather than `dim`, because a
+    /// list of four hundred greys is a list nobody reads.
+    file_plain: Style,
     file_added: Style,
     file_deleted: Style,
     file_modified: Style,
@@ -265,6 +270,7 @@ pub fn fromPalette(p: Palette) Theme {
         .accent = .{ .fg = p.accent, .bold = true },
         .popup_border = .{ .fg = p.accent, .dim = true },
 
+        .file_plain = .{ .fg = p.fg },
         .file_added = .{ .fg = p.green },
         .file_deleted = .{ .fg = p.red },
         // Amber, which is what "orange" is in a palette that has yellow: the

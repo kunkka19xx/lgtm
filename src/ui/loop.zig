@@ -81,6 +81,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.presets_cfg = opts.cfg.presets;
+    app.notes_inline = opts.cfg.ui.notes == .inline_;
     app.compose_at = switch (opts.cfg.ui.compose) {
         .bottom => .bottom,
         .top => .top,

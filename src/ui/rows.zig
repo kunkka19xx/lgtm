@@ -21,6 +21,13 @@ pub const Row = union(enum) {
     line: u32,
     /// The inset rule drawn between two hunks of the same file.
     gap,
+    /// A note, drawn under the line it was written against - the way a review
+    /// comment sits under its code. Index into the frame's note list.
+    ///
+    /// A row of its own rather than something painted over the line, because
+    /// everything that counts rows already works: it scrolls, it wraps, and
+    /// the motions step past it the way they step past a hunk header.
+    note: u32,
     /// The file exceeded `large_file_lines`, so its body was never parsed.
     /// Deferring is not discarding: core/diff.zig retains the bytes and can
     /// materialise them on demand.
@@ -134,7 +141,15 @@ pub fn gutter(f: *const diff.FileDiff) u16 {
 
 /// Builds the rows for one file: each hunk's header, then its lines, with a
 /// rule between hunks but never before the first or after the last.
+/// A note as the row builder needs it: which line it hangs under, and where
+/// to find its text when the row is drawn.
+pub const NoteAt = struct { line: u32, index: u32 };
+
 pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
+    return buildWith(gpa, f, &.{});
+}
+
+pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const NoteAt) Allocator.Error!Rows {
     var items: std.ArrayList(Row) = .empty;
     errdefer items.deinit(gpa);
     var hunk_rows: std.ArrayList(u32) = .empty;
@@ -154,7 +169,10 @@ pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
     // and every line of it belongs.
     if (f.hunks.len == 0 and f.lines.len() > 0) {
         var i: u32 = 0;
-        while (i < f.lines.len()) : (i += 1) try items.append(gpa, .{ .line = i });
+        while (i < f.lines.len()) : (i += 1) {
+            try items.append(gpa, .{ .line = i });
+            try appendNotes(gpa, &items, f, i, notes);
+        }
         return .{
             .items = try items.toOwnedSlice(gpa),
             .hunk_rows = try hunk_rows.toOwnedSlice(gpa),
@@ -166,7 +184,10 @@ pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
         try hunk_rows.append(gpa, @intCast(items.items.len));
         try items.append(gpa, .{ .hunk_header = @intCast(hi) });
         var i = h.lo;
-        while (i < h.hi) : (i += 1) try items.append(gpa, .{ .line = i });
+        while (i < h.hi) : (i += 1) {
+            try items.append(gpa, .{ .line = i });
+            try appendNotes(gpa, &items, f, i, notes);
+        }
     }
 
     const owned_items = try items.toOwnedSlice(gpa);
@@ -175,6 +196,22 @@ pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
         .items = owned_items,
         .hunk_rows = try hunk_rows.toOwnedSlice(gpa),
     };
+}
+
+/// Every note hanging under line `li`, in the order they were written.
+fn appendNotes(
+    gpa: Allocator,
+    items: *std.ArrayList(Row),
+    f: *const diff.FileDiff,
+    li: u32,
+    notes: []const NoteAt,
+) Allocator.Error!void {
+    if (notes.len == 0 or li >= f.lines.len()) return;
+    const no = f.lines.new_no[li];
+    if (no == 0) return;
+    for (notes) |n| {
+        if (n.line == no) try items.append(gpa, .{ .note = n.index });
+    }
 }
 
 const testing = std.testing;

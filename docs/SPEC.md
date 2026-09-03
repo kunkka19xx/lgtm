@@ -120,9 +120,34 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `<Space>d` | every file in the project; `Enter` opens it. A file with a diff opens in the review; one without opens **whole**, every line context, outside the review - readable, notable, and referenceable, which is what a file browser is for. `]f` or `<Space>f` returns to the review |
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
 | `zi` | show the files `[review] ignore` hides, and hide them again |
-| `c` `C` `dc` | write, edit, delete the note on this line |
+| `c` `C` `dc` | write, edit, delete the note here - the one on this line, or the one whose own row the cursor is on |
+
+`[ui] notes` chooses how a note shows: `inline` (the default) draws its text
+under its line, `marker` draws only the gutter dot and leaves reading it to
+`<Space>vc`. Some readers want the remark in front of them; some want the diff
+the shape the file is.
+
+**Notes are drawn under the line they belong to**, the way a review comment
+sits under its code, and they are rows like any other: they scroll, they wrap,
+and the motions step past them the way they step past a hunk header. A gutter
+marker alone says a note exists without saying what it says, which makes it a
+reminder to go and look rather than the remark itself.
 | `]c` `[c` | next and previous note, across the whole review |
+| `<Space>nc` `<Space>pc` | the leader spellings of those, as `<Space>nh` is of `]h` |
+| `<Space>vc` | open the nearest note to read or edit - the one under the cursor if there is one, otherwise the closest in this file |
 | `<C-s>` | write `.lgtm/review-N.md` and send one line naming it |
+
+Notes live in `.lgtm/notes.jsonl` and outlive the process, which is the whole
+point of `.lgtm/` (ARCHITECTURE.md 1). Two mechanisms keep them on the right
+line, because they answer different questions. **Within a session**, every
+re-diff carries them through a line map (PERFORMANCE.md 3.1) - both versions of
+the file exist at that moment, so the answer is a lookup. **Across a restart**
+there is no previous version to diff against: the file may have been rewritten
+while lgtm was not running. Each note therefore stores the text of the line it
+was written against, and the first diff of a session finds that line again -
+the nearest occurrence, so a line that appears twice does not drag the note to
+the top of the file. A line that is nowhere leaves the note stale rather than
+somewhere plausible and wrong.
 | `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |

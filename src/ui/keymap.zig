@@ -66,6 +66,7 @@ pub const Command = enum {
     compose_ask,
     file_browse,
     note_add,
+    note_view,
     note_edit,
     note_delete,
     next_note,
@@ -321,6 +322,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('d'), c('c') }, .command = .note_delete, .desc = "delete the note under the cursor", .group = .note },
     .{ .chords = &.{ c(']'), c('c') }, .command = .next_note, .desc = "next and previous note", .group = .note },
     .{ .chords = &.{ c('['), c('c') }, .command = .prev_note, .desc = "next and previous note", .group = .note },
+    // The leader spellings, the same way `<Space>nh` mirrors `]h`.
+    .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_note, .group = .note },
+    .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_note, .group = .note },
+    .{ .chords = &.{ leader, c('v'), c('c') }, .command = .note_view, .desc = "open the nearest note to read or edit", .group = .note },
     .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .note },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },

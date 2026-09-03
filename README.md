@@ -36,7 +36,7 @@ The loop today:
 - **Live diff** - updates as the agent writes, no command to run
 - **Two-keystroke references** - select lines, press Enter, `#3 src/auth.zig:47-52` lands in the agent's input
 - **Vim motions**, read-only in v1 - the agent edits, you review
-- **Review notes** - `c` writes one against a line, `]c` walks them, `<C-s>` writes `.lgtm/review-N.md` and tells the agent where it is. They follow the code when the agent rewrites it, and say so when they cannot
+- **Review notes** - `c` writes one against a line, `]c` walks them, `<Space>vc` opens the nearest to read or edit, `<C-s>` writes `.lgtm/review-N.md` and tells the agent where it is. They follow the code when the agent rewrites it, and say so when they cannot
 - **File search** - `<Space>f` the changed files, `<Space>d` every file git knows about - an unchanged one opens whole, outside the review, where you can still read it and note on it - `@` in the compose box to mention one. The whole-machine scope via the [`look`](https://github.com/kunkka19xx/look) index is still to come
 
 ## Non-goals

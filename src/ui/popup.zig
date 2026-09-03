@@ -571,7 +571,11 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // two, so a row reads as one thing rather than as an icon and a path
         // that happen to be adjacent. The current file is bold on top of
         // whichever colour it is, so "where I am" survives.
-        var style = switch (e.status) {
+        // A file outside the review has no status to colour by: nothing
+        // happened to it. It was taking `file_modified` because that is what
+        // the field defaults to, so every unchanged file in `<Space>d` claimed
+        // to have been modified.
+        var style = if (!e.in_review) f.theme.file_plain else switch (e.status) {
             .added => f.theme.file_added,
             .deleted => f.theme.file_deleted,
             .modified => f.theme.file_modified,

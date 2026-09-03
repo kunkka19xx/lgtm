@@ -62,10 +62,19 @@ pub const Note = struct {
     /// bridge, and `review.zig` sends one line naming the file).
     body: []const u8,
     state: State = .open,
+    /// The text of the line the note was written against. Owned.
+    ///
+    /// Within a session `carry` does better than this - it has both versions
+    /// of the file and reads the answer out of a line map. Across a *restart*
+    /// it is all there is: the file may have been rewritten while lgtm was not
+    /// running, and there is no previous version to diff against. One line of
+    /// text is enough to find where it went, or to say it has gone.
+    anchor: []const u8 = "",
 
     pub fn deinit(self: Note, gpa: Allocator) void {
         gpa.free(self.path);
         gpa.free(self.body);
+        gpa.free(self.anchor);
     }
 };
 
@@ -105,13 +114,25 @@ pub const Store = struct {
     /// and its `body` is a slice of the compose box's fixed buffer, and
     /// neither outlives the next keystroke (rule 4).
     pub fn add(self: *Store, path: []const u8, line: u32, body: []const u8) Allocator.Error!u32 {
+        return self.addAnchored(path, line, body, "");
+    }
+
+    pub fn addAnchored(
+        self: *Store,
+        path: []const u8,
+        line: u32,
+        body: []const u8,
+        anchor_text: []const u8,
+    ) Allocator.Error!u32 {
         const p = try self.gpa.dupe(u8, path);
         errdefer self.gpa.free(p);
         const b = try self.gpa.dupe(u8, body);
         errdefer self.gpa.free(b);
+        const a = try self.gpa.dupe(u8, anchor_text);
+        errdefer self.gpa.free(a);
 
         const id = self.next_id;
-        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .body = b });
+        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .body = b, .anchor = a });
         self.next_id += 1;
         self.dirty = true;
         return id;
@@ -170,6 +191,42 @@ pub const Store = struct {
         return n;
     }
 
+    /// Re-places notes on `path` against a file that changed while lgtm was
+    /// not running.
+    ///
+    /// `carry` is the good path and cannot be used here: it needs the previous
+    /// version of the file, and after a restart there is none. What is left is
+    /// the one line the note was written against. If it is still where the
+    /// note says, nothing moves. If it is elsewhere in the file, the note goes
+    /// there. If it is nowhere, the note is stale - never silently moved to a
+    /// line that merely happens to have the right number (rule 7).
+    pub fn reconcile(self: *Store, path: []const u8, text: []const u8) void {
+        for (self.list.items) |*n| {
+            if (n.state == .stale or n.anchor.len == 0) continue;
+            if (!std.mem.eql(u8, n.path, path)) continue;
+
+            var found: ?u32 = null;
+            var no: u32 = 0;
+            var it = std.mem.splitScalar(u8, text, '\n');
+            while (it.next()) |raw| {
+                no += 1;
+                const line = std.mem.trimEnd(u8, raw, "\r");
+                if (!std.mem.eql(u8, line, n.anchor)) continue;
+                // The nearest occurrence to where the note thinks it is: a
+                // line that appears twice should not drag the note to the top
+                // of the file.
+                if (found == null or dist(no, n.line) < dist(found.?, n.line)) found = no;
+            }
+            if (found) |to| {
+                if (to != n.line) self.dirty = true;
+                n.line = to;
+            } else {
+                n.state = .stale;
+                self.dirty = true;
+            }
+        }
+    }
+
     /// Carries every note on `path` from one version of the file to the next.
     ///
     /// The primary path is a line map, not a search (PERFORMANCE.md 3.1), and
@@ -200,6 +257,10 @@ pub const Store = struct {
     }
 };
 
+fn dist(a: u32, b: u32) u32 {
+    return if (a > b) a - b else b - a;
+}
+
 // -- persistence -------------------------------------------------------------
 //
 // One note per line, our own escaping rather than `std.json`: the fields are
@@ -220,6 +281,8 @@ pub fn write(out: *std.ArrayList(u8), gpa: Allocator, store: *const Store) Alloc
         try out.appendSlice(gpa, n.state.name());
         try out.appendSlice(gpa, "\",\"path\":");
         try quote(out, gpa, n.path);
+        try out.appendSlice(gpa, ",\"anchor\":");
+        try quote(out, gpa, n.anchor);
         try out.appendSlice(gpa, ",\"body\":");
         try quote(out, gpa, n.body);
         try out.appendSlice(gpa, "}\n");
@@ -240,10 +303,12 @@ pub fn read(store: *Store, text: []const u8) Allocator.Error!void {
 
         var buf_path: [4096]u8 = undefined;
         var buf_body: [8192]u8 = undefined;
+        var buf_anchor: [4096]u8 = undefined;
         const p = unquote(&buf_path, path);
         const b = unquote(&buf_body, body);
+        const a = if (string(line, "\"anchor\":")) |raw| unquote(&buf_anchor, raw) else "";
 
-        const new_id = try store.add(p, @intCast(ln), b);
+        const new_id = try store.addAnchored(p, @intCast(ln), b, a);
         const n = store.find(new_id).?;
         n.id = @intCast(id);
         if (std.mem.indexOf(u8, line, "\"state\":\"sent\"") != null) n.state = .sent;
@@ -390,10 +455,51 @@ test "a note that cannot be placed goes stale rather than moving somewhere wrong
     try testing.expectEqualStrings("this branch is dead", store.items()[0].body);
 }
 
+test "a note finds its line again after a restart, when the file moved" {
+    // The gap `carry` cannot cover: lgtm was not running when the file
+    // changed, so there is no previous version to diff. One line of stored
+    // text is what is left, and it is enough.
+    var store: Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addAnchored("a.zig", 2, "why not a set?", "    const list = init();");
+
+    const now =
+        \\const std = @import("std");
+        \\
+        \\fn a() void {
+        \\    const list = init();
+        \\}
+        \\
+    ;
+    store.reconcile("a.zig", now);
+    try testing.expectEqual(@as(u32, 4), store.items()[0].line);
+    try testing.expectEqual(State.open, store.items()[0].state);
+}
+
+test "a note whose line is gone after a restart goes stale, not somewhere wrong" {
+    var store: Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addAnchored("a.zig", 2, "dead branch", "    if (never()) unreachable;");
+
+    store.reconcile("a.zig", "fn a() void {\n}\n");
+    try testing.expectEqual(State.stale, store.items()[0].state);
+    try testing.expectEqual(@as(usize, 1), store.len());
+}
+
+test "a line that appears twice takes the nearest one" {
+    // Otherwise a note on the second `}` of a file jumps to the first.
+    var store: Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addAnchored("a.zig", 6, "this one", "}");
+
+    store.reconcile("a.zig", "fn a() void {\n}\nfn b() void {\n}\nfn c() void {\n}\n");
+    try testing.expectEqual(@as(u32, 6), store.items()[0].line);
+}
+
 test "notes survive a round trip through the file, newlines and quotes included" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
-    _ = try store.add("src/a.zig", 12, "why \"this\" way?\nand not the other");
+    _ = try store.addAnchored("src/a.zig", 12, "why \"this\" way?\nand not the other", "    const x = 1;");
     _ = try store.add("src/b.zig", 3, "back\\slash");
     store.markSent();
 
@@ -411,6 +517,8 @@ test "notes survive a round trip through the file, newlines and quotes included"
     try testing.expectEqual(@as(u32, 12), back.items()[0].line);
     try testing.expectEqual(State.sent, back.items()[0].state);
     try testing.expectEqualStrings("back\\slash", back.items()[1].body);
+    // The anchor line rides along, or a restart has nothing to place it with.
+    try testing.expectEqualStrings("    const x = 1;", back.items()[0].anchor);
 
     // Ids are preserved, and the next one does not collide with them.
     try testing.expectEqual(store.items()[1].id, back.items()[1].id);

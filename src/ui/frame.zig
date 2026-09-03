@@ -363,6 +363,9 @@ pub const Placement = enum { bottom, top, centre };
 /// One note, as the gutter needs it.
 pub const NoteMark = struct {
     line: u32,
+    /// What it says, drawn under the line. The gutter marker says a note is
+    /// there; this is the note.
+    body: []const u8 = "",
     /// Drawn differently, because "I still mean this" and "the code moved out
     /// from under it" are different things to know at a glance.
     state: enum { open, sent, stale },

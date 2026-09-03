@@ -113,8 +113,9 @@ const Mark = struct {
 fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.Error!i32 {
     switch (r) {
         .line => |li| return drawLine(f, v, row, li, mark),
+        .note => |ni| return drawNote(f, v, row, ni),
         // Chrome is one screen row and never wraps, so it is drawn or it is
-        // not; only a line can straddle the top of the body.
+        // not; only a line and a note can straddle the top of the body.
         else => {},
     }
     const at = onScreen(f, row) orelse return 1;
@@ -131,9 +132,48 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
             .{v.file.added + v.file.removed},
         ),
         .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
-        .line => unreachable,
+        .line, .note => unreachable,
     }
     return 1;
+}
+
+/// A note under the line it belongs to, indented past the gutter and wrapped
+/// the way the code above it is - a review comment, in the place a review
+/// comment goes.
+fn drawNote(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
+    if (ni >= v.notes.len) return 1;
+    const n = v.notes[ni];
+    const t = f.theme;
+    const style = switch (n.state) {
+        .open => t.note_open,
+        .sent => t.note_sent,
+        .stale => t.note_stale,
+    };
+
+    const col = if (f.width() > 8) @as(u16, 6) else 0;
+    const width = f.width() -| col -| 2;
+    if (width == 0) return 1;
+
+    // The body wrapped, and hard newlines honoured: a note written with `o`
+    // has real lines in it and they are the reader's paragraphs.
+    var rows: i32 = 0;
+    var lines = std.mem.splitScalar(u8, n.body, '\n');
+    while (lines.next()) |line| {
+        var it: wrap.Iterator = .init(line, width, f.method());
+        while (it.next()) |chunk| {
+            if (onScreen(f, row + rows)) |at| {
+                // The marker only on the first row, so a wrapped note reads as
+                // one remark rather than as several.
+                if (rows == 0) f.put(at, col -| 2, f.glyphs.note, style);
+                f.put(at, col, chunk.slice(line), style);
+            }
+            rows += 1;
+            if (row + rows >= f.win.height) break;
+        }
+    }
+    // A note that says nothing still takes a row, or the row model and the
+    // screen disagree about where everything below it is.
+    return @max(rows, 1);
 }
 
 fn drawHunkHeader(f: Frame, v: View, row: u16, hi: u32) Allocator.Error!void {
