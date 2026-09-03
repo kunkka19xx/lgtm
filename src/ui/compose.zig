@@ -31,19 +31,16 @@ const motion = @import("motion.zig");
 /// small enough to sit in the app struct rather than on the heap.
 pub const max_bytes = 4096;
 
-pub const Result = enum {
-    /// The text changed, or did not; either way the box stays open.
-    typing,
-    /// Enter: the caller reads `text()`, flattens it, and sends it.
-    submit,
-    /// Escape: the message is abandoned.
-    cancel,
-    /// `Ctrl-i`: the caller opens the preset list.
-    presets,
-    /// `@` was typed. It is already in the text; the caller opens the file
-    /// picker so the path can follow it.
-    files,
-};
+/// What the box does with a key it did not consume.
+///
+/// Only one answer left. Submitting, cancelling, the preset list and the file
+/// picker used to be values here, decided by keys spelled out in this file;
+/// they are keymap commands now (`Modes.compose_only`), so the caller has
+/// already dealt with them by the time a key arrives. What is left is text and
+/// the vim motions over it, which is the one thing a box cannot delegate: in a
+/// text box every printable key is data, and a keymap that could bind `x`
+/// would be a keymap that could take `x` away from typing.
+pub const Result = enum { typing };
 
 /// Which half of the box has the keyboard.
 ///
@@ -246,6 +243,25 @@ pub const Compose = struct {
     /// One keystroke. The bindings are readline's, because this is a terminal
     /// input box and that is what a terminal input box answers to everywhere
     /// else the user types.
+    /// Whether an operator or an `f`/`t` is waiting for the key after it.
+    ///
+    /// The caller asks before consulting the keymap: with a `d` pending, the
+    /// next key is that operator's motion and `<Esc>` cancels the operator
+    /// rather than the box. A binding firing there would make `d<Esc>` close
+    /// a half-written message, which is the opposite of what `<Esc>` means
+    /// everywhere else in vim.
+    pub fn hasPending(self: *const Compose) bool {
+        return self.pending != null;
+    }
+
+    /// Out to normal mode, not out of the box: `<Esc>` backs out one level,
+    /// and from normal mode a second one leaves. The caller decides which of
+    /// those two a key means, because only it knows what the key is bound to.
+    pub fn toNormal(self: *Compose) void {
+        self.mode = .normal;
+        self.cursor = motion.clamp(self.line(), self.col()) + self.lineStart();
+    }
+
     pub fn feed(self: *Compose, key: event.Key) Result {
         if (self.mode == .normal) return self.feedNormal(key);
         return self.feedInsert(key);
@@ -309,8 +325,6 @@ pub const Compose = struct {
         }
 
         switch (cp) {
-            event.code.enter => return .submit,
-            event.code.escape => return .cancel,
             // Entering insert, at the five places vim enters it.
             'i' => self.mode = .insert,
             'a' => {
@@ -364,7 +378,6 @@ pub const Compose = struct {
             'j' => self.lineStep(1),
             'k' => self.lineStep(-1),
             else => {
-                if (key.mods.ctrl and (cp == 'i' or cp == event.code.tab)) return .presets;
                 if (self.motionTarget(cp)) |at| self.cursor = at;
             },
         }
@@ -427,12 +440,6 @@ pub const Compose = struct {
         const cp = key.codepoint;
         if (key.mods.ctrl) {
             switch (cp) {
-                // Terminals send 0x09 for both Tab and Ctrl-i; they are the
-                // same keystroke here, and nothing else in the box wants Tab.
-                'i', event.code.tab => return .presets,
-                // A literal newline, because Enter is spoken for. Flattened on
-                // the way out - see `flatten`.
-                'j' => self.insert("\n"),
                 'a' => self.home(),
                 'e' => self.end(),
                 'u' => self.deleteToStart(),
@@ -458,15 +465,7 @@ pub const Compose = struct {
         }
 
         switch (cp) {
-            event.code.enter => return .submit,
-            // Out to normal mode, not out of the box: `<Esc>` backs out one
-            // level, and from normal mode a second one leaves.
-            event.code.escape => {
-                self.mode = .normal;
-                self.cursor = motion.clamp(self.line(), self.col()) + self.lineStart();
-            },
             event.code.backspace => self.backspace(),
-            event.code.tab => return .presets,
             event.code.left => self.left(),
             event.code.right => self.right(),
             // Up and down are the ends of the text: the box wraps rather than
@@ -481,11 +480,6 @@ pub const Compose = struct {
                 var utf8: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(cp, &utf8) catch return .typing;
                 self.insert(utf8[0..n]);
-                // `@` is how every agent CLI is told about a file, so typing
-                // one offers the list rather than waiting to be asked. The
-                // character goes in first: a picker that is cancelled leaves
-                // the `@` that was typed, because it was typed.
-                if (cp == '@') return .files;
             },
         }
         return .typing;
@@ -614,30 +608,19 @@ test "editing keys behave the way a terminal input box does" {
     try testing.expectEqualStrings("", c.text());
 }
 
-test "@ offers the file list and stays typed either way" {
-    var c: Compose = .{};
-    c.start("look at ");
-    try testing.expectEqual(Result.files, c.feed(tap('@')));
-    // The character is in the text before the caller hears about it, so a
-    // cancelled picker leaves what was typed rather than eating it.
-    try testing.expectEqualStrings("look at @", c.text());
-    try testing.expectEqual(c.text().len, c.cursor);
-}
+// `@`, Enter, `<Esc>`, `Ctrl-i` and `Ctrl-j` are keymap commands rather than
+// keys this file knows, so what they do is tested in `ui/app.zig` where the
+// keymap is. What stays here is `toNormal`, which the box owns because only it
+// knows where the caret has to land.
 
-test "enter submits, escape steps out one level at a time" {
+test "toNormal clamps the caret onto the line it lands on" {
     var c: Compose = .{};
-    c.start("x");
-    try testing.expectEqual(Result.submit, c.feed(tap(event.code.enter)));
-    try testing.expectEqual(Result.presets, c.feed(ctrl('i')));
-    // Tab is the same keystroke: terminals send 0x09 for both.
-    try testing.expectEqual(Result.presets, c.feed(tap(event.code.tab)));
-
-    // The first `<Esc>` leaves insert, the second leaves the box. Abandoning
-    // a message should take two deliberate keystrokes, not one reflex.
+    c.start("first\n");
     try testing.expectEqual(Mode.insert, c.mode);
-    try testing.expectEqual(Result.typing, c.feed(tap(event.code.escape)));
+    c.toNormal();
     try testing.expectEqual(Mode.normal, c.mode);
-    try testing.expectEqual(Result.cancel, c.feed(tap(event.code.escape)));
+    // Past the end of an empty last line is not a column normal mode has.
+    try testing.expect(c.cursor <= c.text().len);
 }
 
 test "normal mode: o opens a line without a modifier to encode" {
@@ -645,7 +628,7 @@ test "normal mode: o opens a line without a modifier to encode" {
     // tmux with `extended-keys on`; `o` needs a terminal that can send `o`.
     var c: Compose = .{};
     c.start("first");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('o'));
     try testing.expectEqual(Mode.insert, c.mode);
     _ = c.feed(tap('s'));
@@ -654,7 +637,7 @@ test "normal mode: o opens a line without a modifier to encode" {
     try testing.expectEqualStrings("first\nsec", c.text());
 
     // `O` opens above instead.
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('O'));
     _ = c.feed(tap('m'));
     try testing.expectEqualStrings("first\nm\nsec", c.text());
@@ -663,7 +646,7 @@ test "normal mode: o opens a line without a modifier to encode" {
 test "normal mode: motions and operators agree with the review's own" {
     var c: Compose = .{};
     c.start("the quick brown fox");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
 
     // `0` then `w` twice: the same word motion `w` runs in the diff, because
     // it is literally the same function.
@@ -696,7 +679,7 @@ test "dw on the last word of a line deletes to the end of it" {
     // motion and silently wrong for an operator - `dw` deleted nothing.
     var c: Compose = .{};
     c.start("solo");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('0'));
     _ = c.feed(tap('d'));
     _ = c.feed(tap('w'));
@@ -704,7 +687,7 @@ test "dw on the last word of a line deletes to the end of it" {
 
     // The same on the last word of a longer line, which is the common case.
     c.start("two words");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('0'));
     _ = c.feed(tap('w'));
     _ = c.feed(tap('d'));
@@ -713,14 +696,14 @@ test "dw on the last word of a line deletes to the end of it" {
 
     // `de` too, and `cw` leaves you in insert where the word was.
     c.start("alpha beta");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('$'));
     _ = c.feed(tap('d'));
     _ = c.feed(tap('e'));
     try testing.expectEqualStrings("alpha bet", c.text());
 
     c.start("only");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('0'));
     _ = c.feed(tap('c'));
     _ = c.feed(tap('w'));
@@ -733,7 +716,7 @@ test "a word motion that goes nowhere still moves nothing on its own" {
     // where it is, which is what the review's own `w` does.
     var c: Compose = .{};
     c.start("solo");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('0'));
     _ = c.feed(tap('w'));
     try testing.expectEqual(@as(usize, 0), c.cursor);
@@ -743,15 +726,15 @@ test "a word motion that goes nowhere still moves nothing on its own" {
 test "normal mode: dd takes the line and j k walk them" {
     var c: Compose = .{};
     c.start("one");
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('o'));
     _ = c.feed(tap('t'));
     _ = c.feed(tap('w'));
     _ = c.feed(tap('o'));
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     _ = c.feed(tap('o'));
     _ = c.feed(tap('3'));
-    _ = c.feed(tap(event.code.escape));
+    c.toNormal();
     try testing.expectEqualStrings("one\ntwo\n3", c.text());
 
     // `k` up two lines keeps the column where it can.
@@ -777,15 +760,12 @@ test "shift-enter is a line break, enter is still send" {
     // Alt-Enter too: the other spelling terminals use for the same idea.
     _ = c.feed(.{ .codepoint = event.code.enter, .mods = .{ .alt = true } });
     try testing.expectEqualStrings("one\n\n", c.text());
-
-    // Bare Enter still sends, or the box would have no way out.
-    try testing.expectEqual(Result.submit, c.feed(tap(event.code.enter)));
 }
 
-test "a newline is typed with ctrl-j and flattened on the way out" {
+test "a typed newline is flattened on the way out" {
     var c: Compose = .{};
     c.start("check the token");
-    _ = c.feed(ctrl('j'));
+    c.insert("\n");
     _ = c.feed(tap('o'));
     try testing.expectEqualStrings("check the token\no", c.text());
     try testing.expect(hasBreak(c.text()));

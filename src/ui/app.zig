@@ -535,6 +535,9 @@ pub const App = struct {
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .notes = self.commentMarks(),
+            .fresh = self.review.freshFor(self.file_index),
+            .fresh_total = self.review.freshCount(),
+            .mark_turn = self.review.mark_at.turn,
             .preview = self.preview != null,
             .mode = self.mode,
             .zen = self.zen,
@@ -585,6 +588,7 @@ pub const App = struct {
         }
         return .{
             .what = what,
+            .bindings = self.km.bindings,
             .text = self.compose.text(),
             .cursor = self.compose.cursor,
             .joins = compose_mod.hasBreak(self.compose.text()),
@@ -709,7 +713,7 @@ pub const App = struct {
             .comment_list => {
                 if (self.mode == .finder) return self.closeFiles();
                 if (self.comments.len() == 0) {
-                    self.notice.set("no comments yet - `<Space>c` writes one", .{});
+                    self.noComments();
                     return;
                 }
                 self.files_purpose = .comments;
@@ -788,6 +792,38 @@ pub const App = struct {
                 self.clampScroll(body);
                 self.notice.set("folded", .{});
             },
+            // "Since I last looked." Every re-diff after this compares the
+            // working tree against what is recorded here, so the rows that
+            // arrive later are the ones the reader has not read.
+            .mark_here => {
+                const n = self.files().len;
+                try self.review.mark();
+                self.notice.set("marked {d} file{s} as read - changes after this show in the gutter", .{
+                    n, if (n == 1) "" else "s",
+                });
+            },
+            // Back to reading the change as one whole thing. The mark never
+            // hid anything, so this removes annotation rather than revealing
+            // rows - which is why it is `M` next to `m` and not a view toggle.
+            .clear_mark => {
+                if (!self.review.mark_at.taken()) {
+                    self.notice.set("no mark to drop", .{});
+                    return;
+                }
+                self.review.unmark();
+                self.notice.set("mark dropped - the whole change again", .{});
+            },
+            // Live only inside the box, which takes its keys in
+            // `feedCompose` before the review's dispatch is reached.
+            .compose_submit,
+            .compose_cancel,
+            .compose_send_now,
+            .compose_presets,
+            .compose_mention,
+            .compose_newline,
+            => {},
+            .next_fresh => try self.freshStep(1),
+            .prev_fresh => try self.freshStep(-1),
             .copy_text => try self.yank(.selection),
             .copy_text_lines => try self.yank(.lines),
             .copy_ref => try self.buildPayload(.copy, .ref),
@@ -1198,6 +1234,14 @@ pub const App = struct {
             std.mem.eql(u8, cmd, "nohlsearch"))
         {
             self.finder.hide();
+            return;
+        }
+        // The same shape as `:noh`, for the same reason: a reader who wants
+        // the highlighting gone reaches for a colon command before they go
+        // looking for which key drops it.
+        if (std.mem.eql(u8, cmd, "nomark") or std.mem.eql(u8, cmd, "nom")) {
+            self.review.unmark();
+            self.notice.set("mark dropped - the whole change again", .{});
             return;
         }
         self.notice.set("not an editor command: :{s}", .{cmd});
@@ -1656,7 +1700,7 @@ pub const App = struct {
         if (self.commentUnderCursor() != null) return self.commentEdit();
 
         const f = self.current() orelse {
-            self.notice.set("no comments yet - `<Space>c` writes one", .{});
+            self.noComments();
             return;
         };
         const here = if (self.commentLine()) |at| at.line else 0;
@@ -1670,7 +1714,7 @@ pub const App = struct {
             // None in this file. The review-wide walk is what reaches the
             // rest, and saying so beats silently jumping the reader elsewhere.
             if (self.comments.len() == 0)
-                self.notice.set("no comments yet - `<Space>c` writes one", .{})
+                self.noComments()
             else
                 self.notice.set("no comments in this file - `]c` finds the next one", .{});
             return;
@@ -1820,7 +1864,10 @@ pub const App = struct {
                     self.saveComments();
                 }
             }
-            self.notice.set("{s} is gone - comment marked stale, <C-d> in the list deletes it", .{path});
+            var key: [32]u8 = undefined;
+            self.notice.set("{s} is gone - comment marked stale, {s} in the list deletes it", .{
+                path, self.keyFor(.comment_drop, .finder, &key),
+            });
             return;
         }
         _ = self.gotoNewLine(line);
@@ -1833,7 +1880,7 @@ pub const App = struct {
     /// leave the key unable to reach most of them.
     fn commentStep(self: *App, delta: i32, body: u16) void {
         if (self.comments.len() == 0) {
-            self.notice.set("no comments yet - `<Space>c` writes one", .{});
+            self.noComments();
             return;
         }
 
@@ -1933,6 +1980,14 @@ pub const App = struct {
         self.comments.markSent();
         self.saveComments();
 
+        // Handing the review over is the one moment the reader has
+        // demonstrably read all of it, so it is where the mark belongs: what
+        // the agent does next is exactly what `]n` should walk. Taken after
+        // the file is written, so a failed write does not mark a review that
+        // was never sent - and not on `<Space>sc`, which sends one remark and
+        // claims nothing about the rest.
+        if (self.nav.mark_on_submit) self.review.mark() catch {};
+
         // One line, no newline in it: hard rule 1, and the reason the notes
         // themselves may be as long as they like.
         self.outgoing.clearRetainingCapacity();
@@ -1978,11 +2033,84 @@ pub const App = struct {
     fn feedCompose(self: *App, key: event.Key, body: u16) !void {
         if (self.preset_index) |idx| return self.feedPresets(key, idx);
 
-        // `<C-s>` from inside a comment: save it *and* send it, so a remark
-        // that cannot wait for the batch does not have to be typed, saved,
-        // found again and sent. It is the same key that submits the whole
-        // review from normal mode, which reads as "hand this over" either way.
-        if (key.mods.ctrl and key.codepoint == 's' and self.compose_is_comment) {
+        // The box's own keys come from the keymap, like every other key in the
+        // tool. Text and the motions over it do not, and cannot: in a box every
+        // printable key is data, so a keymap able to bind `x` would be a keymap
+        // able to take `x` away from typing.
+        //
+        // A pending operator outranks all of it. With `d` waiting, the next key
+        // is that operator's motion and `<Esc>` cancels the operator - a
+        // binding firing there would make `d<Esc>` throw away a half-written
+        // message, which is the opposite of what `<Esc>` means in vim.
+        if (!self.compose.hasPending()) {
+            if (self.composeCommand(key)) |cmd| return self.composeDo(cmd, key, body);
+        }
+        _ = self.compose.feed(key);
+    }
+
+    /// The single-chord binding for `key` inside the box, if there is one.
+    ///
+    /// Single chords only, deliberately: a box cannot hold a prefix waiting to
+    /// see whether a sequence completes, because the key after it is usually a
+    /// letter someone is typing. A multi-chord binding in `compose` mode is
+    /// therefore ignored rather than half-honoured.
+    fn composeCommand(self: *App, key: event.Key) ?keymap.Command {
+        for (self.km.bindings) |b| {
+            if (!b.modes.has(.note_input) or b.chords.len != 1) continue;
+            const ch = b.chords[0];
+            if (ch.cp == key.codepoint and ch.ctrl == key.mods.ctrl) return b.command;
+        }
+        return null;
+    }
+
+    fn composeDo(self: *App, cmd: keymap.Command, key: event.Key, body: u16) !void {
+        switch (cmd) {
+            .compose_cancel => {
+                // One level at a time: out of insert, then out of the box.
+                if (self.compose.mode == .insert) {
+                    self.compose.toNormal();
+                    return;
+                }
+                self.compose_is_comment = false;
+                self.compose_comment = null;
+                self.closeCompose();
+            },
+            .compose_presets => self.preset_index = 0,
+            .compose_newline => self.compose.insert("\n"),
+            .compose_mention => {
+                // Only while typing: in normal mode the key is a motion's, and
+                // the picker would be a surprise rather than an offer.
+                if (self.compose.mode != .insert) return;
+                // The character goes in first, when it is one: a picker that is
+                // cancelled leaves the `@` that was typed, because it was
+                // typed. A binding moved onto a control key inserts nothing,
+                // because there is nothing to insert.
+                if (!key.mods.ctrl and key.codepoint >= 0x20) {
+                    var utf8: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(key.codepoint, &utf8) catch 0;
+                    if (n > 0) self.compose.insert(utf8[0..n]);
+                }
+                // The compose box stays open underneath: the picker is a
+                // layer over it, not a place the reader has gone instead.
+                self.files_purpose = .mention;
+                self.buildPickList();
+                self.file_list.title = " mention a file ";
+                self.file_list.extra_keys = &.{};
+                self.file_list.open(0);
+                self.mode = .finder;
+            },
+            .compose_send_now => try self.composeSendNow(body),
+            .compose_submit => try self.composeSubmit(body),
+            else => {},
+        }
+    }
+
+    /// `<C-s>` from inside a comment: save it *and* send it, so a remark
+    /// that cannot wait for the batch does not have to be typed, saved,
+    /// found again and sent. It is the same key that submits the whole
+    /// review from normal mode, which reads as "hand this over" either way.
+    fn composeSendNow(self: *App, body: u16) !void {
+        if (self.compose_is_comment) {
             var raw_buf: [compose_mod.max_bytes]u8 = undefined;
             const typed = self.compose.text();
             @memcpy(raw_buf[0..typed.len], typed);
@@ -2024,26 +2152,13 @@ pub const App = struct {
             self.clampScroll(body);
             return;
         }
+        // Not a comment: the key means the same thing the plain send does.
+        try self.composeSubmit(body);
+    }
 
-        switch (self.compose.feed(key)) {
-            .typing => {},
-            .cancel => {
-                self.compose_is_comment = false;
-                self.compose_comment = null;
-                self.closeCompose();
-            },
-            .presets => self.preset_index = 0,
-            .files => {
-                // The compose box stays open underneath: the picker is a
-                // layer over it, not a place the reader has gone instead.
-                self.files_purpose = .mention;
-                self.buildPickList();
-                self.file_list.title = " mention a file ";
-                self.file_list.extra_keys = &.{};
-                self.file_list.open(0);
-                self.mode = .finder;
-            },
-            .submit => {
+    fn composeSubmit(self: *App, body: u16) !void {
+        {
+            {
                 // Flattened here and nowhere else: hard rule 1 is about what
                 // `send-keys` does with a newline, and this is the last point
                 // where one can still exist.
@@ -2073,7 +2188,12 @@ pub const App = struct {
                         // The line's text goes with the note, so a restart can
                         // find it again when the file moved underneath.
                         _ = try self.comments.addFull(at.path, at.line, raw, self.textOfNewLine(at.line), at.deleted);
-                        self.notice.set("comment added - <C-s> submits the review", .{});
+                        {
+                            var kb: [32]u8 = undefined;
+                            self.notice.set("comment added - {s} submits the review", .{
+                                self.keyFor(.submit_review, .normal, &kb),
+                            });
+                        }
                     }
                     self.compose_comment = null;
                     self.saveComments();
@@ -2090,7 +2210,7 @@ pub const App = struct {
                 try self.outgoing.appendSlice(self.gpa, line);
                 self.want_send = how;
                 self.clampScroll(body);
-            },
+            }
         }
     }
 
@@ -2296,6 +2416,88 @@ pub const App = struct {
     ///
     /// The wrap lives here rather than in `rows.nextHunkRow` because only here
     /// is there a status line to announce it in.
+    /// What a command is bound to right now, for a message that has to name a
+    /// key. Written into `buf` by the caller so this allocates nothing, and
+    /// read from the keymap so `[keys]` cannot leave a notice telling the
+    /// reader to press something they have remapped away.
+    fn noComments(self: *App) void {
+        var key: [32]u8 = undefined;
+        self.notice.set("no comments yet - {s} writes one", .{
+            self.keyFor(.comment_add, .normal, &key),
+        });
+    }
+
+    fn keyFor(self: *App, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
+        return keytext.firstKeyFor(self.km.bindings, cmd, mode, buf);
+    }
+
+    /// Walks the changes that arrived since the mark, across the whole review.
+    ///
+    /// By row rather than by hunk. What the reader came back for is the twelve
+    /// lines that answer the last comment, and a hunk that happens to contain
+    /// one of them is a coarser answer than the line itself - which is the
+    /// same reason `]h` exists separately rather than this replacing it.
+    fn freshStep(self: *App, delta: i32) !void {
+        if (!self.review.mark_at.taken()) {
+            var key: [32]u8 = undefined;
+            self.notice.set("no mark yet - {s} sets one", .{
+                keytext.firstKeyFor(self.km.bindings, .mark_here, .normal, &key),
+            });
+            return;
+        }
+        if (self.review.freshCount() == 0) {
+            self.notice.set("nothing new since the mark", .{});
+            return;
+        }
+
+        if (self.freshFrom(self.cursor, delta)) |row| {
+            self.moveTo(row);
+            return;
+        }
+
+        // Nothing further this way in this file. A review is a ring, and the
+        // ring is the whole review: the change the reader is looking for is
+        // as likely to be in the next file as in this one.
+        const count = self.files().len;
+        if (count > 1) {
+            var tries: usize = 0;
+            while (tries < count) : (tries += 1) {
+                try self.stepFile(delta);
+                if (self.freshEdge(delta)) |row| {
+                    self.moveTo(row);
+                    return;
+                }
+            }
+            return;
+        }
+        if (self.freshEdge(delta)) |row| {
+            self.noteWrap(delta, "change");
+            self.moveTo(row);
+        }
+    }
+
+    /// The next row after `from` whose line changed since the mark.
+    fn freshFrom(self: *App, from: u32, delta: i32) ?u32 {
+        return self.scanFresh(@as(i64, from) + delta, delta);
+    }
+
+    /// The first such row from whichever end `delta` enters the file by.
+    fn freshEdge(self: *App, delta: i32) ?u32 {
+        return self.scanFresh(if (delta > 0) 0 else @as(i64, self.rows.len()) - 1, delta);
+    }
+
+    fn scanFresh(self: *App, start: i64, delta: i32) ?u32 {
+        const fresh = self.review.freshFor(self.file_index);
+        if (fresh.len == 0) return null;
+        var i = start;
+        while (i >= 0 and i < self.rows.len()) : (i += delta) {
+            const row: u32 = @intCast(i);
+            const li = self.rows.lineAt(row) orelse continue;
+            if (li < fresh.len and fresh[li]) return row;
+        }
+        return null;
+    }
+
     fn stepHunk(self: *App, delta: i32) !void {
         const hs = self.rows.hunk_rows;
         if (hs.len == 0) return;
@@ -4636,4 +4838,206 @@ test "zc on a file that was never folded says so instead of re-diffing" {
 
     try fx.press("zc");
     try fx.expectNotice("too large");
+}
+
+// -- since I last looked ---------------------------------------------------
+
+/// Marks rows of the fixture's two files as changed since the mark, the way a
+/// re-diff would. Set directly rather than through `Review.mark`, which needs
+/// git and real buffers: what these tests own is the walking, and
+/// `core/checkpoint.zig` owns deciding what is fresh.
+fn markFresh(fx: *Fixture, first: []const bool, second: []const bool) !void {
+    const arena = fx.app.review.allocator();
+    const out = try arena.alloc([]bool, 2);
+    out[0] = try arena.dupe(bool, first);
+    out[1] = try arena.dupe(bool, second);
+    fx.app.review.fresh = out;
+    fx.app.review.mark_at.turn = 1;
+}
+
+test "walking the changes since the mark needs a mark first" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("]m");
+    try fx.expectNotice("no mark");
+    try fx.expectCursor(1);
+}
+
+test "a mark with nothing after it says so rather than moving" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("m");
+    try fx.expectNotice("marked");
+    try fx.press("]m");
+    try fx.expectNotice("nothing new");
+}
+
+test "]n walks to the changed line, not to its hunk" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // Row 0 is the hunk header; rows 1..3 are the three lines.
+    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
+
+    try fx.expectCursor(1);
+    try fx.press("]m");
+    try fx.expectCursor(2);
+}
+
+test "]n crosses into the next file when this one has nothing left" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try markFresh(fx, &.{ false, false, false }, &.{ true, false, false });
+
+    try fx.expectFile(0);
+    try fx.press("]m");
+    try fx.expectFile(1);
+    try fx.expectCursor(1);
+}
+
+test "[n walks backwards and reaches the same rows" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try markFresh(fx, &.{ true, false, false }, &.{ false, false, true });
+
+    // From the top of the first file, backwards crosses into the last file.
+    try fx.press("[m");
+    try fx.expectFile(1);
+    try fx.expectCursor(3);
+    try fx.press("[m");
+    try fx.expectFile(0);
+    try fx.expectCursor(1);
+}
+
+test "the mark clears what came before it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
+    try testing.expectEqual(@as(u32, 1), fx.app.review.freshCount());
+
+    // Marking again with no buffers behind the fixture's files records them as
+    // empty, which is the honest answer: nothing is newer than now.
+    try fx.press("m");
+    try testing.expectEqual(@as(u32, 0), fx.app.review.freshCount());
+}
+
+test "M drops the mark and the whole change reads as one again" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
+    try testing.expectEqual(@as(u32, 1), fx.app.review.freshCount());
+
+    try fx.press("M");
+    try fx.expectNotice("dropped");
+    try testing.expectEqual(@as(u32, 0), fx.app.review.freshCount());
+    try testing.expect(!fx.app.review.mark_at.taken());
+
+    // And walking says there is no mark rather than "nothing new", which are
+    // different answers to different situations.
+    try fx.press("]m");
+    try fx.expectNotice("no mark");
+}
+
+test "M with no mark says so instead of pretending to do something" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.press("M");
+    try fx.expectNotice("no mark to drop");
+}
+
+test ":nomark drops it too, the way :noh drops the search" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
+
+    try fx.press(":");
+    try fx.typeIn("nomark");
+    try fx.press("<CR>");
+    try testing.expect(!fx.app.review.mark_at.taken());
+}
+
+test "every mark command can be remapped, and the screen says the new key" {
+    // `[keys]` resolves command names straight off the enum, so a new command
+    // is remappable the moment it exists. What is worth testing is the other
+    // half: that the messages naming a key read the keymap rather than a
+    // string literal, or a remap turns them into instructions for a key the
+    // reader does not have.
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var chords: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
+    const moved = [_]keymap.Binding{
+        .{ .chords = try keytext.parseChords("gm", &chords), .command = .mark_here },
+    };
+    fx.app.km.bindings = &moved;
+
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("gm", keytext.firstKeyFor(fx.app.km.bindings, .mark_here, .normal, &buf));
+
+    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{} } }, body_rows);
+    try fx.app.handle(.{ .key = .{ .codepoint = 'm', .mods = .{} } }, body_rows);
+    try fx.expectNotice("marked");
+}
+
+// -- the compose box takes its keys from the keymap ------------------------
+
+test "the box's feature keys are bindings, and a remap moves them" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var a: [4]keymap.Chord = undefined;
+    var b: [4]keymap.Chord = undefined;
+    const moved = [_]keymap.Binding{
+        .{ .chords = try keytext.parseChords("<C-g>", &a), .command = .compose_cancel, .modes = keymap.Modes.compose_only },
+        .{ .chords = try keytext.parseChords("<CR>", &b), .command = .compose_submit, .modes = keymap.Modes.compose_only },
+    };
+    fx.app.km.bindings = &moved;
+
+    try fx.app.openCompose(.send, .ref);
+    try fx.expectMode(.note_input);
+    try fx.typeIn("hello");
+
+    // `<Esc>` is no longer bound, so in the box it is just a key that types
+    // nothing - it must not close what the reader is writing.
+    try fx.app.handle(.{ .key = .{ .codepoint = event.code.escape, .mods = .{} } }, body_rows);
+    try fx.expectMode(.note_input);
+
+    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, body_rows);
+    try fx.expectMode(.note_input);
+    // First press leaves insert, second leaves the box - the two levels are
+    // the command's, not the key's.
+    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, body_rows);
+    try fx.expectMode(.normal);
+}
+
+test "a pending operator outranks the keymap, so d<Esc> cancels the operator" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.app.openCompose(.send, .ref);
+    try fx.typeIn("one two");
+    try fx.press("<Esc>"); // leave insert, stay in the box
+    try fx.expectMode(.note_input);
+    try testing.expect(fx.app.compose.mode == .normal);
+
+    try fx.typeIn("d");
+    try testing.expect(fx.app.compose.hasPending());
+    try fx.press("<Esc>");
+    // The operator went, the box stayed, and the text is untouched.
+    try testing.expect(!fx.app.compose.hasPending());
+    try fx.expectMode(.note_input);
+    // The box was seeded with the reference; what matters is that the typed
+    // half survived the operator being cancelled.
+    try testing.expect(std.mem.endsWith(u8, fx.app.compose.text(), "one two"));
+}
+
+test "an unbound compose command drops out of the footer rather than lying" {
+    var a: [4]keymap.Chord = undefined;
+    const only = [_]keymap.Binding{
+        .{ .chords = try keytext.parseChords("<CR>", &a), .command = .compose_submit, .modes = keymap.Modes.compose_only, .desc = "send" },
+    };
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("<CR>", keytext.firstKeyFor(&only, .compose_submit, .note_input, &buf));
+    try testing.expectEqualStrings("", keytext.firstKeyFor(&only, .compose_mention, .note_input, &buf));
 }

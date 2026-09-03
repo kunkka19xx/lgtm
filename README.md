@@ -74,7 +74,12 @@ and say so when they can no longer be placed.
 
 **Read anything.** `<Space>f` lists the changed files, `<Space>F` every file
 git knows about - an unchanged one opens whole, outside the review, still
-readable and commentable.
+readable and commentable. A file too large to render inline opens with `zo`.
+
+**Come back to what's new.** Submitting a review marks the working tree as
+read, and `m` does it by hand. When the agent revises, the lines that arrived
+since carry a bar in the gutter and `]m` walks them, so round two is the twelve
+lines that answer you rather than the eight hundred you already read.
 
 `?` shows every key, generated from your bindings rather than from this page,
 so a remapped keymap documents itself.
@@ -100,6 +105,9 @@ compose = "bottom"    # or "top", "centre"
 
 [theme]
 name = "gruvbox"      # seven bundled; `lgtm --theme-preview` shows them all
+
+[nav]
+mark_on_submit = true   # Ctrl-s marks what you just read
 
 [keys]
 next_hunk = ["]h", "<Space>nh"]

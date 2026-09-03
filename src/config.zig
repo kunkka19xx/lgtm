@@ -92,6 +92,13 @@ pub const Nav = struct {
     /// third of the body at use, so a large value on a short pane degrades
     /// instead of pinning the cursor to the middle.
     scrolloff: u32 = 3,
+    /// Submitting a review takes the mark (`m`) as well as sending the file.
+    /// Default true: handing the agent a review is the one moment the reader
+    /// has demonstrably read everything, which is the whole definition of the
+    /// mark - and a feature that needs remembering to press a key first is one
+    /// that will be remembered after it was needed. False for the reader whose
+    /// mark spans more than one round and should not be moved under them.
+    mark_on_submit: bool = true,
 };
 
 pub const Config = struct {
@@ -232,6 +239,8 @@ pub const Loader = struct {
             .nav => {
                 if (std.mem.eql(u8, key, "hunk_crosses_files")) {
                     self.cfg.nav.hunk_crosses_files = self.wantBool(src, line, key, value) orelse return;
+                } else if (std.mem.eql(u8, key, "mark_on_submit")) {
+                    self.cfg.nav.mark_on_submit = self.wantBool(src, line, key, value) orelse return;
                 } else if (std.mem.eql(u8, key, "scrolloff")) {
                     const n = self.wantInt(src, line, key, value) orelse return;
                     if (n < 0 or n > 64) {
@@ -959,4 +968,18 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
     // line was trying to change.
     try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
     try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
+}
+
+test "nav.mark_on_submit is on by default and can be turned off" {
+    var l = loadText(
+        \\[nav]
+        \\mark_on_submit = false
+    );
+    defer l.deinit();
+    try testing.expect(!l.cfg.nav.mark_on_submit);
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expect(d.cfg.nav.mark_on_submit);
 }

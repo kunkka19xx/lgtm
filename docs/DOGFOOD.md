@@ -246,5 +246,116 @@ outgoing string goes through `bridge/template.zig`. Logged rather than fixed:
 changing it changes what the agent is told, which is a decision and not a
 tidy-up.
 
+### 2026-09-03 - since I last looked
+
+The second read was the tax the tool had not removed. You comment, the agent
+revises, the diff comes back looking almost the same, and finding the twelve
+lines that answer you means re-reading eight hundred. Change ids do not help:
+they say a hunk is the *same* change, not that its contents held still.
+
+`m` now marks the working tree as read. `core/checkpoint.zig` keeps those bytes
+on the session allocator, every re-diff line-maps them against the current tree,
+and rows with no antecedent get a bar in the gutter, `]m` to walk them, and a
+count on the mode row.
+
+Three decisions worth keeping.
+
+**It annotates rather than filters.** FEATURES.md 1.3 specified a view showing
+only the delta since the mark. That is wrong, and using it makes it obvious
+within a minute: `if (!t) return false;` means nothing without the line above it
+that the agent wrote an hour ago. What the reader approves is still the diff
+against HEAD; the mark only says which of its rows are new. It also costs one
+gutter column that was already blank, rather than a mode.
+
+**It compares working trees, not diffs.** That is what makes it a `linemap`
+lookup instead of a second diff algorithm - the map was already written,
+already measured, already what anchoring trusts. Nothing new was written for
+the comparison itself.
+
+**Only added and removed rows can be fresh.** A context row is unchanged code
+by definition. Marking it because the lines around it moved would light up half
+the file the first time the agent inserted an import, which is the failure this
+feature exists to prevent, not one to reproduce. There is a test named after it.
+
+Measured before believing it: 0.93 ms per re-diff over this repository's
+fourteen changed files, against `diff_parse` at 43 ms in the same run. That is
+what made "recompute everything, every time" the design - a cache would have to
+be invalidated by exactly the events that already trigger the recompute.
+
+One thing the measurement turned up that is *not* about the mark: `git_subprocess`
+and `diff_parse` together are about 73 ms on this repo. Each is inside its own
+100 ms budget, but a re-diff is both, and they are the two that will grow with
+the repository rather than with the feature list. Worth a look before the next
+thing that runs per re-diff.
+
+`Ctrl-s` takes the mark as well as sending. That was the missing half: a mark
+you have to remember to set *before* the thing it measures is a mark you set
+afterwards, when it is worth nothing. Submitting is the one moment the reader
+has demonstrably read everything, so it is where the mark belongs. `<Space>sc`
+deliberately does not - sending one remark claims nothing about the rest - and
+`[nav] mark_on_submit = false` turns it off for a mark meant to span rounds.
+It marks even when the bridge fails, because "I have read this" is true whether
+or not the send worked.
+
+The keys went on `m` `M` `]m` `[m` after a first pass put the walk on `]n` and
+`<Space>nn`. `n` was meant to be "new" and read as "next", which the leader
+spelling made obvious: `<Space>nn` is two different `n`s in one sequence. The
+established pattern is `]<thing>` and `<Space>n<thing>` - `h` hunk, `f` file,
+`c` comment - and the thing here is the mark.
+
+Asking "is all of it configurable?" turned up the half that was not. `[keys]`
+resolves straight off the `Command` enum, so a new command is remappable the
+moment it exists; but the *messages* said `]m` and `` `m` `` as string literals,
+so remapping them made the screen advertise keys the reader did not have. The
+`View` now carries the keymap - one field rather than one per message - and
+`keytext.firstKeyFor` answers "what is this bound to now". `keysFor` joins every
+spelling, which a help row wants and a sentence cannot afford. The summarised
+row's `open_key` field went away in the same change, which is the sign it was
+the right shape.
+
+Still literal, and pre-existing: "no comments yet - `<Space>c` writes one" and
+"comment added - `<C-s>` submits the review". Same one-line fix, not made here.
+
+Also fixed in passing: `]c` and `[c` had the same description, so the `?` popup
+printed the same sentence twice - `mergeByDesc` could not join them because
+their keys were past the merge width. They now say "next" and "previous", which
+is what `]h` and `[h` already did.
+
+### 2026-09-03 - every key, not most of them
+
+"All features with keys must be configurable." The audit found three layers,
+and only the first was already true.
+
+**Commands.** `[keys]` resolves off the `Command` enum, so anything in it has
+always been remappable the moment it existed. Fine.
+
+**Messages naming a key.** Six notices spelled `<Space>c`, `<C-d>` and `<C-s>`
+as string literals, for commands that *are* remappable - so a remap turned them
+into instructions for keys the reader did not have. They read the keymap now,
+through one `keyFor` helper.
+
+**The compose box.** The real gap: it read keys directly, so none of `<CR>`
+`<Esc>` `<C-s>` `<C-i>` `@` `<C-j>` could be changed. They are bindings now
+(`Modes.compose_only`, using one of the `Modes` pad bits), and `compose.zig` no
+longer knows what any key means - `Result` collapsed from five values to one.
+
+The motions stayed hardcoded, deliberately and at the author's instruction. The
+reason is not laziness: in a text box every printable key is data, so a keymap
+able to bind `x` is a keymap able to take `x` away from typing. Vim splits the
+same way.
+
+Two rules the box forced that the review never had to think about. Bindings are
+single chords, because a box cannot hold a prefix waiting to see whether a
+sequence completes - the key after it is usually a letter someone is typing. And
+a pending operator outranks the keymap, or `d<Esc>` would cancel the box instead
+of the operator and take a half-written message with it.
+
+The footers and the `?` rows are generated from the bindings now instead of
+being static tables, which is what makes the whole thing hold: a remap moves the
+key, the footer and the help together, and an unbound command drops out of the
+footer rather than advertising a key nobody has. Checked with everything moved
+at once - `compose_presets` on `<C-p>`, `compose_mention` on `#`, `compose_cancel`
+on `<C-q>` - and the box, its footer and `?` all agreed.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

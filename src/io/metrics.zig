@@ -22,6 +22,11 @@ pub const Kind = enum {
     git_subprocess,
     diff_parse,
     reanchor,
+    /// Recomputing what changed since the mark, over every file in the review.
+    /// Its own span because it is the one thing a mark adds to every re-diff,
+    /// and the whole argument for doing it this way is that it is a line map
+    /// rather than a second diff.
+    checkpoint,
     lex,
     layout,
     render,
@@ -68,6 +73,9 @@ fn budgetMs(kind: Kind) ?f64 {
         .frame => 8.0,
         .git_subprocess, .diff_parse => 100.0,
         .reanchor => 5.0,
+        // Part of the 100 ms re-diff, so it gets a slice of it rather than a
+        // budget of its own size.
+        .checkpoint => 20.0,
         else => null,
     };
 }

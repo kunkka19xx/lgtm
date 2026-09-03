@@ -119,6 +119,9 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `<Space>f` | the changed files; `Enter` goes to one |
 | `<Space>F` | every file in the project; `Enter` opens it. A file with a diff opens in the review; one without opens **whole**, every line context, outside the review - readable, notable, and referenceable, which is what a file browser is for. `]f` or `<Space>f` returns to the review |
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
+| `m` | mark the working tree as read; every change after this shows a bar in the gutter. `<C-s>` marks too - submitting a review is the one moment the reader has read all of it - which `[nav] mark_on_submit` turns off |
+| `]m` / `[m` | next and previous change since the mark, wrapping across the whole review. `<Space>nm` and `<Space>pm` are the leader spellings. By row rather than by hunk: what the reader came back for is the lines that answer the last comment, and a hunk containing one of them is a coarser answer |
+| `M` / `:nomark` | drop the mark. The review reads as one whole change again - which it always was: the mark annotates, it never hid a row, so this removes marks rather than revealing anything |
 | `zi` | show the files `[review] ignore` hides, and hide them again |
 | `zo` / `zc` | open a file too large to render inline, and fold it again. `zc` re-diffs rather than filtering, for the same reason `zi` does: git decided the file was large, so git is what gets asked again |
 | `<Space>c` | write a comment on this line |
@@ -392,6 +395,8 @@ Three things arrived earlier than this plan expected, because each turned out to
 
 **v0.2 - useful to other people**
 Native filesystem watching. Three-scope search (adds the SQLite dependency). Pane picker. Bridge: WezTerm + kitty.
+
+Turn checkpoints (`m`, FEATURES.md 1.3) shipped in v0.1 too, and took 1.4 with them: once `core/anchor.zig` existed the feature was one small module and a gutter column.
 
 **v0.3 - finished**
 Side-by-side with responsive layout. Stage/unstage hunks (`s` / `u`), revert a single agent hunk, session history. Zellij (degraded). More lexers, or tree-sitter if language demand justifies linking it.

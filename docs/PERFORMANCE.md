@@ -150,6 +150,8 @@ Matching old hunks to new hunks is a bipartite assignment problem, but a tiny on
 
 Merge and split resolution (SPEC.md §6.5) falls out of the overlap scores directly.
 
+**The mark reuses this whole path.** "Since I last looked" (FEATURES.md 1.3) is the same line map run against a different pair of texts: the working tree as it was when `m` was pressed, and the working tree now. Nothing new was written for it and nothing is cached - a mark recomputes every file on every re-diff, measured at **0.93 ms** across fourteen changed files of this repository, ReleaseFast on macOS arm64, against `diff_parse` at 43 ms in the same run. A cache would have been the larger risk: it would have to be invalidated by exactly the events that already trigger the recompute.
+
 ---
 
 ## 5. Fuzzy finder

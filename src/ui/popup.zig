@@ -19,6 +19,7 @@ const vaxis = @import("vaxis");
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
 const HelpView = frame_mod.HelpView;
+const ComposeView = frame_mod.ComposeView;
 const devicon = @import("devicon.zig");
 const keytext = @import("keytext.zig");
 const keymap = @import("keymap.zig");
@@ -779,10 +780,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
         v.what, if (v.normal) "NORMAL" else "INSERT",
     });
     const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
-    const foot = try footerOf(f.arena, "", if (v.normal)
-        (if (v.saves) comment_normal_keys else compose_normal_keys)
-    else
-        (if (v.saves) comment_keys else compose_keys), &.{}, content);
+    const foot = try footerOf(f.arena, "", try composeKeys(f, v), &.{}, content);
     const box: Box = .{
         .cols = 1,
         .per = text_rows,
@@ -828,39 +826,52 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, box_h, width, top, height, sel);
 }
 
+/// What the box's footer says, read from the keymap every frame.
+///
 /// A note is saved, not sent: it goes to the store and reaches the agent later
-/// as part of `review-N.md`. A footer that said "send" would promise the wrong
-/// thing about where the text is about to go.
-const comment_keys: []const keytext.HelpEntry = &.{
-    // `<Esc>` second on purpose: the footer drops trailing groups that do not
-    // fit, and a box whose only visible keys are ways to commit reads as one
-    // there is no way out of.
-    .{ .keys = "<CR>", .desc = "save" },
-    .{ .keys = "<Esc>", .desc = "cancel" },
-    .{ .keys = "<C-s>", .desc = "save + send" },
-    .{ .keys = "<C-i>", .desc = "preset" },
-};
+/// as part of `review-N.md`, so the same key gets a different word depending on
+/// what the box is for. A footer that said "send" would promise the wrong thing
+/// about where the text is about to go.
+///
+/// `<Esc>` comes second on purpose: the footer drops trailing groups that do
+/// not fit, and a box whose only visible keys are ways to commit reads as one
+/// there is no way out of.
+///
+/// `o` and `i` are written rather than looked up, because they are vim's and
+/// stay vim's - the box's *motions* are not remappable, only the things it
+/// does that are not motions (`keymap.Modes.compose_only`).
+fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEntry {
+    var out: std.ArrayList(keytext.HelpEntry) = .empty;
+    const commit = if (v.saves) "save" else "send";
 
-const comment_normal_keys: []const keytext.HelpEntry = &.{
-    .{ .keys = "o", .desc = "new line" },
-    .{ .keys = "i", .desc = "insert" },
-    .{ .keys = "<CR>", .desc = "save" },
-    .{ .keys = "<C-s>", .desc = "save + send" },
-    .{ .keys = "<Esc>", .desc = "cancel" },
-};
+    if (v.normal) try out.appendSlice(f.arena, &.{
+        .{ .keys = "o", .desc = "new line" },
+        .{ .keys = "i", .desc = "insert" },
+    });
+    try add(f, v, &out, .compose_submit, commit);
+    try add(f, v, &out, .compose_cancel, "cancel");
+    if (v.saves) try add(f, v, &out, .compose_send_now, "save + send");
+    if (!v.normal) {
+        try add(f, v, &out, .compose_presets, "preset");
+        if (!v.saves) try add(f, v, &out, .compose_mention, "file");
+    }
+    return out.toOwnedSlice(f.arena);
+}
 
-const compose_normal_keys: []const keytext.HelpEntry = &.{
-    .{ .keys = "o", .desc = "new line" },
-    .{ .keys = "i", .desc = "insert" },
-    .{ .keys = "<CR>", .desc = "send" },
-    .{ .keys = "<Esc>", .desc = "cancel" },
-};
-const compose_keys: []const keytext.HelpEntry = &.{
-    .{ .keys = "<CR>", .desc = "send" },
-    .{ .keys = "<Esc>", .desc = "cancel" },
-    .{ .keys = "<C-i>", .desc = "preset" },
-    .{ .keys = "@", .desc = "file" },
-};
+/// One footer entry, skipped when nothing is bound to the command: a footer
+/// that named a key the reader had unbound would be worse than a shorter one.
+fn add(
+    f: Frame,
+    v: ComposeView,
+    out: *std.ArrayList(keytext.HelpEntry),
+    cmd: keymap.Command,
+    desc: []const u8,
+) Allocator.Error!void {
+    var buf: [32]u8 = undefined;
+    const keys = keytext.firstKeyFor(v.bindings, cmd, .note_input, &buf);
+    if (keys.len == 0) return;
+    try out.append(f.arena, .{ .keys = try f.arena.dupe(u8, keys), .desc = desc });
+}
 
 /// The `Ctrl-i` list, directly under the box so the caret it will insert at
 /// stays on screen and in view while a question is chosen.

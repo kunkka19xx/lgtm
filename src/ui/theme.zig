@@ -63,6 +63,11 @@ pub const Glyphs = struct {
     /// The gutter mark for a line carrying a comment.
     comment_mark: []const u8,
 
+    /// The gutter bar on a change that arrived since the mark. A bar rather
+    /// than a symbol because it stacks: a run of fresh lines reads as one
+    /// block down the gutter, which is the shape of what the agent just did.
+    fresh_mark: []const u8,
+
     ellipsis: []const u8,
 
     /// Whether this set has per-filetype icons to go with it. Only the nerd
@@ -102,6 +107,7 @@ pub const Glyphs = struct {
         .heavy_bl = "\u{2517}",
         .heavy_br = "\u{251b}",
         .comment_mark = "\u{25cf}",
+        .fresh_mark = "\u{2503}",
         .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
@@ -150,6 +156,7 @@ pub const Glyphs = struct {
         .heavy_bl = "+",
         .heavy_br = "+",
         .comment_mark = "*",
+        .fresh_mark = "|",
         .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.
@@ -198,7 +205,7 @@ pub const Theme = struct {
     /// more thing to learn and one less column for the path. Slots rather than
     /// borrowed styles, so a theme moves them together with everything else.
     /// A file with no status at all: one the review does not contain, listed
-    /// by `<Space>d` or opened for reading. Its own slot rather than a status
+    /// by `<Space>F` or opened for reading. Its own slot rather than a status
     /// colour, because it has no status - and rather than `dim`, because a
     /// list of four hundred greys is a list nobody reads.
     file_plain: Style,
@@ -220,6 +227,10 @@ pub const Theme = struct {
     comment_open: Style,
     comment_sent: Style,
     comment_stale: Style,
+    /// A change newer than the mark. The accent hue, because that is the slot
+    /// meaning "look here" and a fourth colour with its own opinion would make
+    /// the gutter a legend to memorise.
+    fresh: Style,
     path: Style,
     added_count: Style,
     removed_count: Style,
@@ -290,6 +301,7 @@ pub fn fromPalette(p: Palette) Theme {
         .comment_open = .{ .fg = p.cyan, .bold = true },
         .comment_sent = .{ .fg = p.muted },
         .comment_stale = .{ .fg = p.red },
+        .fresh = .{ .fg = p.accent, .bold = true },
         .path = .{ .fg = p.fg, .bold = true },
         .added_count = .{ .fg = p.green },
         .removed_count = .{ .fg = p.red },

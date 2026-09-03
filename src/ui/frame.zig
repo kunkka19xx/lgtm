@@ -141,10 +141,20 @@ pub const View = struct {
     col: u32 = 0,
     mode: event.Mode = .normal,
     hints: []const u8 = "",
-    /// What to press to open a file too large to render inline. Read from the
-    /// keymap once per frame rather than written into the message, so a
-    /// remapped `zo` still tells the reader the truth.
-    open_key: []const u8 = "",
+    /// One bool per row of `file`: whether that change arrived after the mark
+    /// (`core/checkpoint.zig`). Empty when there is no mark, which is most
+    /// sessions and costs the body one length check.
+    fresh: []const bool = &.{},
+    /// How many rows across the whole review changed since the mark, and
+    /// which mark it is. Zero and zero when there is none.
+    fresh_total: u32 = 0,
+    mark_turn: u32 = 0,
+    /// The keymap, so a message that has to name a key can ask what that key
+    /// currently is. One field rather than one per message: every one of them
+    /// would otherwise be a place `[keys]` could be remapped out from under,
+    /// and a screen that advertises a key the reader does not have is worse
+    /// than one that says nothing.
+    bindings: []const keymap.Binding = &.{},
     /// What is selected, in body-row indexes, or null outside visual mode.
     selection: ?Selection = null,
     prompt: ?PromptView = null,
@@ -361,6 +371,10 @@ pub const ComposeView = struct {
     /// delivery, which an edit forgot to set - so the box promised the wrong
     /// destination. This is the fact itself rather than a proxy for it.
     saves: bool = false,
+    /// The keymap, so the footer names the keys the reader actually has. The
+    /// box's feature keys are `Modes.compose_only` bindings like everything
+    /// else; only its motions are fixed.
+    bindings: []const keymap.Binding = &.{},
     /// Where the box sits: `[ui] compose`.
     at: Placement = .bottom,
     /// Which half of the box has the keyboard, drawn in its title. A modal

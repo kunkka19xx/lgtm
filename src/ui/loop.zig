@@ -404,8 +404,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         var shown = v;
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
-        var open_buf: [64]u8 = undefined;
-        shown.open_key = try arena.dupe(u8, keytext.keysFor(app.km.bindings, .expand_file, .normal, &open_buf));
+        shown.bindings = app.km.bindings;
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
         shown.files = try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);

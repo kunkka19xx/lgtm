@@ -19,6 +19,7 @@ const body_mod = @import("body.zig");
 const motion = @import("motion.zig");
 const frame_mod = @import("frame.zig");
 const devicon = @import("devicon.zig");
+const keytext = @import("keytext.zig");
 const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
 
@@ -275,6 +276,7 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
 
     // Flush against the left edge: a leading space reads as the pill being
     // indented rather than as the bar starting there.
+    var walk_key: [32]u8 = undefined;
     var col: u16 = try f.print(row, 0, t.mode_badge, " {s} ", .{label});
 
     col += 2;
@@ -292,6 +294,15 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         }), t.dim }
     else if (v.selection) |sel|
         .{ try selectionSize(f, v, sel), t.dim }
+    else if (v.fresh_total > 0)
+        // Ahead of the row count because it is the one thing in this slot the
+        // reader came back to find out. The count is of rows rather than
+        // hunks: what arrived since the mark is lines, and a hunk holding one
+        // of them is not the same answer.
+        .{ try std.fmt.allocPrint(f.arena, "{d} new since the mark - {s} walks them", .{
+            v.fresh_total,
+            keytext.firstKeyFor(v.bindings, .next_fresh, .normal, &walk_key),
+        }), t.accent }
     else
         .{ try std.fmt.allocPrint(f.arena, "{d} rows", .{v.rows.len()}), t.dim };
 

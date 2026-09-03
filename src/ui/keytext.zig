@@ -151,6 +151,20 @@ fn namedChord(name: []const u8) KeyParseError!Chord {
 /// `[f` come out as one `]f [f file` rather than two entries saying the same
 /// word twice. Written into `buf`, which the caller owns - in practice the
 /// frame arena.
+/// The first spelling of `cmd`, for a message with room for one key.
+///
+/// `keysFor` joins every spelling, which is what a help row wants and what a
+/// sentence cannot afford: "]m / <Space>nm walks them" is not a sentence. The
+/// first binding is the primary one by construction - the table lists the
+/// short form before its leader alias.
+pub fn firstKeyFor(bindings: []const Binding, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
+    for (bindings) |b| {
+        if (b.command != cmd or !b.modes.has(mode)) continue;
+        return bufWriteChords(b.chords, buf);
+    }
+    return "";
+}
+
 pub fn hints(bindings: []const Binding, mode: event.Mode, buf: []u8) []const u8 {
     var n: usize = 0;
     for (bindings, 0..) |b, i| {
@@ -283,31 +297,41 @@ fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, group: ?keyma
 /// the four ask keys retired and took the only visible trace of presets with
 /// them. Listed under `send`, because that is the tab the box belongs to.
 ///
-/// The same rows the box draws along its own bottom border, so the two cannot
-/// disagree about what its keys are.
-pub const compose_rows: []const HelpEntry = &.{
-    .{ .keys = "<C-i>", .desc = "in the box: insert a preset at the caret" },
-    .{ .keys = "@", .desc = "in the box: mention a file" },
-    .{ .keys = "<Esc>", .desc = "in the box: normal mode - o opens a line" },
-    .{ .keys = "<S-CR> <C-j>", .desc = "in the box: a line break, joined on send" },
-};
+/// Read from the compose-mode bindings rather than written out, so the popup,
+/// the box's own footer and `[keys]` cannot drift apart about what its keys
+/// are. Prefixed, because these rows sit in a list of the review's keys and a
+/// reader has to be told which of them work where.
+const compose_prefix = "in the box: ";
 
 /// The compose rows this filter and group keep, appended to whatever the
 /// bindings produced. One helper, so the list and the count agree.
-fn composeShown(mode: event.Mode, group: ?keymap.Group, filter: []const u8, out: ?*std.ArrayList(HelpEntry), arena: ?Allocator) Allocator.Error!usize {
+fn composeShown(bindings: []const Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8, out: ?*std.ArrayList(HelpEntry), arena: ?Allocator) Allocator.Error!usize {
     // Only where the review's own keys are live. Inside the box the popup
     // cannot be opened at all, and in a list of visual-mode keys these would
-    // be four rows about somewhere the reader is not.
+    // be rows about somewhere the reader is not.
     if (mode != .normal) return 0;
     if (group) |g| if (g != .send) return 0;
 
     var n: usize = 0;
-    for (compose_rows) |r| {
-        var hay: [160]u8 = undefined;
-        const text = std.fmt.bufPrint(&hay, "{s} {s}", .{ r.keys, r.desc }) catch r.keys;
+    var kbuf: [max_row_keys_bytes]u8 = undefined;
+    for (bindings) |b| {
+        if (!b.modes.compose) continue;
+        // An alias carries no description, and its keys are gathered onto the
+        // row its command already has - `<Tab>` beside `<C-i>`, not under it.
+        const d = b.desc orelse continue;
+        const keys = keysFor(bindings, b.command, .note_input, &kbuf);
+
+        var hay: [200]u8 = undefined;
+        const text = std.fmt.bufPrint(&hay, "{s} {s}{s}", .{ keys, compose_prefix, d }) catch keys;
         if (fuzzy.match(text, filter) == null) continue;
         n += 1;
-        if (out) |list| try list.append(arena.?, r);
+        if (out) |list| {
+            const a2 = arena.?;
+            try list.append(a2, .{
+                .keys = try a2.dupe(u8, keys),
+                .desc = try std.fmt.allocPrint(a2, "{s}{s}", .{ compose_prefix, d }),
+            });
+        }
     }
     return n;
 }
@@ -333,7 +357,7 @@ pub fn helpCount(bindings: []const Binding, mode: event.Mode, group: ?keymap.Gro
             width = row.keys.len;
         }
     }
-    return n + (composeShown(mode, group, filter, null, null) catch 0);
+    return n + (composeShown(bindings, mode, group, filter, null, null) catch 0);
 }
 
 /// Whether a row joins the one already open. The single place the merge rule
@@ -368,7 +392,7 @@ pub fn helpEntries(
     try solid.appendSlice(arena, loose.items);
     var rows: std.ArrayList(HelpEntry) = .empty;
     try rows.appendSlice(arena, try mergeByDesc(arena, solid.items));
-    _ = try composeShown(mode, group, filter, &rows, arena);
+    _ = try composeShown(bindings, mode, group, filter, &rows, arena);
     return rows.toOwnedSlice(arena);
 }
 
@@ -568,7 +592,7 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     }
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
-    try testing.expectEqual(@as(usize, 17), leaders);
+    try testing.expectEqual(@as(usize, 19), leaders);
     // The rows that actually contain the query come first, which is the whole
     // point of the two tiers - the scattered-letter matches a query like this
     // also drags in sit behind them rather than among them.

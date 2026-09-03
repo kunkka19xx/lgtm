@@ -14,6 +14,7 @@ const vaxis = @import("vaxis");
 const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
+const keytext = @import("keytext.zig");
 const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
 const wrap = @import("wrap.zig");
@@ -124,13 +125,17 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
             const cols = if (f.width() > 6) f.width() - 6 else f.width();
             f.put(at, 3, try f.rule(f.glyphs.gap, cols), f.theme.rule);
         },
-        .summarised => _ = try f.print(
-            at,
-            0,
-            f.theme.dim,
-            "  {d} lines changed - too large to render inline. {s} opens it",
-            .{ v.file.added + v.file.removed, v.open_key },
-        ),
+        .summarised => blk: {
+            var key: [32]u8 = undefined;
+            _ = try f.print(
+                at,
+                0,
+                f.theme.dim,
+                "  {d} lines changed - too large to render inline. {s} opens it",
+                .{ v.file.added + v.file.removed, keytext.firstKeyFor(v.bindings, .expand_file, .normal, &key) },
+            );
+            break :blk;
+        },
         .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
         .line, .note => unreachable,
     }
@@ -266,6 +271,13 @@ fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i3
     // scrolled off the top takes them with it.
     if (onScreen(f, row)) |at| {
         f.put(at, 0, prefix, sign_style);
+        // A change newer than the mark, in the column between the sign and
+        // the line number - the one blank the gutter already has. It takes no
+        // width from the code and cannot collide with the comment mark, which
+        // lives at the other end of the gutter.
+        if (li < v.fresh.len and v.fresh[li] and col > 1) {
+            f.put(at, 1, g.fresh_mark, withBg(t.fresh, bg));
+        }
         // A note is marked in the last gutter column, after the prefix has
         // been drawn over it - the two spaces between the line number and the
         // code are the only ones a marker can have without the code moving.

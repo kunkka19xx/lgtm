@@ -60,22 +60,25 @@ A banner at the top of the session: **`⚠ 2 tests removed · 1 assertion weaken
 
 This is concrete, verifiable, and instantly recognisable to anyone who has used an agent for a week. It is the screenshot that goes in the README.
 
-### 1.3 Turn checkpoints - "since I last looked"
+### 1.3 Turn checkpoints - "since I last looked" - shipped
 
 In a 40-turn session the accumulated diff becomes meaningless. `lgtm` needs a concept of *the last time you looked*.
 
-- `m` marks the current state as reviewed
-- default view shows only the delta since that mark
-- `a` shows everything
-- the file list shows both counts: `src/auth.rs  +6 -2  (of +24 -6)`
+`m` marks the working tree as read. Every re-diff after that says which rows arrived since, with a bar in the gutter, `]m` and `[m` to walk them, and a count on the mode row. `core/checkpoint.zig`, and it is the anchoring machinery pointed at a different question, exactly as planned.
 
-Mechanically this is the anchoring machinery you already have, pointed at a different question. Experientially it changes the tool from "here is a pile" to "here is what happened since you last cared."
+**Two things were planned differently and are worth the correction.** The mark was to *filter* - "default view shows only the delta since that mark", with `a` for everything - and it does not: it annotates. What the reader approves is still the diff against HEAD, and a view that hid the rest would hide the context the new lines have to be judged against. A line reading `if (!t) return false;` means nothing without the line above it that the agent wrote an hour ago. Annotating keeps both, and costs one gutter column that was already blank. (`a` also went elsewhere: the ask presets took it, and then gave it up in turn.)
 
-### 1.4 Diff-of-diff for round two
+The other is that the mark compares **working trees, not diffs**. It is what makes this a `linemap` lookup rather than a second diff algorithm - the map is already written, already measured, already what anchoring trusts. Measured at **0.93 ms** per re-diff over this repository's fourteen changed files, against a 100 ms budget, which is the number that made "recompute it for every file, every time" the obvious design rather than a cache.
 
-You send notes, the agent revises, and now you must re-review. Today you re-read *everything*, unable to distinguish the parts that answer your feedback from the parts the agent changed on its own initiative.
+`M`, or `:nomark`, drops the mark. It is worth saying what that does *not* do: nothing reappears, because nothing was hidden. What is not built: the file list showing both counts (`src/auth.rs  +6 -2  (of +24 -6)`), and any persistence - a mark lives as long as the session, which is what "since I last looked" means anyway.
 
-Highlight the second-order change distinctly. Combined with `sent` notes, this also answers "was my note actually addressed?" - a note whose anchored region changed after submission is a strong signal, and it feeds Open Question 5 in SPEC.md.
+### 1.4 Diff-of-diff for round two - shipped as 1.3
+
+You send comments, the agent revises, and now you must re-review. Without this you re-read *everything*, unable to distinguish the parts that answer your feedback from the parts the agent changed on its own initiative.
+
+This turned out to be the same feature as 1.3 rather than a second one: mark before you send, and what the gutter shows afterwards is precisely the second-order change. `Ctrl-s` takes the mark as well as sending the review, because submitting is the one moment the reader has demonstrably read everything - and a feature that needs a key pressed *before* the thing it measures is one that gets remembered afterwards. `<Space>sc` does not: sending one remark claims nothing about the rest. `[nav] mark_on_submit = false` for a reader whose mark spans more than one round. Only added and removed rows can be fresh - a context row is unchanged code by definition, and lighting it up because the lines around it moved would flag half the file every time an import was inserted, which is the failure this exists to prevent rather than one to reproduce.
+
+Still open: "was my comment actually addressed?" - a `sent` comment whose anchored region is fresh is a strong signal, and now a cheap one to compute. It feeds Open Question 5 in SPEC.md.
 
 ---
 
@@ -168,6 +171,23 @@ Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individ
 - **Leader fronts commands, not hot motions.** Anything pressed dozens of times per review earns a direct key; the leader is for what you reach for occasionally. Where both exist (`<Space>nf` alongside `]f`) the leader form is the discoverable alias, not the replacement.
 
 A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
+
+**The compose box takes its keys from the keymap too** (`Modes.compose_only`).
+Everything it does that is not typing or a motion is a command: `compose_submit`,
+`compose_cancel`, `compose_send_now`, `compose_presets`, `compose_mention`,
+`compose_newline`. The motions are vim's and stay vim's, for the reason the box
+exists at all - and for a harder one: in a text box every printable key is data,
+so a keymap able to bind `x` would be a keymap able to take `x` away from typing.
+
+Two rules fall out of that. Compose bindings are **single chords only**: a box
+cannot hold a prefix waiting to see whether a sequence completes, because the
+key after it is usually a letter someone is typing. And a **pending operator
+outranks the keymap**: with `d` waiting, `<Esc>` cancels the operator, not the
+box, or `d<Esc>` would throw away a half-written message.
+
+The box's footer and its rows in `?` are both generated from those bindings, so
+a remap moves the key, the footer and the help together. An unbound command
+drops out of the footer rather than advertising a key the reader does not have.
 
 ### 4.3b The empty screen - the wordmark, shipped
 
@@ -314,11 +334,11 @@ All four hold. A bad line costs that one key its value and nothing else - the li
 | Keymap remapping | v0.1 | Shipped early: the command-name indirection was mandatory from day one, and once every action had a name `[keys]` was a config section rather than a feature |
 | Review comments | v0.1 | Shipped early - planned for v0.2, but `core/anchor.zig` was built and tested first, which is what the feature actually costs. `<Space>c`, `]c`, `<Space>lc`, `Ctrl-s` |
 | Template strings | v0.2 | The table itself shipped in v0.1 (`bridge/template.zig`); `[templates]` overrides it in v0.2 |
-| Turn checkpoints (`m`) | v0.2 | Same machinery as anchoring |
+| Turn checkpoints (`m`) | v0.1 | Shipped early, and 1.4 with it: once anchoring existed the feature was `core/checkpoint.zig` plus a gutter column. 0.93 ms per re-diff |
 | Weakened-test detection | v0.2 | Needs the lexer |
 | Risk ordering | v0.3 | Needs tuning against real sessions |
 | Custom themes + live reload | v0.3 | |
-| Diff-of-diff | v0.3 | Needs checkpoints first |
+| Diff-of-diff | v0.1 | Was to need checkpoints first; turned out to *be* checkpoints |
 | Git pager mode | pre-v1.0 | Growth channel |
 | Blame-lite | v1.0+ | |
 

@@ -77,6 +77,13 @@ pub const Command = enum {
     prev_comment,
     submit_review,
     toggle_ignored,
+    /// "Since I last looked" (`core/checkpoint.zig`). `mark_here` records the
+    /// working tree as the reader has now read it; the two steps walk the
+    /// changes that arrived after it.
+    mark_here,
+    clear_mark,
+    next_fresh,
+    prev_fresh,
     /// A file over `large_file_lines` renders as a summary row; these open it
     /// and fold it again. `zo` and `zc` because a deferred file is a fold in
     /// everything but name, and vim already decided what those keys mean.
@@ -99,6 +106,20 @@ pub const Command = enum {
     help,
     /// Open the file list.
     file_list,
+    /// The compose box's own keys. Everything it does that is not typing or
+    /// a vim motion, so a box is remappable like the rest of the tool - the
+    /// motions are vim's and stay vim's, the way `hjkl` do outside the box.
+    ///
+    /// Bound with single chords only. A box cannot hold a prefix waiting for
+    /// the key after it: the next key is usually a letter someone is typing,
+    /// and swallowing it to see whether a sequence completes would make
+    /// typing depend on what is bound.
+    compose_submit,
+    compose_cancel,
+    compose_send_now,
+    compose_presets,
+    compose_mention,
+    compose_newline,
     /// Move the selection in whichever overlay is open. Live only in the
     /// overlay modes, so these keys stay free for the review itself.
     list_down,
@@ -144,7 +165,10 @@ pub const Modes = packed struct(u8) {
     /// The `F` overlay. Same rule as `help`: inside it a keystroke is filter
     /// text, so only the list's own navigation is bound.
     finder: bool = false,
-    _pad: u4 = 0,
+    /// Inside the compose box. Only its feature keys live here; every other
+    /// key is text or a motion over text.
+    compose: bool = false,
+    _pad: u3 = 0,
 
     pub const both: Modes = .{ .normal = true, .visual = true };
     pub const normal_only: Modes = .{ .normal = true };
@@ -160,6 +184,9 @@ pub const Modes = packed struct(u8) {
     /// differs between the two overlays - a tab in `?`, a page of the grid
     /// here - so it is bound per overlay and each one says its own word.
     pub const finder_only: Modes = .{ .finder = true };
+    /// Inside the compose box, and nowhere else: these keys have to stay free
+    /// for the review, and the review's keys have to stay typeable in a box.
+    pub const compose_only: Modes = .{ .compose = true };
 
     pub fn has(self: Modes, mode: event.Mode) bool {
         return switch (mode) {
@@ -167,6 +194,7 @@ pub const Modes = packed struct(u8) {
             .visual => self.visual,
             .help => self.help,
             .finder => self.finder,
+            .note_input => self.compose,
             // The prompt modes never reach the keymap: `prompt.zig` takes the
             // keys, because they are text rather than actions.
             else => false,
@@ -336,8 +364,8 @@ pub const default_bindings: []const Binding = &.{
     // that moved the ask presets off `a`, `x` and `!`.
     .{ .chords = &.{ leader, c('c') }, .command = .comment_add, .desc = "write a comment on this line", .group = .comment },
     .{ .chords = &.{ leader, c('d'), c('c') }, .command = .comment_delete, .desc = "delete the comment here", .group = .comment },
-    .{ .chords = &.{ c(']'), c('c') }, .command = .next_comment, .desc = "next and previous comment (wraps)", .group = .comment },
-    .{ .chords = &.{ c('['), c('c') }, .command = .prev_comment, .desc = "next and previous comment (wraps)", .group = .comment },
+    .{ .chords = &.{ c(']'), c('c') }, .command = .next_comment, .desc = "next comment (wraps)", .group = .comment },
+    .{ .chords = &.{ c('['), c('c') }, .command = .prev_comment, .desc = "previous comment (wraps)", .group = .comment },
     .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_comment, .group = .comment },
     .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
     .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
@@ -354,6 +382,12 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR", .group = .view },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
+    .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .jump },
+    .{ .chords = &.{c('M')}, .command = .clear_mark, .desc = "drop the mark; the review reads as one whole change again", .hint = null, .group = .jump },
+    .{ .chords = &.{ c(']'), c('m') }, .command = .next_fresh, .desc = "next change since the mark (wraps)", .hint = null, .group = .jump },
+    .{ .chords = &.{ c('['), c('m') }, .command = .prev_fresh, .desc = "previous change since the mark (wraps)", .hint = null, .group = .jump },
+    .{ .chords = &.{ leader, c('n'), c('m') }, .command = .next_fresh, .group = .jump },
+    .{ .chords = &.{ leader, c('p'), c('m') }, .command = .prev_fresh, .group = .jump },
     .{ .chords = &.{ c('z'), c('i') }, .command = .toggle_ignored, .desc = "show the files [review] ignore hides", .group = .view },
     .{ .chords = &.{ c('z'), c('o') }, .command = .expand_file, .desc = "open a file too large to render inline, or fold it again", .group = .view },
     .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "open a file too large to render inline, or fold it again", .hint = null, .group = .view },
@@ -414,6 +448,18 @@ pub const default_bindings: []const Binding = &.{
     // the two never compete. Shift-Tab arrives as Tab with the shift bit -
     // the only key in the table where shift is part of the chord rather than
     // part of the character.
+    // The compose box. Single chords, and `<Esc>` before the ways out that
+    // commit, so a footer with room for three still shows the way back.
+    .{ .chords = &.{c(event.code.enter)}, .command = .compose_submit, .modes = Modes.compose_only, .desc = "send what is in the box" },
+    .{ .chords = &.{c(event.code.escape)}, .command = .compose_cancel, .modes = Modes.compose_only, .desc = "leave insert, then leave the box" },
+    .{ .chords = &.{ctrl('s')}, .command = .compose_send_now, .modes = Modes.compose_only, .desc = "save a comment and send it now" },
+    .{ .chords = &.{ctrl('i')}, .command = .compose_presets, .modes = Modes.compose_only, .desc = "insert a [presets] question at the caret" },
+    // Terminals send 0x09 for both Tab and Ctrl-i, so this is the same
+    // keystroke arriving under its other name rather than a second binding.
+    .{ .chords = &.{c(event.code.tab)}, .command = .compose_presets, .modes = Modes.compose_only },
+    .{ .chords = &.{c('@')}, .command = .compose_mention, .modes = Modes.compose_only, .desc = "insert a file path at the caret" },
+    .{ .chords = &.{ctrl('j')}, .command = .compose_newline, .modes = Modes.compose_only, .desc = "a line break (Shift-Enter where the terminal sends it)" },
+
     .{ .chords = &.{c(event.code.tab)}, .command = .list_down, .modes = Modes.lists },
     .{ .chords = &.{shift(event.code.tab)}, .command = .list_up, .modes = Modes.lists },
 };
@@ -658,7 +704,8 @@ test "every binding is live in at least one mode" {
     // no binding was finder-only, so the check would have rejected the first
     // one that was.
     for (default_bindings) |b| {
-        try testing.expect(b.modes.normal or b.modes.visual or b.modes.help or b.modes.finder);
+        try testing.expect(b.modes.normal or b.modes.visual or b.modes.help or
+            b.modes.finder or b.modes.compose);
     }
 }
 

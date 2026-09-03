@@ -6,6 +6,17 @@
 
 > Added after the initial doc set. Fills a gap: checkpoints and the anchor chain currently exist only in memory.
 
+> **Status, 2026-09-03.** The *behaviour* of §5.1 shipped and nothing else here
+> did. `m` marks, `]m` walks what arrived since, and `core/checkpoint.zig`
+> holds the marked working tree in RAM on the session allocator - so it dies
+> with the process, and it copies whole file contents rather than addressing
+> them by content. Everything that makes this document worth having is still
+> unbuilt: the git object store (§3), snapshotting per agent turn (§4),
+> durable checkpoints and restart-safe anchoring (§5.1-5.2), the timeline
+> (§5.3), and restore (§5.4-5.5). Read the present tense below as design.
+> `m` is the right key on the wrong storage, which is the cheap half to
+> replace: `Checkpoint.find` is the only thing the review layer asks it.
+
 ---
 
 ## 1. The gap

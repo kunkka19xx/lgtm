@@ -15,6 +15,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const anchor = @import("../core/anchor.zig");
+const checkpoint = @import("../core/checkpoint.zig");
 const diff = @import("../core/diff.zig");
 const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
@@ -84,11 +85,18 @@ pub const Review = struct {
     /// written, which is the only time you want to.
     expanded: std.ArrayList([]u8) = .empty,
 
+    /// The mark, and what changed after it. The mark is gpa-owned for the same
+    /// reason `prev_work` is; `fresh` is one bool per row of each file and
+    /// belongs to the generation, because rows do.
+    mark_at: checkpoint.Checkpoint,
+    fresh: [][]bool = &.{},
+
     pub fn init(gpa: Allocator, io: std.Io) Review {
-        return .{ .gpa = gpa, .io = io, .arena = .init(gpa) };
+        return .{ .gpa = gpa, .io = io, .arena = .init(gpa), .mark_at = .init(gpa) };
     }
 
     pub fn deinit(self: *Review) void {
+        self.mark_at.deinit();
         for (self.expanded.items) |p| self.gpa.free(p);
         self.expanded.deinit(self.gpa);
         self.gpa.free(self.prev_work);
@@ -164,6 +172,7 @@ pub const Review = struct {
         self.parsed = null;
         self.sources = null;
         self.torn = false;
+        self.fresh = &.{};
 
         const git_span = metrics.span(.git_subprocess);
         const skip: []const []const u8 = if (self.show_ignored) &.{} else self.ignore;
@@ -214,7 +223,84 @@ pub const Review = struct {
             const prev: []const hunk.Hunk = if (i == index) carried else &.{};
             try self.ids.inherit(arena, prev, f.hunks);
         }
+
+        try self.refresh();
         return index;
+    }
+
+    /// Recomputes what changed since the mark, for every file.
+    ///
+    /// Costs nothing at all until a mark is taken, which is the common case
+    /// and the reason this is a check rather than a config flag. After one, it
+    /// is a line map per changed file per re-diff - the same map anchoring
+    /// already runs for the cursor's file, now run for all of them
+    /// (PERFORMANCE.md 3.1). The 100 ms re-diff budget is what to watch here,
+    /// and `--profile` is what watches it.
+    fn refresh(self: *Review) Allocator.Error!void {
+        if (!self.mark_at.taken()) {
+            self.fresh = &.{};
+            return;
+        }
+        const sp = metrics.span(.checkpoint);
+        defer sp.end();
+
+        const arena = self.arena.allocator();
+        const fs = self.files();
+        const out = try arena.alloc([]bool, fs.len);
+        for (fs, 0..) |*f, i| out[i] = try self.freshOf(f);
+        self.fresh = out;
+    }
+
+    fn freshOf(self: *Review, f: *diff.FileDiff) Allocator.Error![]bool {
+        const arena = self.arena.allocator();
+        const work = self.buffersFor(f.path()).work;
+        const now: []const u8 = if (work) |w| w.bytes else "";
+        return checkpoint.freshRows(arena, f, now, self.mark_at.find(f.path()));
+    }
+
+    /// Takes the mark: this working tree, as the reader has now read it.
+    ///
+    /// Every changed file, including one already deleted - which is recorded
+    /// with empty content rather than skipped, because "absent from the mark"
+    /// has to keep meaning "not in the review then", or a file deleted before
+    /// the mark would light up whole afterwards.
+    pub fn mark(self: *Review) Allocator.Error!void {
+        self.mark_at.clear();
+        for (self.files()) |*f| {
+            const work = self.buffersFor(f.path()).work;
+            const now: []const u8 = if (work) |w| w.bytes else "";
+            const removed = try checkpoint.removedLines(self.gpa, f);
+            defer self.gpa.free(removed);
+            try self.mark_at.add(f.path(), now, removed);
+        }
+        self.mark_at.turn += 1;
+        try self.refresh();
+    }
+
+    /// Drops the mark, and with it every freshness marker.
+    pub fn unmark(self: *Review) void {
+        self.mark_at.clear();
+        self.mark_at.turn = 0;
+        self.fresh = &.{};
+    }
+
+    /// Which rows of file `index` changed since the mark. Empty when there is
+    /// no mark, which every caller can treat as "none of them".
+    pub fn freshFor(self: *const Review, index: u32) []const bool {
+        if (index >= self.fresh.len) return &.{};
+        return self.fresh[index];
+    }
+
+    /// Rows across the whole review that changed since the mark. The status
+    /// line's count, and the answer to "is there anything left to look at".
+    pub fn freshCount(self: *const Review) u32 {
+        var n: u32 = 0;
+        for (self.fresh) |rows| {
+            for (rows) |b| {
+                if (b) n += 1;
+            }
+        }
+        return n;
     }
 
     /// Parses a summarised file's hunks now, and keeps it parsed across every
@@ -251,6 +337,15 @@ pub const Review = struct {
             }
         }
         try self.ids.inherit(arena, &.{}, f.hunks);
+
+        // The file had one row and now has thousands; the array that says
+        // which of them are fresh was sized for the summary.
+        if (self.mark_at.taken()) {
+            for (self.files(), 0..) |*g, i| {
+                if (g != f) continue;
+                if (i < self.fresh.len) self.fresh[i] = try self.freshOf(f);
+            }
+        }
 
         try self.remember(path);
         return true;
