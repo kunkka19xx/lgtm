@@ -21,6 +21,13 @@ So the job is not "display a diff nicely." It is **decide where the user's next 
 
 These are the reasons someone installs the tool rather than living with `git diff`.
 
+**None of 1.1 to 1.4 is built.** They are written in the present tense because
+that is how a feature is easiest to think about, not because they exist; §5
+carries the milestone each is filed under. What shipped instead was the
+foundation they all stand on - anchoring, change ids, the compose box - which
+is the order that made sense: every one of these is cheap once the diff can be
+compared with a previous diff, and impossible before.
+
 ### 1.1 Risk-ordered hunks
 
 Path-alphabetical ordering is an artifact of human code review. Replace it: **most suspicious hunk first**, with a cheap heuristic score. No AI, just pattern matching:
@@ -89,11 +96,11 @@ All templates are config (§4.5). Users will invent better ones than these.
 
 ### 2.2 Blame-lite on the current line
 
-`gb` shows the last commit that touched this line - one `git blame -L`, cached. Answers "was this mine or the agent's?" without leaving the pane.
+**Not built** (v1.0+). `gb` would show the last commit that touched this line - one `git blame -L`, cached. Answers "was this mine or the agent's?" without leaving the pane.
 
 ### 2.3 Copy-as
 
-`y` copies a reference, but *which format* varies by target. `gy` opens a small menu: plain `path:line`, GitHub permalink, markdown link, or the raw line content. See §4.5 - the same template system.
+`y` shipped, `gy` did not. `y` copies the selected *text*, because that is what `y` means to the fingers that already have vim in them - the reference goes to the agent through the compose box, which is a different question from what lands in the clipboard. `gy` would open a small menu for the times it is not: plain `path:line`, GitHub permalink, markdown link. See §4.5 - the same template system.
 
 ---
 
@@ -157,7 +164,7 @@ Ship presets: `vim` (default), `helix`, `emacs`, `plain`. Users override individ
 **The leader.** `<Space>` fronts the command namespace, so it can grow without competing for single keys. It is defined once as `keymap.leader`, which is what lets a preset move it to `,` or `\` in one edit instead of a sweep over every sequence. Two rules keep it working:
 
 - **Never bind the leader on its own.** The matcher resolves an exact match as soon as it finds one, so a bare-leader binding would shadow every sequence behind it - the sequences would still be listed, and silently never fire. Pinned by a test rather than a comment.
-- **A motion outranks a command for a direct key, and three keys changed hands to prove it.** `e`, `t` and `F` were `open_editor`, `ask_test` and `file_list`; they are now `word_end`, `till_char` and `find_char_back`, with the commands on `<Space>e`, `<Space>t` and `<Space>f`. Half a set of vim motions is worse than none - a hand that knows `e` does not un-know it because this is a reviewer - and by the rule below, a key pressed dozens of times a minute beats one pressed a few times an hour. All three keep their row in `?`, and `[keys]` puts them back in one line each for anyone who disagrees.
+- **A motion outranks a command for a direct key, and three keys changed hands to prove it.** `e`, `t` and `F` were `open_editor`, `ask_test` and `file_list`; they are now `word_end`, `till_char` and `find_char_back`, with the commands on `<Space>e` and `<Space>f`. (The `ask_test` *command* has since gone - the compose box replaced the four ask presets with `[presets]` and `Ctrl-i` - though the string is still in `bridge/template.zig`, unused, waiting for `[templates]`.) Half a set of vim motions is worse than none - a hand that knows `e` does not un-know it because this is a reviewer - and by the rule below, a key pressed dozens of times a minute beats one pressed a few times an hour. All three keep their row in `?`, and `[keys]` puts them back in one line each for anyone who disagrees.
 - **Leader fronts commands, not hot motions.** Anything pressed dozens of times per review earns a direct key; the leader is for what you reach for occasionally. Where both exist (`<Space>nf` alongside `]f`) the leader form is the discoverable alias, not the replacement.
 
 A remapping user can rebind either form independently: both are ordinary rows in the table pointing at the same `Command`.
@@ -184,7 +191,7 @@ This is the highest-value discoverability feature in any TUI. Every key the user
 
 `help` is a real `Mode`, and inside it the keymap serves only navigation: `J`/`K` move the selection by a row and `H`/`L` change tab in `?` and page the grid in the file list (the arrow keys and `<C-n>`/`<C-p>` alias them), and every other keystroke is filter text - so `j` cannot scroll a body the user cannot see and `q` cannot quit. Navigation stays in the binding table rather than being hardcoded in the popup, so it is remappable like everything else.
 
-Shifted rather than `<C-j>`/`<C-k>`, deliberately. A Ctrl chord is the one thing a multiplexer takes before the application sees it: vim-tmux-navigator binds `C-h`/`C-j`/`C-k`/`C-l` at the tmux **root** table and forwards them only to processes matching its vim pattern, which `lgtm` does not match - so under that very common config `<C-j>` switches a tmux pane and never arrives. tmux decides from the *process name*, so an application cannot ask for the chord back only while a popup is open; adding `lgtm` to `@vim_navigator_pattern` claims those keys for the whole session instead. `<C-j>`/`<C-k>` are therefore not bound at all: a footer advertising a key the user cannot press is worse than one key fewer. The shifted pair is free, and nothing intercepts an arrow either.
+Shifted rather than `<C-j>`/`<C-k>`, deliberately. A Ctrl chord is the one thing a multiplexer takes before the application sees it: vim-tmux-navigator binds `C-h`/`C-j`/`C-k`/`C-l` at the tmux **root** table and forwards them only to processes matching its vim pattern, which `lgtm` does not match - so under that very common config `<C-j>` switches a tmux pane and never arrives. tmux decides from the *process name*, so an application cannot ask for the chord back only while a popup is open; adding `lgtm` to `@vim_navigator_pattern` claims those keys for the whole session instead. `<C-j>`/`<C-k>` are therefore not bound as list navigation: a footer advertising a key the user cannot press is worse than one key fewer. (`<C-j>` does insert a line break inside the compose box, where the box reads keys directly rather than through the keymap - and it is the fallback for `<S-CR>`, which tmux swallows unless `extended-keys` is on.) The shifted pair is free, and nothing intercepts an arrow either.
 
 Capitals cost nothing here: inside the popup every other key is filter text, and the filter matches case-insensitively, so `J` was never going to be typed as a query.
 
@@ -208,7 +215,7 @@ Every row is rendered from the bindings by `keymap.writeChords`, so a remapped k
 
 ### 4.5 Template strings - the sleeper feature
 
-Different agents like different reference formats, and users have strong opinions. Make every outgoing string a template:
+Different agents like different reference formats, and users have strong opinions. Make every outgoing string a template. The table shipped in v0.1 as `bridge/template.zig`, so no format literal is spelled out at a call site; reading `[templates]` from the config over the top of it is v0.2:
 
 ```toml
 [templates]
@@ -217,14 +224,14 @@ ref_range  = "#{change_id} {path}:{start}-{end}"
 ask_why    = "{ref} - why this approach?"
 review_header = "# Review {n} - {date}"
 review_item   = "## {ref}\n```{lang}\n{snippet}\n```\n{body}"
-submit_msg    = "Please address the review notes in {file} "
+submit_msg    = "review ready: {file} ({count} comments) "   # not a template yet: still a format literal in submitReview
 ```
 
 This is cheap to build and disproportionately loved, because it lets people tune the tool to *their* agent's habits without a PR. It also future-proofs against agents that appear after you stop maintaining this.
 
 ### 4.6 Risk rules
 
-The §1.1 scoring table is config, not code:
+The §1.1 scoring table is config, not code - when §1.1 is built, which it is not:
 
 ```toml
 [[risk.rules]]
@@ -241,11 +248,13 @@ Teams add their own sensitive paths. This is also how the feature stays honest -
 
 ### 4.7 Layout
 
+**`[layout]` is not a section the config reads today.** The block is the shape it should take when the panes and the risk score exist; `[ui]` carries the settings that do exist.
+
 ```toml
 [layout]
 file_list = "hidden"     # top | left | hidden
 file_list_size = 0.25
-statusline = "{mode} {file} {change_id} {notes} {risk}"
+statusline = "{mode} {file} {change_id} {comments} {risk}"
 ```
 
 **The file list ships as an overlay** rather than as any of the three panes: the same box the `?` popup uses, with the same filter, `J`/`K` to move, `H`/`L` to page, and `Enter` to jump.
@@ -258,9 +267,10 @@ and the list is navigation, which should not hold territory while you read.
 Files are reached with `]f` and the full list on `<Space>f`. `top` and `left` remain
 supported - they are 1a and 1b, and both were drawn.
 
-Two consequences worth recording. The side-by-side view (1c) already uses this
-same chrome, so when it lands in v0.3 it swaps the body rather than re-laying
-out the screen. And the sign column defaults to classic `+`/`-` (option 1o B),
+Two consequences worth recording. The side-by-side view (1c) is designed to use
+this same chrome, so if it lands in v0.3 it swaps the body rather than
+re-laying out the screen - it is not built, and the present tense above was
+about the sketch rather than the code. And the sign column defaults to classic `+`/`-` (option 1o B),
 which is what every other mockup in the doc already draws; `ui.icons` below
 still selects the glyph set.
 
@@ -301,7 +311,8 @@ All four hold. A bad line costs that one key its value and nothing else - the li
 | Ignore patterns | v0.1 | `[review] ignore = ["package-lock.json", "**/*.pb.go"]`. Passed to git as `:(exclude)` pathspecs, so the glob semantics are gitignore's and there is no matcher of our own to get wrong - and git never parses the hunks, so a 900-line lockfile costs nothing. Hidden by default, counted in the mode row, `zi` reveals. What `.gitignore` cannot do: these files are tracked on purpose |
 | Compose box | v0.1 | Every send opens it (`ui/compose.zig`), holding the reference and nothing else: a canned question typed in for you is a sentence you have to read and mostly delete. Modal, sharing `ui/motion.zig` with the review so `w` means the same thing inside the box as outside it - which is also why it cost little: the motions already existed and only the operators are new. `[ui] compose` places it - bottom, top or centre - and the lists it opens take whichever side has more room. `Ctrl-i` inserts a `[presets]` entry at the caret and `@` inserts a changed file's path, both without deleting anything. A file the review does not contain is drawn dim rather than in a status colour - it has no status, and borrowing one claims something happened to it. `@` reuses the `<Space>f` overlay whole - same list, same fuzzy filter, same drawing - with one field deciding whether Enter jumps or mentions. Reused by v0.2 notes - same box, different destination |
 | Ask presets | v0.1 | Four keys with four fixed questions became one key and a list: `<Space>a` opens the compose box with the question list up, and `[presets]` decides what is in it. One key beats four once the questions are the user's own and there can be any number of them - but the *shortcut* had to stay. Removing it entirely, on the grounds that it and `Enter` both open a box, lost the thing it was for: getting to a question in one keystroke |
-| Keymap remapping | v0.2 | Needs the command-name indirection from day one |
+| Keymap remapping | v0.1 | Shipped early: the command-name indirection was mandatory from day one, and once every action had a name `[keys]` was a config section rather than a feature |
+| Review comments | v0.1 | Shipped early - planned for v0.2, but `core/anchor.zig` was built and tested first, which is what the feature actually costs. `<Space>c`, `]c`, `<Space>lc`, `Ctrl-s` |
 | Template strings | v0.2 | The table itself shipped in v0.1 (`bridge/template.zig`); `[templates]` overrides it in v0.2 |
 | Turn checkpoints (`m`) | v0.2 | Same machinery as anchoring |
 | Weakened-test detection | v0.2 | Needs the lexer |

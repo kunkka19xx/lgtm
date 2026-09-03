@@ -66,6 +66,11 @@ pub const Command = enum {
     compose_ask,
     file_browse,
     comment_add,
+    comment_list,
+    comment_send,
+    comment_send_one,
+    comment_send_all,
+    comment_drop,
     comment_view,
     comment_delete,
     next_comment,
@@ -331,6 +336,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_comment, .group = .comment },
     .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
     .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
+    .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
+    .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
     .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .comment },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
@@ -377,6 +384,16 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.help_only, .desc = "tab" },
     .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.finder_only, .desc = "page" },
     .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.finder_only, .desc = "page" },
+    // The comment list's own actions. Chords, because every printable key in
+    // that overlay is a filter character - and commands rather than keys
+    // wired into dispatch, so `[keys]` can move them.
+    //
+    // Not `<C-a>`, however well it reads as "all": it is the most common tmux
+    // prefix after `C-b` and never reaches an application that runs under one.
+    // A default nobody can press is not a default.
+    .{ .chords = &.{ctrl('s')}, .command = .comment_send_one, .modes = Modes.finder_only, .desc = "send" },
+    .{ .chords = &.{ctrl('x')}, .command = .comment_send_all, .modes = Modes.finder_only, .desc = "send all" },
+    .{ .chords = &.{ctrl('d')}, .command = .comment_drop, .modes = Modes.finder_only, .desc = "del" },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
     .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.lists },

@@ -39,6 +39,10 @@ pub const Files = struct {
     /// different row than the one the reader was looking at.
     index: usize = 0,
     layout: frame.HelpLayout = .{},
+    /// What the box says it is listing. Set by whoever opened it.
+    title: []const u8 = " files ",
+    /// Keys this list adds to the shared footer.
+    extra_keys: []const keytext.HelpEntry = &.{},
 
     /// Opens on the file the review is already showing, so the list answers
     /// "where am I" before it answers "where else could I be".
@@ -124,6 +128,8 @@ pub const Files = struct {
         const filter = self.filter.text();
         return .{
             .entries = try entries(files, current, filter, arena),
+            .title = self.title,
+            .extra_keys = self.extra_keys,
             .query = filter,
             .index = self.index,
             .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),

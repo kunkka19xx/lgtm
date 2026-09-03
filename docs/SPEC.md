@@ -40,7 +40,7 @@ A second, smaller but constant problem: the agent needs context that lives **out
 | G3 | Navigate the diff with **vim motions**, no mouse | A vim user learns nothing new |
 | G4 | Find files across three scopes, **instantly**, including the whole machine | < 50 ms project, < 100 ms machine |
 | G5 | Stay small. Survive an 80-column pane | RSS < 40 MB, cold start < 50 ms |
-| G6 | Collect notes while reading and **send them in one batch** | Five notes → one submit, none lost or misaligned |
+| G6 | Collect comments while reading and **send them in one batch** | Five comments → one submit, none lost or misaligned |
 
 ---
 
@@ -74,7 +74,7 @@ Deliberately out of scope for v1. Written down so scope creep has something to b
 │ ●48       return Err(Expired);       │            press Enter   │
 │ +49   }                              │                          │
 └──────────────────────────────────────┴──────────────────────────┘
-   ● = a review note is anchored here
+   ● = a review comment is anchored here
 ```
 
 ---
@@ -86,11 +86,11 @@ Deliberately out of scope for v1. Written down so scope creep has something to b
 - Source: `git diff` against HEAD (staged + unstaged). Agent-agnostic by construction.
 - **Change detection:** v0.1 polls every 500 ms; v0.2 replaces it with native filesystem events. Either way, **debounce 200 ms before re-diffing** - agents write in bursts and often leave a file half-written for a few milliseconds. Without debounce you render torn states and the screen flickers.
 - Only re-diff files that changed. Never re-diff the whole repo.
-- Hunk headers show the **enclosing function name** (from the lexer's brace-depth scan, not git's regex heuristic) plus a **change id** (`#3`) for referring to it in conversation. See §6.5 for how ids stay stable.
-- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `<Space>f` - an overlay, not a pane, so it costs rows only while it is open (both shipped). Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` remain supported (options 1a and 1b). `Tab` toggles a full-screen diff.
-- Files with more than 5,000 changed lines render a summary; the diff loads lazily on open.
+- Hunk headers show the **enclosing function name** plus a **change id** (`#3`) for referring to it in conversation. See §6.5 for how ids stay stable. The name is still git's own guess, the text after the second `@@` - replacing it with the lexer's brace-depth scan is **not built**, and is worth doing only once the guess is visibly wrong often enough to notice.
+- Layout: **no persistent file list.** One status row, then the diff to the bottom of the pane; files are reached with `]f` and the full list on `<Space>f` - an overlay, not a pane, so it costs rows only while it is open (both shipped). Changed after the mockups (`lgtm TUI Mockups.dc.html`, option 2a): a list costs about five of twenty-six rows permanently, and navigation should not hold territory while you read. `file_list = "top" | "left"` (options 1a and 1b) were left as future config and **are not read today** - the overlay made them a preference nobody asked for. `Tab` is zen mode: it hides the chrome and gives the diff the whole pane.
+- Files with more than 5,000 changed lines render a summary row instead of a body. `core/diff.zig` keeps their bytes and `materialise` parses one on demand - **but nothing in `ui/` calls it yet**, so today the summary is where a large file stops. Deferring is not discarding; finishing it is wiring, not design.
 
-**Unified vs side-by-side - responsive**
+**Unified vs side-by-side - responsive. Not built; v0.3.** The block below is the shape it should take, not a key the config reads today.
 
 ```toml
 [diff]
@@ -117,19 +117,26 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; matches light up as the query is typed; `N` runs it backwards |
 | `<Space>f` | the changed files; `Enter` goes to one |
-| `<Space>d` | every file in the project; `Enter` opens it. A file with a diff opens in the review; one without opens **whole**, every line context, outside the review - readable, notable, and referenceable, which is what a file browser is for. `]f` or `<Space>f` returns to the review |
+| `<Space>F` | every file in the project; `Enter` opens it. A file with a diff opens in the review; one without opens **whole**, every line context, outside the review - readable, notable, and referenceable, which is what a file browser is for. `]f` or `<Space>f` returns to the review |
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
 | `zi` | show the files `[review] ignore` hides, and hide them again |
 | `<Space>c` | write a comment on this line |
 | `<Space>vc` | open the nearest comment to read or edit |
+| `<Space>lc` | list every comment in the review; the filter reaches the file, the line **and** the text, so typing part of a remark finds it. `<C-s>` sends the highlighted one, `<C-x>` sends every open one as the review file (not `<C-a>`: it is the most common tmux prefix after `C-b`, so it never reaches an application running under one), `<C-d>` deletes it. `Enter` goes to it - to its row in the diff when the line is still drawn, and
+**to the file itself when it is not**. A diff draws hunks, not files, so a line
+someone commented on stops being drawn as soon as the change around it is
+reverted or re-shaped; the comment is still perfectly good and "nothing
+happened" is the one answer that tells the reader nothing. A comment that is
+`[sent]` or `[stale]` says so, because neither has a dot in the gutter and a list showing four when two are visible has to explain itself |
+| `<Space>sc` | send this one comment to the agent on its own, through the compose box. Works on a comment that has already been sent: asking twice is sometimes the point, and refusing would make the tool the judge of that |
 | `<Space>dc` | delete the comment here - the one on this line, or the one whose row the cursor is on |
 
-`[ui] notes` chooses how a note shows. `marker`, the default, is the gutter dot
+`[ui] comments` chooses how a comment shows. `marker`, the default, is the gutter dot
 alone: a diff is dense already, and prose spliced between two lines of code
 puts sentences where the reader is scanning structure. `<Space>vc` is one
-keystroke away and opens the note in a box big enough to edit it in. `inline`
+keystroke away and opens the comment in a box big enough to edit it in. `inline`
 draws the text under its line for readers who would rather have it in front of
-them; inline notes are rows like any other, so they scroll, wrap, and the
+them; inline comments are rows like any other, so they scroll, wrap, and the
 motions step past them the way they step past a hunk header.
 
 **Every comment key is behind the leader,** because bare `c`, `C` and `dc` are
@@ -144,21 +151,31 @@ in the lexer and the theme; the code keeps them apart by suffix -
 `theme.comment` is the syntax colour, `theme.comment_open` is the review
 marker - and `.lgtm/notes.jsonl` is still read once and rewritten as
 `comments.jsonl`, so renaming the idea does not lose anyone's remarks.
-| `]c` `[c` `<Space>nc` `<Space>pc` | next and previous comment, across the whole review; **wraps** at either end, the way `]h` and `]f` do |
+| `]c` `[c` `<Space>nc` `<Space>pc` | next and previous comment; **wraps** at either end, the way `]h` and `]f` do. It walks *every* comment, not only the ones on files the review still contains - a comment outlives the change it was written against, and a walk that could not reach those was a walk that hid them. The changed files come first, in review order, then everything else by path |
 | `<Space>nc` `<Space>pc` | the leader spellings of those, as `<Space>nh` is of `]h` |
-| `<Space>vc` | open the nearest note to read or edit - the one under the cursor if there is one, otherwise the closest in this file |
-| `<C-s>` | write `.lgtm/review-N.md` and send one line naming it |
+| `<Space>vc` | open the nearest comment to read or edit - the one under the cursor if there is one, otherwise the closest in this file |
+| `<C-s>` | every open comment as one file: write `.lgtm/review-N.md` and send one line naming it |
 
-Notes live in `.lgtm/notes.jsonl` and outlive the process, which is the whole
+`<C-s>` works from inside the comment box too, where it saves *and* sends that
+one comment: a remark that cannot wait should not have to be typed, saved,
+found again and sent. It counts as sent, so it drops out of the next
+`review-N.md` rather than asking twice, and editing it reopens it.
+
+Two ways out, and they are for different moments. `<C-s>` is the batch the tool
+is built around - a dozen remarks is a dozen interruptions, or it is one file.
+`<Space>sc` is for the remark that cannot wait for the batch: one line, the
+reference and the text, into the box where it can be edited before it goes.
+
+Comments live in `.lgtm/comments.jsonl` and outlive the process, which is the whole
 point of `.lgtm/` (ARCHITECTURE.md 1). Two mechanisms keep them on the right
 line, because they answer different questions. **Within a session**, every
 re-diff carries them through a line map (PERFORMANCE.md 3.1) - both versions of
 the file exist at that moment, so the answer is a lookup. **Across a restart**
 there is no previous version to diff against: the file may have been rewritten
-while lgtm was not running. Each note therefore stores the text of the line it
+while lgtm was not running. Each comment therefore stores the text of the line it
 was written against, and the first diff of a session finds that line again -
-the nearest occurrence, so a line that appears twice does not drag the note to
-the top of the file. A line that is nowhere leaves the note stale rather than
+the nearest occurrence, so a line that appears twice does not drag the comment to
+the top of the file. A line that is nowhere leaves the comment stale rather than
 somewhere plausible and wrong.
 | `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
@@ -199,7 +216,7 @@ Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing 
 With the cursor on a diff line:
 
 - `Enter` → open the compose box on `#3 src/auth.rs:47`; Enter again sends it
-- in a file with no hunks - one opened with `<Space>d` and read rather than reviewed - the reference is `src/auth.rs:47` with no `#id`. The id is a claim that the hunk changed, and inventing one for a file that did not change would say something untrue; the line is real either way
+- in a file with no hunks - one opened with `<Space>F` and read rather than reviewed - the reference is `src/auth.rs:47` with no `#id`. The id is a claim that the hunk changed, and inventing one for a file that did not change would say something untrue; the line is real either way
 - **the box is modal.** `<Esc>` leaves insert for normal; a second `<Esc>` leaves the box. Normal mode has the motions the review has - `h l w b e W B E 0 ^ $ f t F T`, plus `j k` over the lines the box holds - and `i a I A o O x D C dd cc d{motion} c{motion} u`. It exists because the terminal made the alternative worse: `Shift-Enter` cannot be told from `Enter` without the kitty protocol *and* a tmux with `extended-keys on`, while `o` needs a terminal that can send `o`. Modality is how vim solved this in 1976 and the problem has not changed
 - in the box: `@` mention any file in the project - changed ones first, then everything else git tracks or does not ignore, capped at 50,000 (PERFORMANCE.md 9b) - `Ctrl-i` insert a preset at the caret, `Ctrl-j` line break, `Ctrl-a/e/u/w` readline editing, `<Esc>` abandon
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
@@ -227,11 +244,11 @@ should still compile.
 
 | Backend | Detect | Command | Notes |
 |---|---|---|---|
-| tmux | `$TMUX` | `tmux send-keys -t <pane_id>` | Cleanest. Build this first. |
-| WezTerm | `$WEZTERM_PANE` | `wezterm cli send-text --pane-id N` | Equivalent to tmux |
-| kitty | `$KITTY_WINDOW_ID` | `kitty @ send-text --match id:N` | Needs `allow_remote_control`; show setup hint when missing |
-| Zellij | `$ZELLIJ` | `zellij action write-chars` | **Degraded** - see below |
-| OSC 52 | always | escape sequence | Universal fallback |
+| tmux | `$TMUX` | `tmux send-keys -t <pane_id>` | **Built.** Cleanest. Also carries the clipboard: `load-buffer -w -`, because tmux's default `set-clipboard external` swallows an application's OSC 52 |
+| WezTerm | `$WEZTERM_PANE` | `wezterm cli send-text --pane-id N` | v0.2. Equivalent to tmux |
+| kitty | `$KITTY_WINDOW_ID` | `kitty @ send-text --match id:N` | v0.2. Needs `allow_remote_control`; show setup hint when missing |
+| Zellij | `$ZELLIJ` | `zellij action write-chars` | v0.3, **degraded** - see below |
+| OSC 52 | always | escape sequence | **Built.** Universal fallback |
 
 **Zellij is the broken one.** `write-chars` only writes to the focused pane; it cannot address a specific one. Doing it properly means focus → write → refocus, which makes the screen jump. Decision: default to OSC 52 under Zellij, with `bridge.zellij_focus_hack = true` for anyone who wants it. Document the limitation instead of papering over it.
 
@@ -243,34 +260,38 @@ should still compile.
 
 ### 6.4 File search - three scopes
 
-`f` opens the fuzzy finder. `Tab` cycles scope:
+| Scope | Key | Contents | Purpose |
+|---|---|---|---|
+| **Changed** | `<Space>f` | files in the current diff | fast jumping while reviewing |
+| **Project** | `<Space>F` | every file the repo tracks or could (`git ls-files --cached --others --exclude-standard`) | add in-repo context |
+| **Machine** | v0.2 | the `look` index | **pull context from outside the repo** - schemas, logs, configs, other repos |
 
-| Scope | Contents | Purpose |
-|---|---|---|
-| **Changed** | files in the current diff | fast jumping while reviewing |
-| **Project** | every file in the repo (respects `.gitignore`) | add in-repo context |
-| **Machine** | the `look` index | **pull context from outside the repo** - schemas, logs, configs, other repos |
+Two of the three are built, each on its own key rather than behind a `Tab` that
+cycles: the scopes turned out to be different questions, not one question with a
+setting. "Where in this review" and "where in this repo" get asked at different
+moments, and a cycle makes the second one cost a keystroke and a glance at which
+mode you are in.
 
-Machine scope is the one thing nothing else has. Claude Code, Zed, every agent CLI is confined to the working directory. That is the differentiator worth marketing - not "fast fuzzy finder."
+Machine scope is the one thing nothing else has. Claude Code, Zed, every agent
+CLI is confined to the working directory. That is the differentiator worth
+marketing - not "fast fuzzy finder." It is also the one that costs a
+dependency, which is why it waits for v0.2.
 
-Select a file → `Enter` sends its path to the agent; `o` opens it in `lgtm`.
+`Enter` opens the file: in the review if it has a diff, whole and outside the
+review if it does not. `@` in the compose box runs the same overlay to insert a
+path into what you are writing.
 
-### 6.5 Review notes - core feature #2
+### 6.5 Review comments - core feature #2
 
 Collect remarks while reading, submit once. Instead of interrupting the agent five times, you review the whole change like a PR and send it all at once.
 
-**Keys**
+The keys are in 6.2 with the rest of the keymap, not repeated here: a second
+table is a second thing to keep true, and this one had gone stale - it still
+named `c`, `C` and `dc`, which were given to the motions when it became clear
+the tool would edit one day. What follows is the part that is not keys.
 
-| Key | Action |
-|---|---|
-| `c` | add a note at the cursor line or selection (inline single-line input) |
-| `Ctrl-e` | open `$EDITOR` for a longer note |
-| `]c` / `[c` | next / previous note |
-| `C` | open the notes panel for this session |
-| `dc` | delete the note at the cursor |
-| `Ctrl-s` | **submit all notes** to the agent |
-
-Notes show as `●` in the gutter and fold inline beneath the anchored line.
+Comments show as `●` in the gutter; `[ui] comments = "inline"` folds the body
+beneath the anchored line as well.
 
 **Change ids - the id is a label, the hash is what keeps it still**
 
@@ -286,7 +307,7 @@ So ids are **backed by a content hash**. On each re-diff, a new hunk matching an
 
 In short: **the id is for talking, the hash is what stops the id from lying.**
 
-**Storage** - `.lgtm/notes.jsonl` in the repo (add to `.gitignore`). One note per line:
+**Storage** - `.lgtm/comments.jsonl` in the repo (lgtm ignores `.lgtm/` itself, so nothing need be added to `.gitignore`). One comment per line:
 
 ```json
 {
@@ -306,13 +327,13 @@ In short: **the id is for talking, the hash is what stops the id from lying.**
 
 1. Search for `anchor_hash` within ±50 lines of the old position → on a match, update `range`.
 2. No match → try `hunk_hash` and anchor to the hunk instead of the line.
-3. Still nothing → `state = "stale"`, **surfaced separately in the notes panel, never silently dropped.** The user decides whether to keep or delete it.
+3. Still nothing → `state = "stale"`, **listed as stale by `<Space>lc` and marked stale in the review file, never silently dropped.** The user decides whether to keep or delete it.
 
 This is how GitHub handles outdated review comments. Do not reinvent it.
 
 **Submitting - write a file, send a path**
 
-⚠️ **Never send note bodies through `send-keys`.** A newline in `send-keys` is interpreted as pressing Enter, so the agent submits mid-message and the remainder lands as garbage. This is a guaranteed bug, not a hypothetical one.
+⚠️ **Never send comment bodies through `send-keys`.** A newline in `send-keys` is interpreted as pressing Enter, so the agent submits mid-message and the remainder lands as garbage. This is a guaranteed bug, not a hypothetical one.
 
 `Ctrl-s` instead:
 
@@ -331,12 +352,12 @@ Use `<=` - a token expiring on this exact second still passes.
 Missing a case for an expired token.
 ````
 
-2. Sends exactly **one line** through the bridge: `Please address the review notes in .lgtm/review-3.md `
-3. Marks those notes `state = "sent"` and keeps them as history.
+2. Sends exactly **one line** through the bridge: `review ready: .lgtm/review-3.md (4 comments) ` - the one outgoing string that is still a format literal rather than a `bridge/template.zig` entry
+3. Marks those comments `state = "sent"` and keeps them as history.
 
 Side benefits: no length limit, and the review history lives on disk.
 
-Snippets (1–3 lines by default, `notes.snippet_lines`) let the agent locate the code even if line numbers have moved.
+**Not built:** snippets - a line or three of the code around each comment, so the agent can locate it even if the line numbers have moved. The review file carries the path, the line and the remark today.
 
 **Non-goal:** not a team review system. No sync, no threading, no resolve/approve. A single-user scratchpad for one session.
 
@@ -344,11 +365,11 @@ Snippets (1–3 lines by default, `notes.snippet_lines`) let the agent locate th
 
 A hand-written lexer, not a parser. `lgtm` needs token colouring and the enclosing function name for hunk headers - neither requires a parse tree, and a lexer handles diff fragments (unbalanced braces, truncated functions) more gracefully than a parser, which falls into error recovery on exactly that input.
 
-One generic lexer engine plus a small `LangDef` per language. v1 ships **Zig, Rust, Go, Python**; everything else renders as plain text without crashing. The highlighter is a tagged union, so tree-sitter can be added later for context-sensitive languages (JS/TS especially) without touching the call sites. See ARCHITECTURE.md §5.
+One generic lexer engine plus a small `LangDef` per language. The plan was **Zig, Rust, Go, Python**; what shipped is those four plus JavaScript, TypeScript, Swift, HTML and CSS, because once the engine existed a language was a table rather than a lexer. Everything else renders as plain text without crashing. The highlighter is a tagged union, so tree-sitter can be added later for context-sensitive languages (JS/TS especially) without touching the call sites. See ARCHITECTURE.md §5.
 
 Consequence worth stating: **v0.1 has no C dependency for highlighting**, links nothing, and adds ~50 KB to the binary.
 
-Themes are shared with `look` (Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa) so the two tools look like siblings.
+Themes are shared with `look` (Catppuccin, Tokyo Night, Gruvbox, Dracula, Rosé Pine, Kanagawa, plus `terminal`, which paints nothing and lets the emulator's own sixteen colours through) so the two tools look like siblings.
 
 ---
 
@@ -362,12 +383,14 @@ Revisit as a plugin once the review experience is solid.
 
 ## 8. Roadmap
 
-**v0.1 - useful to me**
-Unified diff, 500 ms polling, vim motions, `Enter` sends a reference. Lexer highlighting for Zig/Rust/Go/Python. Bridge: tmux + OSC 52. No search, no notes. Zero C dependencies.
+**v0.1 - useful to me** (shipped)
+Unified diff, 500 ms polling, vim motions, `Enter` opens the compose box and sends a reference. Lexer highlighting for nine languages. Bridge: tmux + OSC 52. Zero C dependencies.
 *Success test: you use it for a week without falling back to `git diff`.*
 
+Three things arrived earlier than this plan expected, because each turned out to be cheap once the thing under it existed: **review comments** (`<Space>c` / `Ctrl-s`, re-anchoring, file-based submit) came with `core/anchor.zig` already written and tested; **themes, config and `[keys]` remapping** came with the command-name indirection that was mandatory from day one anyway; the **compose box** came out of `ui/motion.zig`, which the review already needed. Read the milestones below as what is *not yet built*, not as a record of what was.
+
 **v0.2 - useful to other people**
-Review notes (`c` / `Ctrl-s`, re-anchoring, file-based submit). Native filesystem watching. Three-scope search (adds the SQLite dependency). Themes, config, pane picker. Bridge: WezTerm + kitty.
+Native filesystem watching. Three-scope search (adds the SQLite dependency). Pane picker. Bridge: WezTerm + kitty.
 
 **v0.3 - finished**
 Side-by-side with responsive layout. Stage/unstage hunks (`s` / `u`), revert a single agent hunk, session history. Zellij (degraded). More lexers, or tree-sitter if language demand justifies linking it.
@@ -398,7 +421,7 @@ Side-by-side with responsive layout. Stage/unstage hunks (`s` / `u`), revert a s
 1. Support jujutsu (jj) alongside git, or defer?
 2. ~~Brand-new files created by the agent - show full contents or a summary?~~ **Answered: full contents, always, whatever the size.** A new file is entirely new code; summarising it removes the only thing there is to review. More generally, summarising is a rendering decision and never a discard: an oversized file defers its render but keeps its content reachable (SPEC 6.1 "loads lazily on open").
 3. Multi-repo / worktrees: skip in v1?
-4. Should "hunks I have already reviewed" persist across runs? Useful in long sessions. (Probably folds into the note anchoring machinery - it is the same problem.)
-5. After submission, if a `sent` note's anchor changes, should it be auto-marked `addressed`? Wrong guesses mislead; right guesses make second-pass review much faster.
-6. Should notes have categories (bug / question / nit), or stay untyped? Leaning untyped for v1.
+4. Should "hunks I have already reviewed" persist across runs? Useful in long sessions. (Probably folds into the comment anchoring machinery - it is the same problem.)
+5. After submission, if a `sent` comment's anchor changes, should it be auto-marked `addressed`? Wrong guesses mislead; right guesses make second-pass review much faster.
+6. Should comments have categories (bug / question / nit), or stay untyped? Leaning untyped for v1.
 7. Repo name vs binary name - the binary is `lgtm`; if search collisions with Grafana's LGTM stack prove annoying, the repo can be `lgtm-cli` without changing the command.

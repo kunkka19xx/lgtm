@@ -506,7 +506,7 @@ Run as a week of use rather than a checklist, logged in `DOGFOOD.md`: the
 watchlist there is the set of questions the plan cannot answer from the inside,
 and what it records is what decides v0.2.
 
-## v0.2 outline (useful to other people)
+## v0.2 - not built. The release that makes it useful to other people
 
 Order within v0.2 follows the same logic: core before UI. Two documents were
 added after the original outline and are folded in here - `SNAPSHOTS.md` and
@@ -519,16 +519,16 @@ does not exist yet, and nothing can be dogfooded until the TUI does.
    - **`.gitignore` is honoured by the path list, not by `update-index`.** `git update-index --add` is plumbing and will happily add `node_modules`. What makes hard boundary 5 true is that paths come from `git status --porcelain --untracked-files=all`, which is already ignore-clean. Any future caller sourcing paths differently breaks a safety property silently
    - Also: prime `.lgtm/index` with `read-tree HEAD` rather than a full `add -A`. `write-tree` against an empty index emits a tree containing only the changed paths
 3. Native filesystem watching behind the same `watch.zig` interface
-4. Three-scope finder: SQLite reader for the `look` index (first C dependency, `schema_version` check, degrade with a message), fzf-style scoring, incremental narrowing (T0), bitmask prefilter, parallel top-k
+4. Three-scope finder. **Two of the three scopes are done**, ahead of the phase order: changed files (`<Space>f`) and the whole project via `git ls-files` (`<Space>F`, and `@` inside the compose box), sharing one widget and one fuzzy filter, capped at 50,000 paths (PERFORMANCE.md 9b). What is left is the machine scope: a SQLite reader for the `look` index (first C dependency, `schema_version` check, degrade with a message), bitmask prefilter, parallel top-k
 5. Bridges: WezTerm, kitty (with `allow_remote_control` hint); pane picker UI + `Ctrl-t`
 6. **Notifications, layers 1-2** (NOTIFICATIONS.md §2-4): the bell, the tmux user option, the `lgtm notify` subcommand, and quiescence detection as a second longer timer on the watcher's existing clock. Ordered after item 5 because `notify/` reads backend detection and pane addressing from `bridge/` rather than duplicating it, and `bridge/` does not exist until phase 6. One correction the doc needs: the `lgtm notify` state file **cannot** be picked up "through the existing watcher", because that watcher polls `git status` and `.lgtm/` is now ignored. It needs its own `fs.statFile` poll of one known path
-7. Config surface: keymap remapping with presets (vim/helix/emacs/plain), user `[templates]`, per-repo `.lgtm/config.toml` merged over the global file
+7. Config surface. **Partly done:** `[keys]` remaps any command by the spelling the `?` popup prints, `[presets]` fills the compose box's `Ctrl-i` list, `[review] ignore` keeps generated files out of the review, `[ui] comments` and `[ui] compose` place them. What is left: the keymap *presets* (vim/helix/emacs/plain) and user `[templates]`
 8. Turn checkpoints (`m` / `a`, delta-since-mark view): same machinery as anchoring, and durable once item 2 exists - the mark is a ref name in `.lgtm/state.json` rather than an in-memory marker, and it is the same state the pending badge reads, not a second copy of it (SNAPSHOTS.md §5.1, NOTIFICATIONS.md §4 rule 3)
 9. Weakened-test detection banner (needs the lexer)
 
-## v0.3 outline (finished)
+## v0.3 - not built. The release that would call it finished
 
-- Side-by-side layout with responsive fallback below `split_min_width`; re-layout preserves cursor and scroll
+- Side-by-side layout with responsive fallback below `split_min_width`; re-layout preserves cursor and scroll. **Nothing of this exists**: the view is unified only, and `[diff] layout` in SPEC.md 3 is a design sketch rather than a key the config reads
 - Stage/unstage hunks (`s`/`u`) and revert-a-hunk, both as `TextEdit` through `Buffer.apply()`
 - Risk-ordered hunks with configurable rules; session history; Zellij (degraded, OSC 52 default)
 - **`--base <ref>`: the diff source becomes a parameter.** Everything above `core/git.zig` already ignores where a diff came from, so `base...HEAD` reuses the hunks, change ids, syntax, search, file list and notes unchanged; what makes this a working-tree tool today is one argv. Two things are not free. `core/source.zig` reads the HEAD side from `cat-file --batch` and the other side off disk, and `attach()` verifies they agree - between two commits both sides are blobs, so the worktree read becomes a second `cat-file`. And the watcher wants turning off, because nothing is moving and `anchor.zig` has nothing to carry notes across. Worth it for reviewing a branch before pushing it, which is the same loop the tool already serves

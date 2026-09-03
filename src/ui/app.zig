@@ -194,11 +194,18 @@ pub const App = struct {
         /// makes sense - there is nothing to show for a file with no diff, so
         /// picking one starts a message about it instead of a blank screen.
         browse,
+        /// `<Space>lc`: every comment in the review, and Enter goes to one.
+        comments,
     } = .jump,
     /// The list the overlay is showing: the changed files for a jump, every
     /// file git knows about for a mention. Rebuilt when the overlay opens and
     /// owned here, because `selected` is asked outside any frame.
     pick_list: std.ArrayList(render.FileEntry) = .empty,
+    /// Backing store for the labels the comment overlay builds. Its own arena
+    /// because the list outlives a frame: it is read by the filter on every
+    /// keystroke, and the frame arena is reset between them - which made every
+    /// label a slice of freed memory and every filter a miss.
+    pick_arena: std.heap.ArenaAllocator = undefined,
     /// Every path in the project, from `git ls-files`, loaded the first time
     /// `@` asks and kept for the session. Not loaded at startup: most sessions
     /// never mention a file, and cold start has a 50 ms budget.
@@ -254,6 +261,7 @@ pub const App = struct {
             .review = .init(gpa, io),
             .comments = .init(gpa),
             .preview_arena = .init(gpa),
+            .pick_arena = .init(gpa),
             .frame_arena = .init(gpa),
         };
     }
@@ -261,6 +269,7 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
+        self.pick_arena.deinit();
         self.preview_arena.deinit();
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
@@ -291,7 +300,8 @@ pub const App = struct {
         const arena = self.preview_arena.allocator();
 
         const bytes = fs_mod.readFile(self.io, arena, path, 8 << 20) catch {
-            self.notice.set("cannot read {s}", .{path});
+            // No notice here: every caller knows more about why it wanted the
+            // file than "cannot read" does, and says something better.
             return;
         };
 
@@ -566,7 +576,10 @@ pub const App = struct {
         var what: []const u8 = "compose";
         if (self.compose_is_comment) {
             what = if (self.commentLine()) |at|
-                std.fmt.allocPrint(arena, "comment {s}:{d}", .{ at.path, at.line }) catch "comment"
+                (if (at.deleted)
+                    std.fmt.allocPrint(arena, "comment {s}:{d} - removed code", .{ at.path, at.line })
+                else
+                    std.fmt.allocPrint(arena, "comment {s}:{d}", .{ at.path, at.line })) catch "comment"
             else
                 "comment";
         }
@@ -579,6 +592,7 @@ pub const App = struct {
             .selected = self.preset_index,
             .to_agent = self.compose_to == .send,
             .at = self.compose_at,
+            .saves = self.compose_is_comment,
             .normal = self.compose.mode == .normal,
         };
     }
@@ -692,6 +706,30 @@ pub const App = struct {
             .send_ref => try self.openCompose(.send, .ref),
             .comment_add => try self.commentAdd(),
             .comment_view => try self.commentView(body),
+            .comment_list => {
+                if (self.mode == .finder) return self.closeFiles();
+                if (self.comments.len() == 0) {
+                    self.notice.set("no comments yet - `<Space>c` writes one", .{});
+                    return;
+                }
+                self.files_purpose = .comments;
+                self.buildPickList();
+                self.file_list.title = " comments ";
+                // Left empty: these are bindings now, so `keytext.helpEntries`
+                // puts them in the footer under the user's own spelling. A
+                // hardcoded label would advertise a key a remap had moved.
+                self.file_list.extra_keys = &.{};
+                self.file_list.open(0);
+                self.mode = .finder;
+            },
+            .comment_send => try self.commentSend(),
+            .comment_send_one => try self.listSendOne(),
+            .comment_send_all => {
+                self.closeFiles();
+                try self.submitReview();
+                self.rebuildRows(.line) catch {};
+            },
+            .comment_drop => self.listDrop(),
             .comment_delete => self.commentDelete(),
             .next_comment => self.commentStep(1, body),
             .prev_comment => self.commentStep(-1, body),
@@ -742,6 +780,8 @@ pub const App = struct {
                 if (self.mode == .finder) return self.closeFiles();
                 self.files_purpose = .browse;
                 self.buildPickList();
+                self.file_list.title = " every file ";
+                self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
                 self.mode = .finder;
             },
@@ -873,6 +913,34 @@ pub const App = struct {
                 .status = f.status,
             }) catch return;
         }
+        if (self.files_purpose == .comments) {
+            // One row per comment, in store order, so the index the overlay
+            // hands back is the comment it names. The label carries the file,
+            // the line and the text, which means the filter reaches all three:
+            // typing part of a remark finds it.
+            self.pick_list.clearRetainingCapacity();
+            _ = self.pick_arena.reset(.retain_capacity);
+            const arena = self.pick_arena.allocator();
+            for (self.comments.items()) |n| {
+                var one: [256]u8 = undefined;
+                const body = compose_mod.flatten(&one, n.body);
+                // A stale or already-sent comment has no dot on screen - one
+                // points at code that moved, the other has been handed over -
+                // so a list showing four when two are visible has to say why.
+                const label = switch (n.state) {
+                    .open => std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{ n.path, n.line, body }),
+                    .sent => std.fmt.allocPrint(arena, "{s}:{d}  [sent] {s}", .{ n.path, n.line, body }),
+                    .stale => std.fmt.allocPrint(arena, "{s}:{d}  [stale] {s}", .{ n.path, n.line, body }),
+                } catch continue;
+                self.pick_list.append(self.gpa, .{
+                    .path = label,
+                    .added = 0,
+                    .removed = 0,
+                    .in_review = false,
+                }) catch return;
+            }
+            return;
+        }
         if (self.files_purpose == .jump) return;
 
         self.loadProject();
@@ -907,6 +975,8 @@ pub const App = struct {
         } else {
             self.files_purpose = .jump;
             self.buildPickList();
+            self.file_list.title = " changed files ";
+            self.file_list.extra_keys = &.{};
             self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
             self.mode = .finder;
         }
@@ -932,6 +1002,10 @@ pub const App = struct {
     /// overlay. `Enter` jumps to the selected file, which is the whole point
     /// of the list and the one thing it does that `?` does not.
     fn feedFiles(self: *App, key: event.Key, body: u16) !void {
+        // `<C-d>` clears the highlighted comment out of the list. It has to be
+        // a chord: every printable key in this overlay is a filter character,
+        // and a comment on a file that no longer exists cannot be reached to
+        // be deleted any other way.
         switch (self.km.feed(key, .finder)) {
             .command => |cmd| return self.run(cmd, body),
             .pending, .none => {},
@@ -941,6 +1015,28 @@ pub const App = struct {
             .close => self.closeFiles(),
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
+                if (self.files_purpose == .comments) {
+                    const i = picked orelse {
+                        self.closeFiles();
+                        return;
+                    };
+                    const list = self.comments.items();
+                    var want_path: [4096]u8 = undefined;
+                    var want_line: u32 = 0;
+                    var have = false;
+                    if (i < list.len) {
+                        const n = list[i];
+                        @memcpy(want_path[0..n.path.len], n.path);
+                        want_line = n.line;
+                        have = true;
+                        self.closeFiles();
+                        try self.showComment(want_path[0..n.path.len], want_line, body);
+                        return;
+                    }
+                    self.closeFiles();
+                    self.clampScroll(body);
+                    return;
+                }
                 if (self.files_purpose == .browse) {
                     const i = picked orelse {
                         self.closeFiles();
@@ -1413,19 +1509,58 @@ pub const App = struct {
     /// The line the cursor points at, as the note store counts them: the new
     /// file's line, which is what survives a re-diff and what a reference
     /// names. Null on a row that is chrome, or a line that exists only in HEAD.
-    fn commentLine(self: *App) ?struct { path: []const u8, line: u32 } {
+    const Spot2 = struct { path: []const u8, line: u32, deleted: bool = false };
+
+    /// The text of a new-file line, for the anchor a comment carries across a
+    /// restart. It has to be the line the comment *attached* to, not the one
+    /// the cursor was on: a deleted line's text is not in the new file, so an
+    /// anchor taken from it would find nothing and go stale immediately.
+    fn textOfNewLine(self: *App, line: u32) []const u8 {
+        const f = self.current() orelse return "";
+        var i: u32 = 0;
+        while (i < f.lines.len()) : (i += 1) {
+            if (f.lines.new_no[i] == line) return f.lines.text[i];
+        }
+        return "";
+    }
+
+    /// Where a comment written here would attach.
+    ///
+    /// A deleted line has no line in the new file, and the store anchors to
+    /// new-file lines - so a remark about removed code used to be refused
+    /// outright. It attaches to the enclosing hunk instead, on the first line
+    /// of it that still exists, and is marked as being about the removal so
+    /// the review file and the box say which. Refusing was the honest answer
+    /// to the wrong question: "why did you take this out" is a thing a
+    /// reviewer says constantly.
+    fn commentLine(self: *App) ?Spot2 {
         const f = self.current() orelse return null;
         const li = self.rows.lineAt(self.cursor) orelse return null;
         if (li >= f.lines.len()) return null;
         const no = f.lines.new_no[li];
-        if (no == 0) return null;
-        return .{ .path = f.path(), .line = no };
+        if (no != 0) return .{ .path = f.path(), .line = no };
+
+        // On a deletion: the first surviving line of the hunk it sits in.
+        const hi = self.rows.hunkAt(self.cursor) orelse return null;
+        if (hi >= f.hunks.len) return null;
+        const h = f.hunks[hi];
+        var i = h.lo;
+        while (i < h.hi) : (i += 1) {
+            if (i < f.lines.len() and f.lines.new_no[i] != 0) {
+                return .{ .path = f.path(), .line = f.lines.new_no[i], .deleted = true };
+            }
+        }
+        // A hunk that is nothing but deletions has no surviving line at all.
+        // `new_start` is where the removed code used to begin, which is the
+        // only place left to point at.
+        if (h.new_start == 0) return null;
+        return .{ .path = f.path(), .line = h.new_start, .deleted = true };
     }
 
     /// `c`: the compose box, pointed at a line instead of at the agent.
     fn commentAdd(self: *App) Allocator.Error!void {
         const at = self.commentLine() orelse {
-            self.notice.set("no line here to comment on", .{});
+            self.notice.set("nothing here to comment on", .{});
             return;
         };
         _ = at;
@@ -1438,7 +1573,7 @@ pub const App = struct {
         self.mode = .note_input;
     }
 
-    /// `C`: the same box, seeded with what the note already says.
+    /// The same box, seeded with what the comment already says.
     fn commentEdit(self: *App) Allocator.Error!void {
         const n = self.commentUnderCursor() orelse {
             self.notice.set("no comment here", .{});
@@ -1446,6 +1581,7 @@ pub const App = struct {
         };
         self.compose_is_comment = true;
         self.compose_comment = n.id;
+        self.compose_to = .copy;
         self.compose.start(n.body);
         self.preset_index = null;
         self.mode = .note_input;
@@ -1501,9 +1637,76 @@ pub const App = struct {
                 self.notice.set("no comments in this file - `]c` finds the next one", .{});
             return;
         };
-        self.gotoNewLine(line);
+        _ = self.gotoNewLine(line);
         self.clampScroll(body);
         try self.commentEdit();
+    }
+
+    /// The comment the overlay is highlighting, or null when it is not the
+    /// comment overlay that is open.
+    fn listSelected(self: *App) ?*comments_mod.Comment {
+        if (self.files_purpose != .comments) return null;
+        const i = self.file_list.selected(self.pick_list.items) orelse return null;
+        const list = self.comments.list.items;
+        return if (i < list.len) &list[i] else null;
+    }
+
+    /// Send the highlighted comment straight from the list, without a detour
+    /// through the box: the list is where a reader decides what still needs
+    /// saying, so it is where saying it should be possible.
+    fn listSendOne(self: *App) !void {
+        const n = self.listSelected() orelse return;
+        var buf: [compose_mod.max_bytes]u8 = undefined;
+        var flat: [compose_mod.max_bytes]u8 = undefined;
+        const one = compose_mod.flatten(&flat, n.body);
+        const line = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one;
+        n.state = .sent;
+        self.comments.dirty = true;
+
+        self.closeFiles();
+        self.outgoing.clearRetainingCapacity();
+        try self.outgoing.appendSlice(self.gpa, line);
+        self.want_send = .send;
+        self.saveComments();
+        self.rebuildRows(.line) catch {};
+    }
+
+    fn listDrop(self: *App) void {
+        const n = self.listSelected() orelse return;
+        self.comments.remove(n.id);
+        self.saveComments();
+        self.buildPickList();
+        self.rebuildRows(.line) catch {};
+        if (self.comments.len() == 0) {
+            self.closeFiles();
+            self.notice.set("comment deleted - none left", .{});
+            return;
+        }
+        self.notice.set("comment deleted", .{});
+    }
+
+    /// `<Space>sc`: this one comment, into the compose box, ready to send.
+    ///
+    /// `<C-s>` is the other direction - every open comment as one file, which
+    /// is the batch the tool is built around. This is for the remark that
+    /// cannot wait for the batch: one line, the reference and the text, into
+    /// the box where it can be edited before it goes.
+    fn commentSend(self: *App) !void {
+        const n = self.commentUnderCursor() orelse {
+            self.notice.set("no comment here", .{});
+            return;
+        };
+        var buf: [compose_mod.max_bytes]u8 = undefined;
+        var flat: [compose_mod.max_bytes]u8 = undefined;
+        const body = compose_mod.flatten(&flat, n.body);
+        const seed = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, body }) catch n.body;
+
+        self.compose_is_comment = false;
+        self.compose_comment = null;
+        self.compose_to = .send;
+        self.compose.start(seed);
+        self.preset_index = null;
+        self.mode = .note_input;
     }
 
     fn commentDelete(self: *App) void {
@@ -1521,17 +1724,70 @@ pub const App = struct {
         return if (a > b) a - b else b - a;
     }
 
-    /// Puts the cursor on the row carrying a given new-file line.
-    fn gotoNewLine(self: *App, line: u32) void {
-        const f = self.current() orelse return;
+    /// Puts the cursor on the row carrying a given new-file line, and says
+    /// whether there was one.
+    ///
+    /// There often is not. The diff draws hunks, not files, so a line the
+    /// reader commented on can stop being drawn when the change around it is
+    /// reverted or re-shaped - the comment is still perfectly valid, and the
+    /// row it used to sit on is gone.
+    fn gotoNewLine(self: *App, line: u32) bool {
+        const f = self.current() orelse return false;
         var row: u32 = 0;
         while (row < self.rows.len()) : (row += 1) {
             const li = self.rows.lineAt(row) orelse continue;
             if (li < f.lines.len() and f.lines.new_no[li] == line) {
                 self.moveTo(row);
-                return;
+                return true;
             }
         }
+        return false;
+    }
+
+    /// Shows a comment wherever it is: on its row in the diff when the line is
+    /// still drawn, and in the file itself when it is not.
+    ///
+    /// Falling back to the whole file rather than reporting failure, because
+    /// the reader picked a comment out of a list and "nothing happened" is the
+    /// one answer that tells them nothing. `<Space>d` already reads a file
+    /// outside the review; this is the same view, opened at a line.
+    fn showComment(self: *App, path: []const u8, line: u32, body: u16) !void {
+        for (self.review.files(), 0..) |f, fi| {
+            if (!std.mem.eql(u8, f.path(), path)) continue;
+            self.clearPreview();
+            if (fi != self.file_index) {
+                self.file_index = @intCast(fi);
+                try self.rebuildRows(.reset);
+            }
+            if (self.gotoNewLine(line)) {
+                self.clampScroll(body);
+                return;
+            }
+            break;
+        }
+        // Not in the review, or in it but no longer drawn: read the file.
+        var buf: [4096]u8 = undefined;
+        const p = std.fmt.bufPrint(&buf, "{s}", .{path}) catch path;
+        try self.openPreview(p);
+        if (self.preview == null) {
+            // The file itself has gone - renamed, deleted, or never on this
+            // branch. That is exactly what stale means, so the comment says so
+            // rather than being lost or silently pointing at nothing. It stays
+            // in the list, where `<C-d>` can clear it out (rule 7: the reader
+            // decides when a remark stops mattering, not the tool).
+            if (self.comments.at(path, line)) |n| {
+                if (n.state != .stale) {
+                    n.state = .stale;
+                    self.comments.dirty = true;
+                    self.saveComments();
+                }
+            }
+            self.notice.set("{s} is gone - comment marked stale, <C-d> in the list deletes it", .{path});
+            return;
+        }
+        _ = self.gotoNewLine(line);
+        self.clampScroll(body);
+        self.notice.set("{s}:{d} - not in the diff, showing the file", .{ path, line });
     }
 
     /// `]c` / `[c`: the next note anywhere in the review, the way `]h` walks
@@ -1542,80 +1798,77 @@ pub const App = struct {
             self.notice.set("no comments yet - `<Space>c` writes one", .{});
             return;
         }
-        const all = self.files();
-        const here = self.commentLine();
 
-        // Sorted by (file index, line), walked from where the cursor is.
-        const Spot = struct { fi: u32, line: u32 };
+        // Every comment, not only the ones on files the review contains. A
+        // comment outlives the change it was written against - the agent
+        // reverts something, the hunk goes, the remark stays - and a walk that
+        // could not reach those was a walk that hid them.
+        const here = self.spotHere();
         var best: ?Spot = null;
         for (self.comments.items()) |n| {
-            var fi: ?u32 = null;
-            for (all, 0..) |f, i| {
-                if (std.mem.eql(u8, f.path(), n.path)) fi = @intCast(i);
-            }
-            const at_fi = fi orelse continue;
-            const cur_fi = self.file_index;
-            const cur_line = if (here) |h| h.line else 0;
-            const after = at_fi > cur_fi or (at_fi == cur_fi and n.line > cur_line);
-            const before = at_fi < cur_fi or (at_fi == cur_fi and n.line < cur_line);
+            const at = self.spotOf(n);
+            const after = lessSpot(here, at);
+            const before_it = lessSpot(at, here);
             if (delta > 0 and !after) continue;
-            if (delta < 0 and !before) continue;
+            if (delta < 0 and !before_it) continue;
             if (best) |b| {
-                const closer = if (delta > 0)
-                    (at_fi < b.fi or (at_fi == b.fi and n.line < b.line))
-                else
-                    (at_fi > b.fi or (at_fi == b.fi and n.line > b.line));
+                const closer = if (delta > 0) lessSpot(at, b) else lessSpot(b, at);
                 if (!closer) continue;
             }
-            best = .{ .fi = at_fi, .line = n.line };
+            best = at;
         }
 
         // Nothing further that way, so come round - a review is a ring, and
-        // `]h` and `]f` already read that way. Stopping dead at the last one
-        // is the dropped keystroke this avoids.
+        // `]h` and `]f` already read that way.
         const target = best orelse blk: {
             var edge: ?Spot = null;
             for (self.comments.items()) |n| {
-                var fi: ?u32 = null;
-                for (all, 0..) |f, i| {
-                    if (std.mem.eql(u8, f.path(), n.path)) fi = @intCast(i);
-                }
-                const at_fi = fi orelse continue;
+                const at = self.spotOf(n);
                 if (edge) |e| {
-                    const further = if (delta > 0)
-                        (at_fi < e.fi or (at_fi == e.fi and n.line < e.line))
-                    else
-                        (at_fi > e.fi or (at_fi == e.fi and n.line > e.line));
+                    const further = if (delta > 0) lessSpot(at, e) else lessSpot(e, at);
                     if (!further) continue;
                 }
-                edge = .{ .fi = at_fi, .line = n.line };
+                edge = at;
             }
-            const e = edge orelse {
-                self.notice.set("no comments in the review", .{});
-                return;
-            };
+            const e = edge orelse return;
             self.notice.set("wrapped to the {s} comment", .{if (delta > 0) "first" else "last"});
             break :blk e;
         };
-        if (target.fi != self.file_index) {
-            self.file_index = target.fi;
-            self.rebuildRows(.reset) catch return;
-        }
-        // The row whose new-file line is the note's. Rows are the laid-out
-        // view of the file, so this is a scan of what is on screen rather than
-        // a lookup - the lists are short and it runs on a keystroke.
-        const f = self.current();
-        if (f) |file| {
-            var row: u32 = 0;
-            while (row < self.rows.len()) : (row += 1) {
-                const li = self.rows.lineAt(row) orelse continue;
-                if (li < file.lines.len() and file.lines.new_no[li] == target.line) {
-                    self.moveTo(row);
-                    break;
-                }
+
+        var path_buf: [4096]u8 = undefined;
+        @memcpy(path_buf[0..target.path.len], target.path);
+        self.showComment(path_buf[0..target.path.len], target.line, body) catch return;
+    }
+
+    /// Where a comment sits in the order `]c` walks: the review's files first,
+    /// in review order, then everything else by path. `line` breaks the tie.
+    const Spot = struct { bucket: u8, fi: u32, path: []const u8, line: u32 };
+
+    fn spotOf(self: *App, n: comments_mod.Comment) Spot {
+        for (self.review.files(), 0..) |f, i| {
+            if (std.mem.eql(u8, f.path(), n.path)) {
+                return .{ .bucket = 0, .fi = @intCast(i), .path = n.path, .line = n.line };
             }
         }
-        self.clampScroll(body);
+        return .{ .bucket = 1, .fi = 0, .path = n.path, .line = n.line };
+    }
+
+    /// Where the cursor is, in the same order, so "next" means next from here.
+    fn spotHere(self: *App) Spot {
+        const f = self.current() orelse return .{ .bucket = 0, .fi = 0, .path = "", .line = 0 };
+        const line = if (self.commentLine()) |at| at.line else 0;
+        if (self.preview != null) return .{ .bucket = 1, .fi = 0, .path = f.path(), .line = line };
+        return .{ .bucket = 0, .fi = self.file_index, .path = f.path(), .line = line };
+    }
+
+    fn lessSpot(a: Spot, b: Spot) bool {
+        if (a.bucket != b.bucket) return a.bucket < b.bucket;
+        if (a.bucket == 0 and a.fi != b.fi) return a.fi < b.fi;
+        if (a.bucket == 1) {
+            const c = std.mem.order(u8, a.path, b.path);
+            if (c != .eq) return c == .lt;
+        }
+        return a.line < b.line;
     }
 
     /// `Ctrl-s`: the review as one file, and one line telling the agent where
@@ -1687,6 +1940,53 @@ pub const App = struct {
     fn feedCompose(self: *App, key: event.Key, body: u16) !void {
         if (self.preset_index) |idx| return self.feedPresets(key, idx);
 
+        // `<C-s>` from inside a comment: save it *and* send it, so a remark
+        // that cannot wait for the batch does not have to be typed, saved,
+        // found again and sent. It is the same key that submits the whole
+        // review from normal mode, which reads as "hand this over" either way.
+        if (key.mods.ctrl and key.codepoint == 's' and self.compose_is_comment) {
+            var raw_buf: [compose_mod.max_bytes]u8 = undefined;
+            const typed = self.compose.text();
+            @memcpy(raw_buf[0..typed.len], typed);
+            const raw = raw_buf[0..typed.len];
+            if (raw.len == 0) {
+                self.notice.set("nothing to save", .{});
+                return;
+            }
+            const editing = self.compose_comment;
+            const at = self.commentLine();
+            self.compose_is_comment = false;
+            self.compose_comment = null;
+            self.closeCompose();
+
+            var id: u32 = 0;
+            if (editing) |eid| {
+                try self.comments.edit(eid, raw);
+                id = eid;
+            } else if (at) |spot| {
+                id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted);
+            }
+            self.saveComments();
+            self.rebuildRows(.line) catch {};
+            if (self.comments.find(id)) |n| {
+                // Handed over, so it is sent: it drops out of the next
+                // `review-N.md` rather than asking twice, and editing it
+                // reopens it the way editing any sent comment does.
+                n.state = .sent;
+                self.comments.dirty = true;
+                self.saveComments();
+                var buf: [compose_mod.max_bytes]u8 = undefined;
+                var flat: [compose_mod.max_bytes]u8 = undefined;
+                const one = compose_mod.flatten(&flat, n.body);
+                const line = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one;
+                self.outgoing.clearRetainingCapacity();
+                try self.outgoing.appendSlice(self.gpa, line);
+                self.want_send = .send;
+            }
+            self.clampScroll(body);
+            return;
+        }
+
         switch (self.compose.feed(key)) {
             .typing => {},
             .cancel => {
@@ -1700,6 +2000,8 @@ pub const App = struct {
                 // layer over it, not a place the reader has gone instead.
                 self.files_purpose = .mention;
                 self.buildPickList();
+                self.file_list.title = " mention a file ";
+                self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
                 self.mode = .finder;
             },
@@ -1732,13 +2034,7 @@ pub const App = struct {
                     } else if (self.commentLine()) |at| {
                         // The line's text goes with the note, so a restart can
                         // find it again when the file moved underneath.
-                        var anchor_text: []const u8 = "";
-                        if (self.current()) |f| {
-                            if (self.rows.lineAt(self.cursor)) |li| {
-                                if (li < f.lines.len()) anchor_text = f.lines.text[li];
-                            }
-                        }
-                        _ = try self.comments.addAnchored(at.path, at.line, raw, anchor_text);
+                        _ = try self.comments.addFull(at.path, at.line, raw, self.textOfNewLine(at.line), at.deleted);
                         self.notice.set("comment added - <C-s> submits the review", .{});
                     }
                     self.compose_comment = null;
@@ -1748,7 +2044,7 @@ pub const App = struct {
                     // pushed off it by the row that just appeared under it.
                     const on = self.commentLine();
                     self.rebuildRows(.reset) catch {};
-                    if (on) |at| self.gotoNewLine(at.line);
+                    if (on) |at| _ = self.gotoNewLine(at.line);
                     self.clampScroll(body);
                     return;
                 }

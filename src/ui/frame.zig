@@ -319,6 +319,12 @@ pub const FileEntry = struct {
 /// no body at all.
 pub const FilesView = struct {
     entries: []const FileEntry,
+    /// Extra keys for this list, drawn in its footer beside the shared ones.
+    extra_keys: []const keytext.HelpEntry = &.{},
+    /// What the box is listing, drawn in its title. The same widget shows the
+    /// changed files, every file in the project, and every comment; saying
+    /// which spares the reader working it out from the rows.
+    title: []const u8 = " files ",
     query: []const u8 = "",
     /// Selected row, an index into `entries` after filtering.
     index: usize = 0,
@@ -346,6 +352,11 @@ pub const ComposeView = struct {
     selected: ?usize = null,
     /// Whether Enter sends to the agent or copies. Only the footer cares.
     to_agent: bool = true,
+    /// Whether Enter saves a comment rather than sending a message. The
+    /// footer said "send" for a comment because it was inferred from the
+    /// delivery, which an edit forgot to set - so the box promised the wrong
+    /// destination. This is the fact itself rather than a proxy for it.
+    saves: bool = false,
     /// Where the box sits: `[ui] compose`.
     at: Placement = .bottom,
     /// Which half of the box has the keyboard, drawn in its title. A modal

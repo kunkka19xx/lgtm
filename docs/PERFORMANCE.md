@@ -383,7 +383,7 @@ Tempting for large files, and wrong here: the agent is actively writing these fi
 
 ### 8.4 Lazy subsystem init (T0)
 
-SQLite is not opened until the finder is first invoked. Themes are not parsed until first render. Grammars/lang defs load on first use of that language. Cold start should touch: config, terminal setup, one `git diff`.
+Cold start should touch: config, terminal setup, one `git diff`, and nothing else. Lang defs load on first use of that language. When the machine-scope finder arrives, SQLite must not be opened until the finder is first invoked - it is the one subsystem heavy enough to be worth the rule.
 
 ### 8.5 Overlap startup (T1)
 
@@ -393,7 +393,7 @@ Spawn the initial `git diff` *before* terminal initialisation. Both take millise
 
 ## 9. Concurrency
 
-Keep it boring. One render thread, one watcher thread, one thread pool for parallelisable work (per-file diff, per-file lex, finder scoring, hashing).
+Keep it boring. One render thread, one watcher thread, and - when something is measured slow enough to need it - one thread pool for parallelisable work (per-file diff, per-file lex, finder scoring, hashing). Today only the first two exist: a re-diff of this repo does not come close to the 100 ms budget, and a pool bought before the measurement is a pool that costs bugs and buys nothing.
 
 - Render is single-threaded. Always.
 - The pool is a fixed `std.Thread.Pool`, not work-stealing. n is small and tasks are uniform.

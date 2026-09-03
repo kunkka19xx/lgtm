@@ -70,6 +70,10 @@ pub const Comment = struct {
     /// running, and there is no previous version to diff against. One line of
     /// text is enough to find where it went, or to say it has gone.
     anchor: []const u8 = "",
+    /// Written against a line that the change removed. The comment hangs on
+    /// the nearest surviving line of its hunk, and this is what stops that
+    /// from reading as a remark about the code it landed next to.
+    about_removed: bool = false,
 
     pub fn deinit(self: Comment, gpa: Allocator) void {
         gpa.free(self.path);
@@ -124,6 +128,17 @@ pub const Store = struct {
         body: []const u8,
         anchor_text: []const u8,
     ) Allocator.Error!u32 {
+        return self.addFull(path, line, body, anchor_text, false);
+    }
+
+    pub fn addFull(
+        self: *Store,
+        path: []const u8,
+        line: u32,
+        body: []const u8,
+        anchor_text: []const u8,
+        about_removed: bool,
+    ) Allocator.Error!u32 {
         const p = try self.gpa.dupe(u8, path);
         errdefer self.gpa.free(p);
         const b = try self.gpa.dupe(u8, body);
@@ -132,7 +147,7 @@ pub const Store = struct {
         errdefer self.gpa.free(a);
 
         const id = self.next_id;
-        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .body = b, .anchor = a });
+        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .body = b, .anchor = a, .about_removed = about_removed });
         self.next_id += 1;
         self.dirty = true;
         return id;
@@ -281,6 +296,7 @@ pub fn write(out: *std.ArrayList(u8), gpa: Allocator, store: *const Store) Alloc
         try out.appendSlice(gpa, n.state.name());
         try out.appendSlice(gpa, "\",\"path\":");
         try quote(out, gpa, n.path);
+        if (n.about_removed) try out.appendSlice(gpa, ",\"removed\":true");
         try out.appendSlice(gpa, ",\"anchor\":");
         try quote(out, gpa, n.anchor);
         try out.appendSlice(gpa, ",\"body\":");
@@ -308,7 +324,8 @@ pub fn read(store: *Store, text: []const u8) Allocator.Error!void {
         const b = unquote(&buf_body, body);
         const a = if (string(line, "\"anchor\":")) |raw| unquote(&buf_anchor, raw) else "";
 
-        const new_id = try store.addAnchored(p, @intCast(ln), b, a);
+        const removed = std.mem.indexOf(u8, line, "\"removed\":true") != null;
+        const new_id = try store.addFull(p, @intCast(ln), b, a, removed);
         const n = store.find(new_id).?;
         n.id = @intCast(id);
         if (std.mem.indexOf(u8, line, "\"state\":\"sent\"") != null) n.state = .sent;

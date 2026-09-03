@@ -533,11 +533,14 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
 
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
-    const title: Footer = .{ .text = " files ", .keys = &.{} };
-    const foot = try footerOf(f.arena, filter_lead, v.keys, &.{
-        .{ .keys = "<CR>", .desc = "open" },
-        close_key,
-    }, f.width() -| 2);
+    const title: Footer = .{ .text = v.title, .keys = &.{} };
+    var tail: std.ArrayList(keytext.HelpEntry) = .empty;
+    // `<Esc>` before the extras: the footer drops trailing groups that do not
+    // fit, and the way out is the last thing that should go.
+    try tail.append(f.arena, .{ .keys = "<CR>", .desc = "open" });
+    try tail.append(f.arena, close_key);
+    try tail.appendSlice(f.arena, v.extra_keys);
+    const foot = try footerOf(f.arena, filter_lead, v.keys, tail.items, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -777,9 +780,9 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     });
     const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
     const foot = try footerOf(f.arena, "", if (v.normal)
-        (if (v.to_agent) compose_normal_keys else note_normal_keys)
+        (if (v.saves) comment_normal_keys else compose_normal_keys)
     else
-        (if (v.to_agent) compose_keys else note_keys), &.{}, content);
+        (if (v.saves) comment_keys else compose_keys), &.{}, content);
     const box: Box = .{
         .cols = 1,
         .per = text_rows,
@@ -828,18 +831,21 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
 /// A note is saved, not sent: it goes to the store and reaches the agent later
 /// as part of `review-N.md`. A footer that said "send" would promise the wrong
 /// thing about where the text is about to go.
-const note_keys: []const keytext.HelpEntry = &.{
+const comment_keys: []const keytext.HelpEntry = &.{
+    // `<Esc>` second on purpose: the footer drops trailing groups that do not
+    // fit, and a box whose only visible keys are ways to commit reads as one
+    // there is no way out of.
     .{ .keys = "<CR>", .desc = "save" },
-    .{ .keys = "<C-i>", .desc = "preset" },
-    .{ .keys = "@", .desc = "file" },
-    .{ .keys = "<S-CR>", .desc = "line" },
     .{ .keys = "<Esc>", .desc = "cancel" },
+    .{ .keys = "<C-s>", .desc = "save + send" },
+    .{ .keys = "<C-i>", .desc = "preset" },
 };
 
-const note_normal_keys: []const keytext.HelpEntry = &.{
+const comment_normal_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "o", .desc = "new line" },
     .{ .keys = "i", .desc = "insert" },
     .{ .keys = "<CR>", .desc = "save" },
+    .{ .keys = "<C-s>", .desc = "save + send" },
     .{ .keys = "<Esc>", .desc = "cancel" },
 };
 
@@ -851,10 +857,9 @@ const compose_normal_keys: []const keytext.HelpEntry = &.{
 };
 const compose_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "<CR>", .desc = "send" },
+    .{ .keys = "<Esc>", .desc = "cancel" },
     .{ .keys = "<C-i>", .desc = "preset" },
     .{ .keys = "@", .desc = "file" },
-    .{ .keys = "<S-CR>", .desc = "line" },
-    .{ .keys = "<Esc>", .desc = "cancel" },
 };
 
 /// The `Ctrl-i` list, directly under the box so the caret it will insert at

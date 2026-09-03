@@ -19,7 +19,7 @@ graph LR
 
     repo[("Git working tree")]
     look[("look index<br/>SQLite")]
-    dotlgtm[("./.lgtm/<br/>notes.jsonl<br/>review-N.md")]
+    dotlgtm[("./.lgtm/<br/>comments.jsonl<br/>review-N.md")]
 
     repo -->|"git diff / poll"| lgtm
     look -->|"read-only, machine scope"| lgtm
@@ -50,7 +50,7 @@ graph TD
         motion["motion.zig - vim motions"]
         vdiff["view/diff.zig"]
         vfiles["view/filelist.zig"]
-        vnotes["view/notes.zig"]
+        vcompose["compose.zig - the modal box"]
         vfind["view/finder.zig"]
     end
 
@@ -58,8 +58,8 @@ graph TD
         diff["diff.zig - parse git output"]
         hunk["hunk.zig - model, change ids"]
         anchor["anchor.zig - re-anchoring"]
-        notes["notes.zig - jsonl store"]
-        review["review.zig - render review-N.md"]
+        comments["comments.zig - jsonl store, re-anchoring"]
+        creview["review.zig - render review-N.md"]
     end
 
     subgraph io["io/"]
@@ -90,17 +90,17 @@ graph TD
     end
 
     main --> app
-    app --> vdiff & vfiles & vnotes & vfind
+    app --> vdiff & vfiles & vcompose & vfind
     app --> motion
-    app --> diff & notes
+    app --> diff & comments
     vdiff --> hl & theme
     hl --> lex
     lex --> langs
     diff --> hunk
     hunk --> anchor
-    anchor --> notes
-    notes --> review
-    review --> biface
+    anchor --> comments
+    comments --> creview
+    creview --> biface
     app --> biface
     biface --> tmux & wez & kitty & osc
     vfind --> scope
@@ -243,7 +243,7 @@ pub const Highlighter = union(enum) {
 
 Selected per language *and* per file size. A language with a lexer uses it; anything else falls back to tree-sitter if linked, otherwise `plain`. The user never sees an unhighlighted screen as a failure - it is just a fallback.
 
-**v0.1 ships four lexers: Zig, Rust, Go, Python.** Zero C dependencies for highlighting, nothing to profile.
+**v0.1 shipped nine lexers: Zig, Rust, Go, Python, JavaScript, TypeScript, Swift, HTML, CSS.** Four were planned; the engine made the rest a table each. Zero C dependencies for highlighting, nothing to profile.
 
 Swift landed after, on dogfooding evidence rather than plan: a `look` diff is
 mostly `.swift`, and reviewing it unhighlighted was the complaint. It cost one
@@ -491,24 +491,32 @@ lgtm/
 ├── build.zig
 ├── build.zig.zon          # pinned deps + minimum_zig_version
 ├── .zigversion
+├── Makefile               # make local: build, install, remember what it displaced
 ├── src/
-│   ├── main.zig
+│   ├── main.zig           # argv, --version, --smoke, --theme-preview, then loop.zig
+│   ├── lib.zig            # the module root the tests import
 │   ├── config.zig         # what a setting means, and what a bad one costs
 │   ├── toml.zig           # the subset config.zig reads it from
 │   ├── text/              # buffer + TextEdit - see §11
 │   │   ├── buffer.zig
 │   │   └── edit.zig
-│   ├── core/              # pure logic, unit-tested
-│   │   ├── diff.zig
-│   │   ├── hunk.zig
+│   ├── core/              # pure logic, unit-tested, imports no ui/
+│   │   ├── diff.zig       # unified diff to files, hunks, lines; large ones deferred
+│   │   ├── hunk.zig       # change ids: assigned, inherited, kept still
 │   │   ├── linemap.zig    # matching two versions line to line
 │   │   ├── anchor.zig     # the tiers built on it: mapped, hashed, stale
-│   │   ├── notes.zig
-│   │   └── review.zig
+│   │   ├── comments.zig   # the store, its jsonl, and carrying it across a re-diff
+│   │   ├── review.zig     # open comments as one markdown file
+│   │   ├── source.zig     # the two buffers a file is drawn from
+│   │   ├── git.zig        # the argv: diff, ls-files, exclude pathspecs
+│   │   └── event.zig      # the whole Event union, v0.1 populating a subset
 │   ├── io/                # std.Io quarantine
-│   │   ├── fs.zig
-│   │   ├── proc.zig
-│   │   └── watch.zig
+│   │   ├── fs.zig         # reads, .lgtm/ writes, the self-ignore
+│   │   ├── proc.zig       # every subprocess
+│   │   ├── tty.zig        # the render writer
+│   │   ├── input.zig      # keys in
+│   │   ├── watch.zig      # polling, 500 ms + 200 ms debounce
+│   │   └── metrics.zig    # -Dprofile spans, --profile report
 │   ├── ui/
 │   │   ├── loop.zig       # the run loop: terminal, threads, $EDITOR handover
 │   │   ├── app.zig        # state, command dispatch, motions
@@ -517,30 +525,43 @@ lgtm/
 │   │   ├── frame.zig      # what a frame is drawn onto, and from
 │   │   ├── render.zig     # the chrome, and the order things are drawn in
 │   │   ├── body.zig       # the diff itself, one screen row at a time
-│   │   ├── popup.zig      # the `?` overlay: geometry, then drawing
+│   │   ├── popup.zig      # overlay geometry, then drawing: `?`, lists, compose
+│   │   ├── compose.zig    # the modal box every outgoing message is written in
+│   │   ├── motion.zig     # the motions, shared by the review and the box
 │   │   ├── keymap.zig     # what keys mean: bindings, matcher, conflicts
 │   │   ├── keytext.zig    # how keys are written: chords, hints, help rows
 │   │   ├── help.zig       # the `?` overlay's filter and selection
-│   │   ├── files.zig      # the `F` overlay, over the changed files
-│   │   ├── fuzzy.zig      # the two tiers both overlays narrow with
+│   │   ├── files.zig      # the list overlay: changed files, project files, comments
+│   │   ├── fuzzy.zig      # the two tiers every overlay narrows with
+│   │   ├── path.zig       # eliding a path without losing the name
 │   │   ├── prompt.zig     # the `/` and `:` input line
 │   │   ├── search.zig     # matching across the whole review
+│   │   ├── wrap.zig       # where a long line breaks
 │   │   ├── editor.zig     # $EDITOR argv, from $VISUAL/$EDITOR
 │   │   ├── palette.zig    # the seven bundled palettes, as data
 │   │   ├── theme.zig      # the mapping onto semantic slots, and `[theme]`
+│   │   ├── devicon.zig    # filetype icon and hue, in three icon sets
+│   │   ├── splash.zig     # the wordmark, for a repo with nothing to review
+│   │   ├── anim.zig       # the easing the scroll and the overlays share
 │   │   └── preview.zig    # --theme-preview
 │   ├── bridge/
 │   │   ├── bridge.zig     # the union, the two invariants, detect()
-│   │   ├── tmux.zig       # send-keys argv, pane listing, target inference
+│   │   ├── tmux.zig       # send-keys argv, pane listing, load-buffer for the clipboard
 │   │   ├── osc52.zig      # the universal fallback, works over SSH
 │   │   └── template.zig   # every outgoing string, as data
-│   ├── search/
+│   ├── harness/           # headless tools, not shipped in the binary
+│   │   ├── anchor_harness.zig   # the hit rate, from tests/fixtures
+│   │   ├── diff_dump.zig
+│   │   ├── lex_dump.zig
+│   │   ├── lex_bench.zig
+│   │   └── watch_demo.zig
+│   ├── search/            # v0.2: not created yet
 │   └── syntax/
 │       ├── token.zig      # what a lexer produces: kinds and runs
 │       ├── langdef.zig    # the vocabulary a language is described in
 │       ├── lexer.zig      # one pass: classify and track structure together
 │       ├── highlight.zig
-│       └── lang/          # zig.zig, rust.zig, go.zig, python.zig
+│       └── lang/          # zig, rust, go, python, javascript, typescript, swift, html, css
 └── tests/
     └── fixtures/          # recorded git diff output + edit sequences
 ```
@@ -550,6 +571,8 @@ lgtm/
 ## 10. Build order
 
 The dependency graph suggests a different order than the roadmap does, and the graph wins.
+
+This is the order it was built in, and it held. `core/anchor.zig` came first and the harness reports 100% on the fixture set, so the review-comments feature was never in doubt by the time the TUI existed.
 
 1. **`core/anchor.zig` first, standalone, before any TUI exists.** Write a harness that replays recorded edit sequences from `tests/fixtures/` and reports the re-anchor hit rate. If it lands below ~90%, the entire review-notes feature needs redesigning - and finding that out with 300 lines of code is far cheaper than finding it out with a finished TUI attached.
 2. `core/diff.zig` + `hunk.zig` - parse `git diff`, assign and inherit change ids. Also testable headless.
@@ -590,7 +613,7 @@ The diff view renders from **two buffers** - the HEAD version and the working-tr
 pub const TextEdit = struct { range: Range, new_text: []const u8 };
 ```
 
-This is not speculative future-proofing. **Revert-a-hunk in v0.3 is already a `TextEdit`**, and so is stage/unstage. User edits, LSP code actions, and undo all arrive as the same type later. One application path means one place where invariants live: notes re-anchor, the diff invalidates, the buffer version increments.
+This is not speculative future-proofing. **Revert-a-hunk in v0.3 will be a `TextEdit`**, and so is stage/unstage. User edits, LSP code actions, and undo all arrive as the same type later. One application path means one place where invariants live: notes re-anchor, the diff invalidates, the buffer version increments.
 
 ### 11.3 Positions are bytes internally; UTF-16 conversion happens at exactly one boundary
 

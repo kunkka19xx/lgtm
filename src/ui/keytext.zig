@@ -564,7 +564,7 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     }
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
-    try testing.expectEqual(@as(usize, 15), leaders);
+    try testing.expectEqual(@as(usize, 17), leaders);
     // The rows that actually contain the query come first, which is the whole
     // point of the two tiers - the scattered-letter matches a query like this
     // also drags in sit behind them rather than among them.

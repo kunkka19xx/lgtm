@@ -65,18 +65,28 @@ pub fn render(out: *std.ArrayList(u8), gpa: Allocator, store: *const comments.St
 
         // Sorted by line within the file, by selection rather than by sorting
         // a copy: there is no allocation to fail and the lists are tiny.
+        // Ordered by (line, id), not by line alone. Two comments on one line
+        // is ordinary - a reader has two things to say about the same call -
+        // and ordering by line only made the second one unreachable: it was
+        // never "after" the first, so the walk stopped and the review file
+        // silently held half of what was written.
         var last: u32 = 0;
+        var last_id: u32 = 0;
         var first = true;
         while (true) {
             var best: ?*const comments.Comment = null;
             for (store.items()) |*m| {
                 if (m.state == .sent) continue;
                 if (!std.mem.eql(u8, m.path, note.path)) continue;
-                if (!first and m.line <= last) continue;
-                if (best == null or m.line < best.?.line) best = m;
+                if (!first and (m.line < last or (m.line == last and m.id <= last_id))) continue;
+                if (best) |b| {
+                    if (m.line > b.line or (m.line == b.line and m.id > b.id)) continue;
+                }
+                best = m;
             }
             const m = best orelse break;
             last = m.line;
+            last_id = m.id;
             first = false;
 
             try out.appendSlice(gpa, "\n- **line ");
@@ -85,6 +95,7 @@ pub fn render(out: *std.ArrayList(u8), gpa: Allocator, store: *const comments.St
             // A stale comment says so in the file as well as on screen. The agent
             // should know the line moved out from under the remark rather than
             // being pointed at code that may not be the code meant.
+            if (m.about_removed) try out.appendSlice(gpa, " _(about code removed in this hunk)_");
             if (m.state == .stale) try out.appendSlice(gpa, " _(stale - the line this was written against has gone)_");
             try out.appendSlice(gpa, "\n\n");
             try indent(out, gpa, m.body);
