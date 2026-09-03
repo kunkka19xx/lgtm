@@ -62,6 +62,10 @@ pub const FnDecl = struct {
     end_line: u32,
     depth: i32,
     indent: u16,
+    /// False while a `fn_decl_body` declaration is still waiting for the block
+    /// that would prove it is a function. `structure` drops whatever is still
+    /// false at the end, so a consumer never sees one.
+    confirmed: bool = true,
 };
 
 /// The whole-file pass: what the visible range needs before it can be lexed
@@ -187,6 +191,18 @@ pub const Lexer = struct {
         const last = if (lines == 0) 0 else lines - 1;
         for (stack.items) |idx| fns.items[idx].end_line = last;
 
+        // Drop the `fn_decl_body` declarations that never opened a block - the
+        // plain assignments that share JavaScript's `const NAME =` shape.
+        // Compacted in place, so what survives keeps its declaration order and
+        // `enclosingFn`'s backwards scan still finds the innermost first.
+        var kept: usize = 0;
+        for (fns.items) |f| {
+            if (!f.confirmed) continue;
+            fns.items[kept] = f;
+            kept += 1;
+        }
+        fns.shrinkRetainingCapacity(kept);
+
         const cp_slice = try cps.toOwnedSlice(gpa);
         errdefer gpa.free(cp_slice);
         return .{
@@ -196,10 +212,6 @@ pub const Lexer = struct {
         };
     }
 };
-
-fn isIdentCont(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
-}
 
 const Scan = struct {
     def: *const LangDef,
@@ -223,6 +235,13 @@ const Scan = struct {
     at_line_start: bool = true,
     /// Set by a `fn_decl` keyword; the next identifier is the function name.
     expect_fn: bool = false,
+    /// Whether that keyword was a `fn_decl_body` one, so the span it opens
+    /// needs a block on the same line before it counts.
+    expect_fn_body: bool = false,
+    /// Set by `<` or `</` under `angle_tags`; the next identifier is a tag
+    /// name. Deliberately not part of `State`: a tag name never survives a
+    /// newline, so a checkpoint has nothing to carry.
+    expect_tag: bool = false,
 
     fn run(self: *Scan) Allocator.Error!void {
         while (self.i < self.end) {
@@ -334,6 +353,9 @@ const Scan = struct {
 
         if (c == '\n') {
             self.i += 1;
+            // A tag name does not cross a line, so the lookahead cannot leak
+            // past a checkpoint boundary and make a resumed lex differ.
+            self.expect_tag = false;
             // Flush here, not at the next classified token: without this a run
             // of blank lines coalesces into one `.text` run holding several
             // newlines, and the renderer can no longer group runs into rows.
@@ -413,7 +435,7 @@ const Scan = struct {
         if (self.def.ident_start[c]) {
             const start = self.i;
             self.i += 1;
-            while (self.i < self.end and isIdentCont(self.text[self.i])) self.i += 1;
+            while (self.i < self.end and self.def.ident_cont[self.text[self.i]]) self.i += 1;
             const word = self.text[start..self.i];
 
             var kind: Kind = .text;
@@ -423,12 +445,20 @@ const Scan = struct {
             // never consulted for an ordinary identifier.
             if (kind == .keyword and self.def.fn_words.has(word)) {
                 self.expect_fn = true;
+                self.expect_fn_body = self.def.fn_body_words.has(word);
             } else if (self.expect_fn and kind == .text) {
                 kind = .fn_name;
                 self.expect_fn = false;
                 try self.openFn(word);
             } else {
                 self.expect_fn = false;
+            }
+
+            // A tag name is an ordinary identifier the markup put after `<`,
+            // so it never collides with a keyword lookup.
+            if (self.expect_tag) {
+                if (kind == .text) kind = .type_name;
+                self.expect_tag = false;
             }
             return self.emit(start, self.i, kind);
         }
@@ -447,6 +477,7 @@ const Scan = struct {
             if (self.def.blocks == .braces) {
                 if (p == '{') {
                     self.st.depth += 1;
+                    self.confirmPending();
                 } else if (p == '}') {
                     self.st.depth -= 1;
                     self.closeBraceSpans();
@@ -455,6 +486,13 @@ const Scan = struct {
             if (self.expect_fn and self.def.fn_receiver and p == '(') {
                 self.skipBalanced();
                 continue;
+            }
+            if (self.def.angle_tags) {
+                // `<div` and `</div` both name a tag; any other punctuation
+                // ends the lookahead, so `a <= b` does not colour `b`. A bare
+                // `a < b` in text content does, which is the price of having
+                // no parser - see lang/html.zig.
+                self.expect_tag = p == '<' or (p == '/' and self.expect_tag);
             }
             self.expect_fn = false;
             self.i += 1;
@@ -647,8 +685,21 @@ const Scan = struct {
             .end_line = self.line,
             .depth = self.st.depth,
             .indent = self.indent,
+            .confirmed = !self.expect_fn_body,
         });
         try stack.append(self.gpa, @intCast(fns.items.len - 1));
+    }
+
+    /// A `fn_decl_body` declaration is a function only if a block opens on its
+    /// own line: `const f = () => {` yes, `const email = form.email;` no. The
+    /// same-line test is what keeps a later `if (x) {` in the same scope from
+    /// confirming a binding that has long since stopped being relevant.
+    fn confirmPending(self: *Scan) void {
+        const fns = self.fns orelse return;
+        const stack = self.stack.?;
+        if (stack.items.len == 0) return;
+        const top = &fns.items[stack.items[stack.items.len - 1]];
+        if (!top.confirmed and top.start_line == self.line) top.confirmed = true;
     }
 
     fn closeBraceSpans(self: *Scan) void {
@@ -691,6 +742,10 @@ const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
+const javascript_lang = @import("lang/javascript.zig");
+const typescript_lang = @import("lang/typescript.zig");
+const css_lang = @import("lang/css.zig");
+const html_lang = @import("lang/html.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
@@ -892,6 +947,122 @@ test "a swift multiline string spans lines and holds bare quotes" {
     try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
 }
 
+test "css hyphenated properties survive as one word" {
+    const src =
+        \\/* layout */
+        \\@media (min-width: 40rem) {
+        \\  .card {
+        \\    grid-template-columns: 1fr auto;
+        \\    display: none;
+        \\  }
+        \\}
+        \\
+    ;
+    var lx: Lexer = .init(&css_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/* layout").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "@media").?);
+    // The whole hyphenated name, not `grid` plus punctuation plus `template`.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "grid-template-columns").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "display").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "none").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "40rem").?);
+}
+
+test "javascript names arrow functions and holds template literals" {
+    const src =
+        \\const greet = (name) => {
+        \\  return `hi ${name}`;
+        \\};
+        \\
+    ;
+    var lx: Lexer = .init(&javascript_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "const").?);
+    // `const` is a `fn_decl` word, so the binding names the hunk.
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "greet").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "return").?);
+    // Interpolation stays inside the literal rather than re-entering.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "${name}").?);
+}
+
+test "a javascript division is not a literal" {
+    const src =
+        \\const ratio = width / height / 2;
+        \\const ok = 3;
+        \\
+    ;
+    var lx: Lexer = .init(&javascript_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // No `/`-delimited string spec exists, which is why `a / b / c` survives.
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "2").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
+}
+
+test "typescript adds the type vocabulary and names an interface" {
+    const src =
+        \\interface Point {
+        \\  x: number;
+        \\  y: string;
+        \\}
+        \\export type Id = string;
+        \\
+    ;
+    var lx: Lexer = .init(&typescript_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "interface").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "Point").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "number").?);
+    // Inherited from javascript.zig rather than restated.
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "export").?);
+}
+
+test "html tags, attributes and comments" {
+    const src =
+        \\<!-- nav -->
+        \\<section class="card" id='main'>
+        \\  <my-widget data-x="1"></my-widget>
+        \\</section>
+        \\
+    ;
+    var lx: Lexer = .init(&html_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "<!-- nav").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "section").?);
+    // A hyphenated element is one tag name, not three tokens.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "my-widget").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"card\"").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "'main'").?);
+    // Attribute names stay plain: see the note in lang/html.zig.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "class").?);
+}
+
+test "an html closing tag still names its element" {
+    const src = "</footer>\n";
+    var lx: Lexer = .init(&html_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // `/` extends the lookahead that `<` opened rather than ending it.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "footer").?);
+}
+
 test "an unterminated string recovers at the end of the line" {
     const src =
         \\const a = "half written
@@ -1056,6 +1227,35 @@ test "enclosing function names, including nesting" {
     // Back out of the nested body.
     try testing.expectEqualStrings("outer", st.enclosingFn(8).?.name);
     try testing.expectEqualStrings("other", st.enclosingFn(11).?.name);
+}
+
+test "a javascript local binding does not steal its function's name" {
+    const src =
+        \\const App = () => {
+        \\  const handleSubmit = async (e) => {
+        \\    const email = form.email;
+        \\    setState(email);
+        \\    return true;
+        \\  };
+        \\  return handleSubmit;
+        \\};
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&javascript_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // Both arrows opened a block on their declaration line, so both count.
+    try testing.expectEqualStrings("App", st.enclosingFn(0).?.name);
+    try testing.expectEqualStrings("handleSubmit", st.enclosingFn(1).?.name);
+    // `const email = form.email;` did not, so it was dropped and every line
+    // after it still reports the function it sits in.
+    try testing.expectEqualStrings("handleSubmit", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("handleSubmit", st.enclosingFn(3).?.name);
+    try testing.expectEqualStrings("handleSubmit", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("App", st.enclosingFn(6).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "email"));
 }
 
 test "a truncated function still names its lines" {

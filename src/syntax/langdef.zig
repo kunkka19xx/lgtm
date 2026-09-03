@@ -62,16 +62,39 @@ pub const LangDef = struct {
     /// Keywords that introduce a named function: the next identifier is its
     /// name, and it opens a span for the enclosing-function scan.
     fn_decl: []const []const u8 = &.{},
+    /// The subset of `fn_decl` that only counts when a block opens on the same
+    /// line. JavaScript needs `const` in `fn_decl` - `const App = () => {}` is
+    /// how a module's functions are written - but `const email = form.email`
+    /// is the same two tokens and is not a function. Without this its span
+    /// runs to the enclosing brace and every line after it reports `email`
+    /// instead of the function it sits in.
+    ///
+    /// Not the default for `fn_decl`, because `fn foo(\n    a: u32,\n) u32 {`
+    /// is ordinary Zig and Rust, and a trait's bodyless `fn foo(&self);` is
+    /// meant to declare a span at all.
+    fn_decl_body: []const []const u8 = &.{},
     /// Go's `func (r *T) Name()`: allow a parenthesised receiver between the
     /// keyword and the name.
     fn_receiver: bool = false,
     blocks: Blocks = .braces,
     /// Identifier start bytes beyond letters and '_': Zig's `@import`.
     ident_extra: []const u8 = "",
+    /// Identifier *continuation* bytes beyond letters, digits and '_': CSS's
+    /// `grid-template-columns`. Not implied by `ident_extra` - Zig's '@' starts
+    /// an identifier and never continues one - so a language that wants both
+    /// names the byte twice.
+    ident_cont_extra: []const u8 = "",
+    /// HTML: the identifier after `<` or `</` is a tag name. One token of
+    /// lookahead, like `fn_decl`, but it names an element rather than a
+    /// function, so it is typed `.type_name` and opens no span.
+    angle_tags: bool = false,
 
     /// Filled in by `define`. Written by hand nowhere.
     words: std.StaticStringMap(Kind) = .{},
     fn_words: std.StaticStringMap(void) = .{},
+    /// Consulted only for a word `fn_words` already matched, so an ordinary
+    /// keyword never pays for it.
+    fn_body_words: std.StaticStringMap(void) = .{},
     /// Bytes that can begin a comment or a literal. The scanner's inner loop
     /// consults this before trying any opener, so ordinary identifiers and
     /// operators never pay for the `startsWith` ladder. Measured: 148 ns/line
@@ -79,6 +102,10 @@ pub const LangDef = struct {
     delim_start: [256]bool = @splat(false),
     /// Bytes that can begin an identifier, including `ident_extra`.
     ident_start: [256]bool = @splat(false),
+    /// Bytes that can continue one, including `ident_cont_extra`. A table for
+    /// the same reason `ident_start` is one: it sits in the scanner's inner
+    /// loop, one byte per identifier character.
+    ident_cont: [256]bool = @splat(false),
     /// Bit `n` is set when some keyword or type name of length `n` starts
     /// (respectively ends) with this byte. See `lookupWord`.
     word_first: [256]u64 = @splat(0),
@@ -121,6 +148,11 @@ pub fn define(comptime d: LangDef) LangDef {
         for (d.fn_decl, 0..) |f, i| fns[i] = .{f};
         const frozen_fns = fns;
         out.fn_words = .initComptime(frozen_fns);
+
+        var bodied: [d.fn_decl_body.len]struct { []const u8 } = undefined;
+        for (d.fn_decl_body, 0..) |f, i| bodied[i] = .{f};
+        const frozen_bodied = bodied;
+        out.fn_body_words = .initComptime(frozen_bodied);
 
         var delim: [256]bool = @splat(false);
         for (d.line_comment) |x| {
@@ -168,13 +200,27 @@ pub fn define(comptime d: LangDef) LangDef {
             if (!found) @compileError("fn_decl word not in keywords: " ++ f);
         }
 
+        // `fn_decl_body` narrows `fn_decl`; a word only in the narrower list
+        // would never be consulted, which is a typo rather than an intent.
+        for (d.fn_decl_body) |f| {
+            var found = false;
+            for (d.fn_decl) |k| {
+                if (std.mem.eql(u8, k, f)) found = true;
+            }
+            if (!found) @compileError("fn_decl_body word not in fn_decl: " ++ f);
+        }
+
         var ident: [256]bool = @splat(false);
+        var cont: [256]bool = @splat(false);
         for (0..256) |c| {
             const b: u8 = @intCast(c);
             ident[c] = std.ascii.isAlphabetic(b) or b == '_' or b >= 0x80;
+            cont[c] = std.ascii.isAlphanumeric(b) or b == '_' or b >= 0x80;
         }
         for (d.ident_extra) |b| ident[b] = true;
+        for (d.ident_cont_extra) |b| cont[b] = true;
         out.ident_start = ident;
+        out.ident_cont = cont;
 
         return out;
     }

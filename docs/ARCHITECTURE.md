@@ -250,6 +250,33 @@ mostly `.swift`, and reviewing it unhighlighted was the complaint. It cost one
 `LangDef` plus the empty-`open` case in `hashed` above, which is the shape this
 section predicted a fifth language would have.
 
+**Then JavaScript, TypeScript, CSS and HTML**, which is where the predictions
+above stop holding. Three more `LangDef` fields were needed, each for a
+language the original four did not resemble:
+
+- `ident_cont_extra` - CSS's `grid-template-columns` is one word. Identifier
+  continuation had been a global rule; it is a per-language table now, beside
+  `ident_start`.
+- `angle_tags` - the identifier after `<` or `</` is a tag name. This is
+  `fn_decl`'s one-token lookahead pointed at markup, and it is the whole of
+  what makes HTML worth highlighting rather than a mode switcher.
+- `fn_decl_body` - a `fn_decl` word that only counts when a block opens on its
+  line. JavaScript needs `const` in `fn_decl` because `const App = () => {}` is
+  how functions are written, and needs this because `const email = x` is not
+  one. Measured on a real React file: without it, about a third of the lines
+  reported a local variable as their enclosing function.
+
+The concessions are recorded in the definitions themselves. The load-bearing
+ones: JS regex literals are not modelled (`/` divides or quotes depending on
+history the scanner does not keep, and `/["']/` therefore paints its line);
+template and string interpolation is never re-entered; and `<script>` and
+`<style>` bodies inside HTML lex as HTML.
+
+That last one is the real boundary. Embedded sublanguages are what a grammar
+buys that a lexer cannot, and they are the first thing that would justify the
+tree-sitter decision below - not JavaScript's syntax, which turned out to be
+affordable, but JavaScript *inside* HTML, which is not.
+
 Zig was written first, against the plan, for one reason: every fixture, every
 recorded session and every file in this repository is Zig, so a Rust-first
 order would have meant testing the first language definition against no real

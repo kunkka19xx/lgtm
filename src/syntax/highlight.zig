@@ -27,6 +27,10 @@ const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
+const javascript_lang = @import("lang/javascript.zig");
+const typescript_lang = @import("lang/typescript.zig");
+const css_lang = @import("lang/css.zig");
+const html_lang = @import("lang/html.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -34,6 +38,10 @@ pub const languages = [_]*const LangDef{
     &go_lang.def,
     &python_lang.def,
     &swift_lang.def,
+    &javascript_lang.def,
+    &typescript_lang.def,
+    &css_lang.def,
+    &html_lang.def,
 };
 
 /// Extension match, lower-cased. Everything unrecognised renders plain.
@@ -321,6 +329,10 @@ test "extensions map to languages, case-insensitively" {
     try testing.expectEqualStrings("go", byExtension("cmd/serve.go").?.name);
     try testing.expectEqualStrings("python", byExtension("tools/run.py").?.name);
     try testing.expectEqualStrings("swift", byExtension("Views/Launchpad.swift").?.name);
+    try testing.expectEqualStrings("javascript", byExtension("web/app.jsx").?.name);
+    try testing.expectEqualStrings("typescript", byExtension("web/App.tsx").?.name);
+    try testing.expectEqualStrings("css", byExtension("web/main.scss").?.name);
+    try testing.expectEqualStrings("html", byExtension("web/index.html").?.name);
     try testing.expect(byExtension("Makefile") == null);
     try testing.expect(byExtension("notes.txt") == null);
     // A dot in a directory name is not an extension.
