@@ -17,7 +17,7 @@ pub const buffer = @import("text/buffer.zig");
 pub const edit = @import("text/edit.zig");
 
 pub const anchor = @import("core/anchor.zig");
-pub const notes = @import("core/notes.zig");
+pub const comments = @import("core/comments.zig");
 pub const review = @import("core/review.zig");
 pub const event = @import("core/event.zig");
 pub const diff = @import("core/diff.zig");
@@ -36,7 +36,7 @@ test {
     _ = buffer;
     _ = edit;
     _ = anchor;
-    _ = notes;
+    _ = comments;
     _ = review;
     _ = event;
     _ = diff;

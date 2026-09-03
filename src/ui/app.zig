@@ -21,7 +21,7 @@ const diff = @import("../core/diff.zig");
 const event = @import("../core/event.zig");
 const fs_mod = @import("../io/fs.zig");
 const git = @import("../core/git.zig");
-const notes_mod = @import("../core/notes.zig");
+const comments_mod = @import("../core/comments.zig");
 const review_file = @import("../core/review.zig");
 const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
@@ -158,19 +158,19 @@ pub const App = struct {
     compose_at: render.Placement = .bottom,
     /// Every note in the session. Session-lived and owning its own bytes, so
     /// a re-diff resetting the arena cannot take a remark with it (rule 4).
-    notes: notes_mod.Store = undefined,
+    comments: comments_mod.Store = undefined,
     /// What the compose box will do with what is typed: send it, or attach it
     /// to a line as a note. The box itself does not know or care.
-    compose_note: ?u32 = null,
-    compose_is_note: bool = false,
+    compose_comment: ?u32 = null,
+    compose_is_comment: bool = false,
     /// How many reviews have been submitted this session, for the file name.
     review_n: u32 = 0,
     /// Whether the stored notes have been placed against the files as they
     /// are now. Once per session, on the first diff.
-    notes_reconciled: bool = false,
+    comments_reconciled: bool = false,
     /// `[ui] notes`: whether a note's text is drawn under its line, or only
     /// its gutter marker is.
-    notes_inline: bool = true,
+    comments_inline: bool = true,
     /// A file being read that has no diff at all. `<Space>d` on an unchanged
     /// file lands here: there is nothing for the review to show, but there is
     /// still a file to read and to write notes against, so it is rendered as
@@ -252,7 +252,7 @@ pub const App = struct {
             .io = io,
             .queue = queue,
             .review = .init(gpa, io),
-            .notes = .init(gpa),
+            .comments = .init(gpa),
             .preview_arena = .init(gpa),
             .frame_arena = .init(gpa),
         };
@@ -262,7 +262,7 @@ pub const App = struct {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.preview_arena.deinit();
-        self.notes.deinit();
+        self.comments.deinit();
         self.pick_list.deinit(self.gpa);
         if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
         self.frame_arena.deinit();
@@ -361,7 +361,7 @@ pub const App = struct {
             }
             before.deinit(self.gpa);
         }
-        for (self.notes.items()) |n| {
+        for (self.comments.items()) |n| {
             var seen = false;
             for (before.items) |b| {
                 if (std.mem.eql(u8, b.path, n.path)) seen = true;
@@ -387,11 +387,11 @@ pub const App = struct {
         // The first diff of a session has no previous version to carry from:
         // the file may have been rewritten while lgtm was not running. The
         // stored anchor line is what places those notes, once.
-        if (!self.notes_reconciled) {
-            self.notes_reconciled = true;
-            for (self.notes.items()) |n| {
+        if (!self.comments_reconciled) {
+            self.comments_reconciled = true;
+            for (self.comments.items()) |n| {
                 const work = self.review.buffersFor(n.path).work orelse continue;
-                self.notes.reconcile(n.path, work.bytes);
+                self.comments.reconcile(n.path, work.bytes);
             }
         }
 
@@ -400,9 +400,9 @@ pub const App = struct {
         // is the only moment both versions of the file exist.
         for (before.items) |b| {
             const now = self.review.buffersFor(b.path).work orelse continue;
-            self.notes.carry(b.path, b.text, now.bytes) catch {};
+            self.comments.carry(b.path, b.text, now.bytes) catch {};
         }
-        self.saveNotes();
+        self.saveComments();
 
         self.rows = rows_mod.Rows.empty;
         self.fn_names = &.{};
@@ -427,11 +427,11 @@ pub const App = struct {
         // Notes are rows too, so the layout has to know about them before it
         // is built - that is what puts a remark under the line it belongs to
         // rather than over the top of it.
-        var at: std.ArrayList(rows_mod.NoteAt) = .empty;
+        var at: std.ArrayList(rows_mod.CommentAt) = .empty;
         defer at.deinit(self.gpa);
-        if (self.notes_inline) {
+        if (self.comments_inline) {
             var i: u32 = 0;
-            for (self.notes.items()) |n| {
+            for (self.comments.items()) |n| {
                 if (std.mem.eql(u8, n.path, f.path())) {
                     at.append(self.gpa, .{ .line = n.line, .index = i }) catch {};
                     i += 1;
@@ -524,7 +524,7 @@ pub const App = struct {
             .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
-            .notes = self.noteMarks(),
+            .notes = self.commentMarks(),
             .preview = self.preview != null,
             .mode = self.mode,
             .zen = self.zen,
@@ -542,11 +542,11 @@ pub const App = struct {
 
     /// The notes on the current file, for the gutter. Built into the frame
     /// arena: the body reads them this frame and nothing keeps them.
-    fn noteMarks(self: *App) []const render.NoteMark {
+    fn commentMarks(self: *App) []const render.CommentMark {
         const f = self.current() orelse return &.{};
-        var out: std.ArrayList(render.NoteMark) = .empty;
+        var out: std.ArrayList(render.CommentMark) = .empty;
         const arena = self.frame_arena.allocator();
-        for (self.notes.items()) |n| {
+        for (self.comments.items()) |n| {
             if (!std.mem.eql(u8, n.path, f.path())) continue;
             out.append(arena, .{ .line = n.line, .body = n.body, .state = switch (n.state) {
                 .open => .open,
@@ -564,11 +564,11 @@ pub const App = struct {
         // holds it, so the body does not have to - and a note whose text
         // repeats its own line number would say it twice in `review-N.md`.
         var what: []const u8 = "compose";
-        if (self.compose_is_note) {
-            what = if (self.noteLine()) |at|
-                std.fmt.allocPrint(arena, "note {s}:{d}", .{ at.path, at.line }) catch "note"
+        if (self.compose_is_comment) {
+            what = if (self.commentLine()) |at|
+                std.fmt.allocPrint(arena, "comment {s}:{d}", .{ at.path, at.line }) catch "comment"
             else
-                "note";
+                "comment";
         }
         return .{
             .what = what,
@@ -690,12 +690,11 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.openCompose(.send, .ref),
-            .note_add => try self.noteAdd(),
-            .note_edit => try self.noteEdit(),
-            .note_view => try self.noteView(body),
-            .note_delete => self.noteDelete(),
-            .next_note => self.noteStep(1, body),
-            .prev_note => self.noteStep(-1, body),
+            .comment_add => try self.commentAdd(),
+            .comment_view => try self.commentView(body),
+            .comment_delete => self.commentDelete(),
+            .next_comment => self.commentStep(1, body),
+            .prev_comment => self.commentStep(-1, body),
             .submit_review => try self.submitReview(),
             .compose_ask => {
                 try self.openCompose(.send, .ref);
@@ -1414,7 +1413,7 @@ pub const App = struct {
     /// The line the cursor points at, as the note store counts them: the new
     /// file's line, which is what survives a re-diff and what a reference
     /// names. Null on a row that is chrome, or a line that exists only in HEAD.
-    fn noteLine(self: *App) ?struct { path: []const u8, line: u32 } {
+    fn commentLine(self: *App) ?struct { path: []const u8, line: u32 } {
         const f = self.current() orelse return null;
         const li = self.rows.lineAt(self.cursor) orelse return null;
         if (li >= f.lines.len()) return null;
@@ -1424,14 +1423,14 @@ pub const App = struct {
     }
 
     /// `c`: the compose box, pointed at a line instead of at the agent.
-    fn noteAdd(self: *App) Allocator.Error!void {
-        const at = self.noteLine() orelse {
-            self.notice.set("no line here to note", .{});
+    fn commentAdd(self: *App) Allocator.Error!void {
+        const at = self.commentLine() orelse {
+            self.notice.set("no line here to comment on", .{});
             return;
         };
         _ = at;
-        self.compose_is_note = true;
-        self.compose_note = null;
+        self.compose_is_comment = true;
+        self.compose_comment = null;
         self.compose_to = .copy;
         self.outgoing.clearRetainingCapacity();
         self.compose.start("");
@@ -1440,13 +1439,13 @@ pub const App = struct {
     }
 
     /// `C`: the same box, seeded with what the note already says.
-    fn noteEdit(self: *App) Allocator.Error!void {
-        const n = self.noteUnderCursor() orelse {
-            self.notice.set("no note here", .{});
+    fn commentEdit(self: *App) Allocator.Error!void {
+        const n = self.commentUnderCursor() orelse {
+            self.notice.set("no comment here", .{});
             return;
         };
-        self.compose_is_note = true;
-        self.compose_note = n.id;
+        self.compose_is_comment = true;
+        self.compose_comment = n.id;
         self.compose.start(n.body);
         self.preset_index = null;
         self.mode = .note_input;
@@ -1455,13 +1454,13 @@ pub const App = struct {
     /// The note the cursor is pointing at: the one on this line, or the one
     /// whose own row the cursor is sitting on. Both are "this note" to a
     /// reader looking at it, and only one of them was reachable before.
-    fn noteUnderCursor(self: *App) ?*notes_mod.Note {
+    fn commentUnderCursor(self: *App) ?*comments_mod.Comment {
         const f = self.current() orelse return null;
         if (self.cursor < self.rows.len()) {
             if (self.rows.items[self.cursor] == .note) {
                 const ni = self.rows.items[self.cursor].note;
                 var i: u32 = 0;
-                for (self.notes.list.items) |*n| {
+                for (self.comments.list.items) |*n| {
                     if (!std.mem.eql(u8, n.path, f.path())) continue;
                     if (i == ni) return n;
                     i += 1;
@@ -1469,8 +1468,8 @@ pub const App = struct {
                 return null;
             }
         }
-        const at = self.noteLine() orelse return null;
-        return self.notes.at(at.path, at.line);
+        const at = self.commentLine() orelse return null;
+        return self.comments.at(at.path, at.line);
     }
 
     /// `<Space>vc`: the nearest note, opened to read and edit.
@@ -1479,43 +1478,43 @@ pub const App = struct {
     /// asking to see a note is usually near it rather than on it - the marker
     /// caught their eye a few lines away. The one under the cursor still wins
     /// when there is one.
-    fn noteView(self: *App, body: u16) !void {
-        if (self.noteUnderCursor() != null) return self.noteEdit();
+    fn commentView(self: *App, body: u16) !void {
+        if (self.commentUnderCursor() != null) return self.commentEdit();
 
         const f = self.current() orelse {
-            self.notice.set("no notes yet - `c` writes one", .{});
+            self.notice.set("no comments yet - `<Space>c` writes one", .{});
             return;
         };
-        const here = if (self.noteLine()) |at| at.line else 0;
+        const here = if (self.commentLine()) |at| at.line else 0;
 
         var best: ?u32 = null;
-        for (self.notes.items()) |n| {
+        for (self.comments.items()) |n| {
             if (!std.mem.eql(u8, n.path, f.path())) continue;
             if (best == null or dist(n.line, here) < dist(best.?, here)) best = n.line;
         }
         const line = best orelse {
             // None in this file. The review-wide walk is what reaches the
             // rest, and saying so beats silently jumping the reader elsewhere.
-            if (self.notes.len() == 0)
-                self.notice.set("no notes yet - `c` writes one", .{})
+            if (self.comments.len() == 0)
+                self.notice.set("no comments yet - `<Space>c` writes one", .{})
             else
-                self.notice.set("no notes in this file - `]c` finds the next one", .{});
+                self.notice.set("no comments in this file - `]c` finds the next one", .{});
             return;
         };
         self.gotoNewLine(line);
         self.clampScroll(body);
-        try self.noteEdit();
+        try self.commentEdit();
     }
 
-    fn noteDelete(self: *App) void {
-        const n = self.noteUnderCursor() orelse {
-            self.notice.set("no note here", .{});
+    fn commentDelete(self: *App) void {
+        const n = self.commentUnderCursor() orelse {
+            self.notice.set("no comment here", .{});
             return;
         };
-        self.notes.remove(n.id);
-        self.saveNotes();
+        self.comments.remove(n.id);
+        self.saveComments();
         self.rebuildRows(.line) catch {};
-        self.notice.set("note deleted", .{});
+        self.notice.set("comment deleted", .{});
     }
 
     fn dist(a: u32, b: u32) u32 {
@@ -1538,17 +1537,18 @@ pub const App = struct {
     /// `]c` / `[c`: the next note anywhere in the review, the way `]h` walks
     /// hunks. Notes are why the tool exists; stopping at a file boundary would
     /// leave the key unable to reach most of them.
-    fn noteStep(self: *App, delta: i32, body: u16) void {
-        if (self.notes.len() == 0) {
-            self.notice.set("no notes yet - `c` writes one", .{});
+    fn commentStep(self: *App, delta: i32, body: u16) void {
+        if (self.comments.len() == 0) {
+            self.notice.set("no comments yet - `<Space>c` writes one", .{});
             return;
         }
         const all = self.files();
-        const here = self.noteLine();
+        const here = self.commentLine();
 
         // Sorted by (file index, line), walked from where the cursor is.
-        var best: ?struct { fi: u32, line: u32 } = null;
-        for (self.notes.items()) |n| {
+        const Spot = struct { fi: u32, line: u32 };
+        var best: ?Spot = null;
+        for (self.comments.items()) |n| {
             var fi: ?u32 = null;
             for (all, 0..) |f, i| {
                 if (std.mem.eql(u8, f.path(), n.path)) fi = @intCast(i);
@@ -1570,9 +1570,32 @@ pub const App = struct {
             best = .{ .fi = at_fi, .line = n.line };
         }
 
-        const target = best orelse {
-            self.notice.set("no more notes that way", .{});
-            return;
+        // Nothing further that way, so come round - a review is a ring, and
+        // `]h` and `]f` already read that way. Stopping dead at the last one
+        // is the dropped keystroke this avoids.
+        const target = best orelse blk: {
+            var edge: ?Spot = null;
+            for (self.comments.items()) |n| {
+                var fi: ?u32 = null;
+                for (all, 0..) |f, i| {
+                    if (std.mem.eql(u8, f.path(), n.path)) fi = @intCast(i);
+                }
+                const at_fi = fi orelse continue;
+                if (edge) |e| {
+                    const further = if (delta > 0)
+                        (at_fi < e.fi or (at_fi == e.fi and n.line < e.line))
+                    else
+                        (at_fi > e.fi or (at_fi == e.fi and n.line > e.line));
+                    if (!further) continue;
+                }
+                edge = .{ .fi = at_fi, .line = n.line };
+            }
+            const e = edge orelse {
+                self.notice.set("no comments in the review", .{});
+                return;
+            };
+            self.notice.set("wrapped to the {s} comment", .{if (delta > 0) "first" else "last"});
+            break :blk e;
         };
         if (target.fi != self.file_index) {
             self.file_index = target.fi;
@@ -1599,15 +1622,15 @@ pub const App = struct {
     /// it is. The point of collecting notes rather than sending each: a dozen
     /// remarks is a dozen interruptions, or it is one file.
     fn submitReview(self: *App) !void {
-        if (self.notes.openCount() == 0) {
-            self.notice.set("no open notes to submit", .{});
+        if (self.comments.openCount() == 0) {
+            self.notice.set("no open comments to submit", .{});
             return;
         }
         self.review_n += 1;
 
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
-        const written = try review_file.render(&out, self.gpa, &self.notes, self.review_n);
+        const written = try review_file.render(&out, self.gpa, &self.comments, self.review_n);
 
         var buf: [64]u8 = undefined;
         const rel = review_file.path(&buf, self.review_n);
@@ -1616,33 +1639,41 @@ pub const App = struct {
             self.review_n -= 1;
             return;
         };
-        self.notes.markSent();
-        self.saveNotes();
+        self.comments.markSent();
+        self.saveComments();
 
         // One line, no newline in it: hard rule 1, and the reason the notes
         // themselves may be as long as they like.
         self.outgoing.clearRetainingCapacity();
         var line_buf: [256]u8 = undefined;
-        const one = std.fmt.bufPrint(&line_buf, "review ready: {s} ({d} note{s})", .{
+        const one = std.fmt.bufPrint(&line_buf, "review ready: {s} ({d} comment{s})", .{
             rel, written, if (written == 1) "" else "s",
         }) catch rel;
         try self.outgoing.appendSlice(self.gpa, one);
         self.want_send = .send;
     }
 
-    pub fn saveNotes(self: *App) void {
-        if (!self.notes.dirty) return;
+    pub fn saveComments(self: *App) void {
+        if (!self.comments.dirty) return;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
-        notes_mod.write(&out, self.gpa, &self.notes) catch return;
-        fs_mod.writeStateFile(self.io, ".lgtm/notes.jsonl", out.items) catch return;
-        self.notes.dirty = false;
+        comments_mod.write(&out, self.gpa, &self.comments) catch return;
+        fs_mod.writeStateFile(self.io, ".lgtm/comments.jsonl", out.items) catch return;
+        self.comments.dirty = false;
     }
 
-    pub fn loadNotes(self: *App) void {
-        const text = fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return;
+    pub fn loadComments(self: *App) void {
+        // `.lgtm/notes.jsonl` is the name this file had before the feature was
+        // called comments. Read once and it is written back under the new
+        // name: renaming a concept should not lose a reader's remarks.
+        const text = fs_mod.readFile(self.io, self.gpa, ".lgtm/comments.jsonl", 1 << 20) catch
+            fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return;
         defer self.gpa.free(text);
-        notes_mod.read(&self.notes, text) catch {};
+        comments_mod.read(&self.comments, text) catch {};
+        if (self.comments.len() > 0 and !fs_mod.fileExists(self.io, ".lgtm/comments.jsonl")) {
+            self.comments.dirty = true;
+            self.saveComments();
+        }
     }
 
     fn closeCompose(self: *App) void {
@@ -1659,8 +1690,8 @@ pub const App = struct {
         switch (self.compose.feed(key)) {
             .typing => {},
             .cancel => {
-                self.compose_is_note = false;
-                self.compose_note = null;
+                self.compose_is_comment = false;
+                self.compose_comment = null;
                 self.closeCompose();
             },
             .presets => self.preset_index = 0,
@@ -1693,12 +1724,12 @@ pub const App = struct {
                     self.notice.set("nothing to send", .{});
                     return;
                 }
-                if (self.compose_is_note) {
-                    self.compose_is_note = false;
-                    if (self.compose_note) |id| {
-                        try self.notes.edit(id, raw);
-                        self.notice.set("note updated", .{});
-                    } else if (self.noteLine()) |at| {
+                if (self.compose_is_comment) {
+                    self.compose_is_comment = false;
+                    if (self.compose_comment) |id| {
+                        try self.comments.edit(id, raw);
+                        self.notice.set("comment updated", .{});
+                    } else if (self.commentLine()) |at| {
                         // The line's text goes with the note, so a restart can
                         // find it again when the file moved underneath.
                         var anchor_text: []const u8 = "";
@@ -1707,15 +1738,15 @@ pub const App = struct {
                                 if (li < f.lines.len()) anchor_text = f.lines.text[li];
                             }
                         }
-                        _ = try self.notes.addAnchored(at.path, at.line, raw, anchor_text);
-                        self.notice.set("note added - <C-s> submits the review", .{});
+                        _ = try self.comments.addAnchored(at.path, at.line, raw, anchor_text);
+                        self.notice.set("comment added - <C-s> submits the review", .{});
                     }
-                    self.compose_note = null;
-                    self.saveNotes();
+                    self.compose_comment = null;
+                    self.saveComments();
                     // The note is a row now, so the layout has changed - and
                     // the reader should still be on the line they noted, not
                     // pushed off it by the row that just appeared under it.
-                    const on = self.noteLine();
+                    const on = self.commentLine();
                     self.rebuildRows(.reset) catch {};
                     if (on) |at| self.gotoNewLine(at.line);
                     self.clampScroll(body);
@@ -2024,7 +2055,7 @@ pub const App = struct {
         // A note wraps like a line does, and the scroll maths has to agree
         // with what `body.zig` draws or the viewport drifts.
         if (row < self.rows.len()) {
-            if (self.rows.items[row] == .note) return self.noteHeight(row, cap);
+            if (self.rows.items[row] == .note) return self.commentHeight(row, cap);
         }
         const li = self.rows.lineAt(row) orelse return 1;
         if (li >= f.lines.text.len) return 1;
@@ -2036,9 +2067,9 @@ pub const App = struct {
         );
     }
 
-    fn noteHeight(self: *App, row: u32, cap: u16) u16 {
+    fn commentHeight(self: *App, row: u32, cap: u16) u16 {
         const ni = self.rows.items[row].note;
-        const marks = self.noteMarks();
+        const marks = self.commentMarks();
         if (ni >= marks.len) return 1;
         const col: u16 = if (self.cols > 8) 6 else 0;
         const width = self.cols -| col -| 2;
@@ -3402,8 +3433,6 @@ test "the leader forms reach the same commands as the bracket forms" {
         try testing.expectEqual(by_leader, fx.app.cursor);
     }
 
-    // The file pair moves a file rather than a row, so it is checked by where
-    // it lands rather than against its bracket form.
     try fx.press("<Space>nf");
     try fx.expectFile(1);
     try fx.press("<Space>pf");

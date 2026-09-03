@@ -60,8 +60,8 @@ pub const Glyphs = struct {
     heavy_br: []const u8,
 
     /// Stands in for the part of a path there was no room to draw.
-    /// The gutter mark for a line carrying a note.
-    note: []const u8,
+    /// The gutter mark for a line carrying a comment.
+    comment_mark: []const u8,
 
     ellipsis: []const u8,
 
@@ -101,7 +101,7 @@ pub const Glyphs = struct {
         .heavy_tr = "\u{2513}",
         .heavy_bl = "\u{2517}",
         .heavy_br = "\u{251b}",
-        .note = "\u{25cf}",
+        .comment_mark = "\u{25cf}",
         .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
@@ -149,7 +149,7 @@ pub const Glyphs = struct {
         .heavy_tr = "+",
         .heavy_bl = "+",
         .heavy_br = "+",
-        .note = "*",
+        .comment_mark = "*",
         .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.
@@ -215,11 +215,11 @@ pub const Theme = struct {
     add_sign: Style,
     del_sign: Style,
     hunk_id: Style,
-    /// A note in the gutter. Three states, three colours: still meant, already
+    /// A comment in the gutter. Three states, three colours: still meant, already
     /// sent, and pointing at code that moved out from under it.
-    note_open: Style,
-    note_sent: Style,
-    note_stale: Style,
+    comment_open: Style,
+    comment_sent: Style,
+    comment_stale: Style,
     path: Style,
     added_count: Style,
     removed_count: Style,
@@ -287,9 +287,9 @@ pub fn fromPalette(p: Palette) Theme {
         .add_sign = .{ .fg = p.green, .bold = true },
         .del_sign = .{ .fg = p.red, .bold = true },
         .hunk_id = .{ .fg = p.yellow, .bold = true },
-        .note_open = .{ .fg = p.cyan, .bold = true },
-        .note_sent = .{ .fg = p.muted },
-        .note_stale = .{ .fg = p.red },
+        .comment_open = .{ .fg = p.cyan, .bold = true },
+        .comment_sent = .{ .fg = p.muted },
+        .comment_stale = .{ .fg = p.red },
         .path = .{ .fg = p.fg, .bold = true },
         .added_count = .{ .fg = p.green },
         .removed_count = .{ .fg = p.red },

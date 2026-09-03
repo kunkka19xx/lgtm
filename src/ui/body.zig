@@ -113,7 +113,7 @@ const Mark = struct {
 fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.Error!i32 {
     switch (r) {
         .line => |li| return drawLine(f, v, row, li, mark),
-        .note => |ni| return drawNote(f, v, row, ni),
+        .note => |ni| return drawComment(f, v, row, ni),
         // Chrome is one screen row and never wraps, so it is drawn or it is
         // not; only a line and a note can straddle the top of the body.
         else => {},
@@ -140,14 +140,14 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
 /// A note under the line it belongs to, indented past the gutter and wrapped
 /// the way the code above it is - a review comment, in the place a review
 /// comment goes.
-fn drawNote(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
+fn drawComment(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
     if (ni >= v.notes.len) return 1;
     const n = v.notes[ni];
     const t = f.theme;
     const style = switch (n.state) {
-        .open => t.note_open,
-        .sent => t.note_sent,
-        .stale => t.note_stale,
+        .open => t.comment_open,
+        .sent => t.comment_sent,
+        .stale => t.comment_stale,
     };
 
     const col = if (f.width() > 8) @as(u16, 6) else 0;
@@ -164,7 +164,7 @@ fn drawNote(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
             if (onScreen(f, row + rows)) |at| {
                 // The marker only on the first row, so a wrapped note reads as
                 // one remark rather than as several.
-                if (rows == 0) f.put(at, col -| 2, f.glyphs.note, style);
+                if (rows == 0) f.put(at, col -| 2, f.glyphs.comment_mark, style);
                 f.put(at, col, chunk.slice(line), style);
             }
             rows += 1;
@@ -273,10 +273,10 @@ fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i3
         if (no_new != 0 and col > 0) {
             for (v.notes) |m| {
                 if (m.line != no_new) continue;
-                f.put(at, col - 1, g.note, withBg(switch (m.state) {
-                    .open => t.note_open,
-                    .sent => t.note_sent,
-                    .stale => t.note_stale,
+                f.put(at, col - 1, g.comment_mark, withBg(switch (m.state) {
+                    .open => t.comment_open,
+                    .sent => t.comment_sent,
+                    .stale => t.comment_stale,
                 }, bg));
                 break;
             }

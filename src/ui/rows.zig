@@ -143,13 +143,13 @@ pub fn gutter(f: *const diff.FileDiff) u16 {
 /// rule between hunks but never before the first or after the last.
 /// A note as the row builder needs it: which line it hangs under, and where
 /// to find its text when the row is drawn.
-pub const NoteAt = struct { line: u32, index: u32 };
+pub const CommentAt = struct { line: u32, index: u32 };
 
 pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
     return buildWith(gpa, f, &.{});
 }
 
-pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const NoteAt) Allocator.Error!Rows {
+pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const CommentAt) Allocator.Error!Rows {
     var items: std.ArrayList(Row) = .empty;
     errdefer items.deinit(gpa);
     var hunk_rows: std.ArrayList(u32) = .empty;
@@ -171,7 +171,7 @@ pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const NoteAt)
         var i: u32 = 0;
         while (i < f.lines.len()) : (i += 1) {
             try items.append(gpa, .{ .line = i });
-            try appendNotes(gpa, &items, f, i, notes);
+            try appendComments(gpa, &items, f, i, notes);
         }
         return .{
             .items = try items.toOwnedSlice(gpa),
@@ -186,7 +186,7 @@ pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const NoteAt)
         var i = h.lo;
         while (i < h.hi) : (i += 1) {
             try items.append(gpa, .{ .line = i });
-            try appendNotes(gpa, &items, f, i, notes);
+            try appendComments(gpa, &items, f, i, notes);
         }
     }
 
@@ -199,12 +199,12 @@ pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const NoteAt)
 }
 
 /// Every note hanging under line `li`, in the order they were written.
-fn appendNotes(
+fn appendComments(
     gpa: Allocator,
     items: *std.ArrayList(Row),
     f: *const diff.FileDiff,
     li: u32,
-    notes: []const NoteAt,
+    notes: []const CommentAt,
 ) Allocator.Error!void {
     if (notes.len == 0 or li >= f.lines.len()) return;
     const no = f.lines.new_no[li];

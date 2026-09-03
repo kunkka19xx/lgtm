@@ -81,7 +81,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.presets_cfg = opts.cfg.presets;
-    app.notes_inline = opts.cfg.ui.notes == .inline_;
+    app.comments_inline = opts.cfg.ui.comments == .inline_;
     app.compose_at = switch (opts.cfg.ui.compose) {
         .bottom => .bottom,
         .top => .top,
@@ -156,7 +156,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     fs.ensureSelfIgnore(io);
     // Notes outlive the process: the whole point of `.lgtm/` is that killing
     // the pane costs scroll position and nothing else (ARCHITECTURE.md 1).
-    app.loadNotes();
+    app.loadComments();
 
     try app.rediff();
 

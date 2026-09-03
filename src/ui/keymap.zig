@@ -65,12 +65,11 @@ pub const Command = enum {
     clear_search,
     compose_ask,
     file_browse,
-    note_add,
-    note_view,
-    note_edit,
-    note_delete,
-    next_note,
-    prev_note,
+    comment_add,
+    comment_view,
+    comment_delete,
+    next_comment,
+    prev_comment,
     submit_review,
     toggle_ignored,
     copy_text,
@@ -193,7 +192,7 @@ pub const Group = enum {
     move,
     jump,
     send,
-    note,
+    comment,
     find,
     view,
 
@@ -297,10 +296,12 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)", .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .group = .jump },
     .{ .chords = &.{ leader, c('p'), c('h') }, .command = .prev_hunk, .group = .jump },
+
     .{ .chords = &.{ c(']'), c('f') }, .command = .next_file, .desc = "next file (wraps)", .group = .jump },
     .{ .chords = &.{ c('['), c('f') }, .command = .prev_file, .desc = "previous file (wraps)", .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .group = .jump },
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .group = .jump },
+
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line", .group = .move },
     .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "compose a message to the agent", .group = .send },
     .{ .chords = &.{c('y')}, .command = .copy_text, .desc = "yank the selection, or whole lines", .group = .send },
@@ -317,16 +318,20 @@ pub const default_bindings: []const Binding = &.{
     // Notes are the second half of the loop: collect while reading, submit
     // once. `c` for comment, the letter every review tool uses; `]c`/`[c`
     // walk them the way `]h` walks hunks.
-    .{ .chords = &.{c('c')}, .command = .note_add, .desc = "write a note on this line", .group = .note },
-    .{ .chords = &.{c('C')}, .command = .note_edit, .desc = "edit the note under the cursor", .group = .note },
-    .{ .chords = &.{ c('d'), c('c') }, .command = .note_delete, .desc = "delete the note under the cursor", .group = .note },
-    .{ .chords = &.{ c(']'), c('c') }, .command = .next_note, .desc = "next and previous note", .group = .note },
-    .{ .chords = &.{ c('['), c('c') }, .command = .prev_note, .desc = "next and previous note", .group = .note },
-    // The leader spellings, the same way `<Space>nh` mirrors `]h`.
-    .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_note, .group = .note },
-    .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_note, .group = .note },
-    .{ .chords = &.{ leader, c('v'), c('c') }, .command = .note_view, .desc = "open the nearest note to read or edit", .group = .note },
-    .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .note },
+    // Behind the leader, every one of them. `c` is vim's change operator and
+    // `C` is change-to-end-of-line - the two most-used keys after `d` - and
+    // `dc` is `d` waiting for a motion. Editing is designed for rather than
+    // out (ARCHITECTURE.md 11), so taking them was borrowing against a debt
+    // that comes due the day insert mode lands. This is the same argument
+    // that moved the ask presets off `a`, `x` and `!`.
+    .{ .chords = &.{ leader, c('c') }, .command = .comment_add, .desc = "write a comment on this line", .group = .comment },
+    .{ .chords = &.{ leader, c('d'), c('c') }, .command = .comment_delete, .desc = "delete the comment here", .group = .comment },
+    .{ .chords = &.{ c(']'), c('c') }, .command = .next_comment, .desc = "next and previous comment (wraps)", .group = .comment },
+    .{ .chords = &.{ c('['), c('c') }, .command = .prev_comment, .desc = "next and previous comment (wraps)", .group = .comment },
+    .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_comment, .group = .comment },
+    .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
+    .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
+    .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .comment },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "next and previous match", .group = .find },
@@ -346,7 +351,7 @@ pub const default_bindings: []const Binding = &.{
     // redo/reload key everywhere else and nothing takes it.
     .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff", .group = .view },
     .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files", .group = .find },
-    .{ .chords = &.{ leader, c('d') }, .command = .file_browse, .desc = "list every file in the project", .group = .find },
+    .{ .chords = &.{ leader, c('F') }, .command = .file_browse, .desc = "list every file in the project", .group = .find },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help", .group = .view },
@@ -542,8 +547,22 @@ test "a leader sequence resolves on its last key" {
     try testing.expectEqual(Command.next_file, km.feed(tap('f'), .normal).command);
 
     try testing.expect(km.feed(tap(' '), .normal) == .pending);
-    try testing.expect(km.feed(tap('p'), .normal) == .pending);
-    try testing.expectEqual(Command.prev_file, km.feed(tap('f'), .normal).command);
+    try testing.expect(km.feed(tap('v'), .normal) == .pending);
+    try testing.expectEqual(Command.comment_view, km.feed(tap('c'), .normal).command);
+}
+
+test "one letter, two lengths: <Space>c and <Space>dc both resolve" {
+    // `c` is the comment key everywhere: bare after the leader it writes one,
+    // and after a `d`/`v` verb it is the noun that verb acts on. The dispatch
+    // has to tell a one-key sequence from a two-key one, which is why
+    // `<Space>c` can be a command only because nothing spells `<Space>c?`.
+    var km: Keymap = .{};
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    try testing.expectEqual(Command.comment_add, km.feed(tap('c'), .normal).command);
+
+    try testing.expect(km.feed(tap(' '), .normal) == .pending);
+    try testing.expect(km.feed(tap('d'), .normal) == .pending);
+    try testing.expectEqual(Command.comment_delete, km.feed(tap('c'), .normal).command);
 }
 
 test "the leader is never bound on its own" {
@@ -576,12 +595,10 @@ test "leader motions are live in visual mode like the bracket forms" {
 test "ctrl is part of the match, not ignored" {
     var km: Keymap = .{};
     try testing.expectEqual(Command.page_down, km.feed(ctrlTap('d'), .normal).command);
-    // Plain 'd' opens the `dc` sequence and must not fall through to Ctrl-d.
-    try testing.expect(km.feed(tap('d'), .normal) == .pending);
-    try testing.expectEqual(Command.note_delete, km.feed(tap('c'), .normal).command);
-    // And a `d` that goes nowhere drops without stranding the next keystroke.
-    try testing.expect(km.feed(tap('d'), .normal) == .pending);
-    try testing.expect(km.feed(tap('z'), .normal) == .none);
+    // Plain 'd' is not bound - it belongs to vim's change/delete operators,
+    // which is why the note keys moved behind the leader - and it must not
+    // fall through to Ctrl-d.
+    try testing.expect(km.feed(tap('d'), .normal) == .none);
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 

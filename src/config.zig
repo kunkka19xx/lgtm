@@ -46,18 +46,21 @@ pub const Icons = enum { unicode, ascii, nerd };
 /// terminal puts the thing you are typing into.
 pub const ComposeAt = enum { bottom, top, centre };
 
-/// How a note shows in the diff.
+/// How a comment shows in the diff.
 ///
-/// `inline` draws the text under its line, the way a review comment sits under
-/// its code. `marker` draws only the gutter dot and leaves reading it to
-/// `<Space>vc`, which keeps the diff the shape the file is - some readers want
-/// the remark in front of them, some want the code.
-pub const NoteStyle = enum { inline_, marker };
+/// `marker`, the default, draws only the gutter dot and leaves reading it to
+/// `<Space>vc`. A diff is dense already, and a remark spliced between two
+/// lines of code puts prose where the reader is scanning structure - the dot
+/// says "there is something here" without taking a row to say it.
+///
+/// `inline` draws the text under its line for readers who would rather have
+/// the remark in front of them than one keystroke away.
+pub const CommentStyle = enum { inline_, marker };
 
 pub const Ui = struct {
     icons: Icons = .unicode,
     compose: ComposeAt = .bottom,
-    notes: NoteStyle = .inline_,
+    comments: CommentStyle = .marker,
     /// Soft wrap. On, a line wider than the pane continues on the next screen
     /// row; off, it is cut at the edge. Default on because the pane this is
     /// designed for is a split one, and a review that hides the end of a line
@@ -261,14 +264,14 @@ pub const Loader = struct {
                         self.note(src, line, "ui.compose must be \"bottom\", \"top\" or \"centre\", not \"{s}\"", .{t});
                         return;
                     };
-                } else if (std.mem.eql(u8, key, "notes")) {
+                } else if (std.mem.eql(u8, key, "comments")) {
                     const t = self.wantString(src, line, key, value) orelse return;
-                    self.cfg.ui.notes = if (std.mem.eql(u8, t, "inline"))
+                    self.cfg.ui.comments = if (std.mem.eql(u8, t, "inline"))
                         .inline_
                     else if (std.mem.eql(u8, t, "marker"))
                         .marker
                     else {
-                        self.note(src, line, "ui.notes must be \"inline\" or \"marker\", not \"{s}\"", .{t});
+                        self.note(src, line, "ui.comments must be \"inline\" or \"marker\", not \"{s}\"", .{t});
                         return;
                     };
                 } else if (std.mem.eql(u8, key, "icons")) {

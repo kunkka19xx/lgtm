@@ -1,27 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Review notes: the remarks collected while reading, and the machinery that
+// Review comments: the remarks collected while reading, and the machinery that
 // keeps them pointing at the right line while the agent rewrites the file
 // underneath them.
 //
 // The whole feature rests on `core/anchor.zig`, which is why that was built
-// first and gated on its own (PLAN.md phase 1): a note that drifts to the
-// wrong line is worse than no note at all, and finding that out with 300 lines
-// of anchoring was far cheaper than with a note UI attached. It passed at 100%
+// first and gated on its own (PLAN.md phase 1): a comment that drifts to the
+// wrong line is worse than no comment at all, and finding that out with 300 lines
+// of anchoring was far cheaper than with a comment UI attached. It passed at 100%
 // across the fixture set, so this file can be written as if re-anchoring works
 // - and handle the case where it does not by saying so rather than guessing.
 //
 // Two hard rules govern everything here:
 //
-//   - **Notes own their bytes** (rule 4). They outlive the diff arena, which
+//   - **Comments own their bytes** (rule 4). They outlive the diff arena, which
 //     is reset on every re-diff, so `path` and `body` are copies taken from
-//     the session allocator. A note holding a slice into the arena would read
+//     the session allocator. A comment holding a slice into the arena would read
 //     as plausible garbage one re-diff later.
-//   - **A note is never silently dropped** (rule 7). One that cannot be
+//   - **A comment is never silently dropped** (rule 7). One that cannot be
 //     re-anchored becomes `stale` and stays visible, because the reader wrote
 //     it and only the reader gets to decide it no longer matters.
 //
-// `core/`, so no UI and no terminal: notes in, notes out, and a store that can
+// `core/`, so no UI and no terminal: comments in, comments out, and a store that can
 // be driven entirely from a test.
 
 const std = @import("std");
@@ -29,7 +29,7 @@ const Allocator = std.mem.Allocator;
 
 const anchor = @import("anchor.zig");
 
-/// Where a note is in its life.
+/// Where a comment is in its life.
 ///
 /// `sent` rather than deleting on submit: a review that has been handed to the
 /// agent is still the thing the reader wrote, and seeing it greyed out beside
@@ -50,7 +50,7 @@ pub const State = enum {
     }
 };
 
-pub const Note = struct {
+pub const Comment = struct {
     id: u32,
     /// Path as the review knows it: the new file's, or the old one's for a
     /// deletion. Owned.
@@ -62,7 +62,7 @@ pub const Note = struct {
     /// bridge, and `review.zig` sends one line naming the file).
     body: []const u8,
     state: State = .open,
-    /// The text of the line the note was written against. Owned.
+    /// The text of the line the comment was written against. Owned.
     ///
     /// Within a session `carry` does better than this - it has both versions
     /// of the file and reads the answer out of a line map. Across a *restart*
@@ -71,22 +71,22 @@ pub const Note = struct {
     /// text is enough to find where it went, or to say it has gone.
     anchor: []const u8 = "",
 
-    pub fn deinit(self: Note, gpa: Allocator) void {
+    pub fn deinit(self: Comment, gpa: Allocator) void {
         gpa.free(self.path);
         gpa.free(self.body);
         gpa.free(self.anchor);
     }
 };
 
-/// Every note in the session, in the order they were written.
+/// Every comment in the session, in the order they were written.
 ///
 /// Order is insertion order rather than by file and line: `]c` walks them the
 /// way the review is laid out, and this list is what persists. Sorting on
 /// write would make the file churn for no reason.
 pub const Store = struct {
     gpa: Allocator,
-    list: std.ArrayList(Note) = .empty,
-    /// Ids never repeat within a session, so a note deleted and another added
+    list: std.ArrayList(Comment) = .empty,
+    /// Ids never repeat within a session, so a comment deleted and another added
     /// do not collide in `review-N.md`.
     next_id: u32 = 1,
     /// Set when anything changed since the last save, so an idle pane does no
@@ -102,7 +102,7 @@ pub const Store = struct {
         self.list.deinit(self.gpa);
     }
 
-    pub fn items(self: *const Store) []const Note {
+    pub fn items(self: *const Store) []const Comment {
         return self.list.items;
     }
 
@@ -138,16 +138,16 @@ pub const Store = struct {
         return id;
     }
 
-    pub fn find(self: *Store, id: u32) ?*Note {
+    pub fn find(self: *Store, id: u32) ?*Comment {
         for (self.list.items) |*n| {
             if (n.id == id) return n;
         }
         return null;
     }
 
-    /// The note on a line, if there is one. First match wins: two notes on one
+    /// The comment on a line, if there is one. First match wins: two comments on one
     /// line is possible and the gutter can only mark it once.
-    pub fn at(self: *Store, path: []const u8, line: u32) ?*Note {
+    pub fn at(self: *Store, path: []const u8, line: u32) ?*Comment {
         for (self.list.items) |*n| {
             if (n.line == line and std.mem.eql(u8, n.path, path)) return n;
         }
@@ -174,7 +174,7 @@ pub const Store = struct {
         }
     }
 
-    /// Marks every open note as sent. Called after a review file is written,
+    /// Marks every open comment as sent. Called after a review file is written,
     /// because that is the moment the agent has them.
     pub fn markSent(self: *Store) void {
         for (self.list.items) |*n| {
@@ -191,14 +191,14 @@ pub const Store = struct {
         return n;
     }
 
-    /// Re-places notes on `path` against a file that changed while lgtm was
+    /// Re-places comments on `path` against a file that changed while lgtm was
     /// not running.
     ///
     /// `carry` is the good path and cannot be used here: it needs the previous
     /// version of the file, and after a restart there is none. What is left is
-    /// the one line the note was written against. If it is still where the
-    /// note says, nothing moves. If it is elsewhere in the file, the note goes
-    /// there. If it is nowhere, the note is stale - never silently moved to a
+    /// the one line the comment was written against. If it is still where the
+    /// comment says, nothing moves. If it is elsewhere in the file, the comment goes
+    /// there. If it is nowhere, the comment is stale - never silently moved to a
     /// line that merely happens to have the right number (rule 7).
     pub fn reconcile(self: *Store, path: []const u8, text: []const u8) void {
         for (self.list.items) |*n| {
@@ -212,8 +212,8 @@ pub const Store = struct {
                 no += 1;
                 const line = std.mem.trimEnd(u8, raw, "\r");
                 if (!std.mem.eql(u8, line, n.anchor)) continue;
-                // The nearest occurrence to where the note thinks it is: a
-                // line that appears twice should not drag the note to the top
+                // The nearest occurrence to where the comment thinks it is: a
+                // line that appears twice should not drag the comment to the top
                 // of the file.
                 if (found == null or dist(no, n.line) < dist(found.?, n.line)) found = no;
             }
@@ -227,10 +227,10 @@ pub const Store = struct {
         }
     }
 
-    /// Carries every note on `path` from one version of the file to the next.
+    /// Carries every comment on `path` from one version of the file to the next.
     ///
     /// The primary path is a line map, not a search (PERFORMANCE.md 3.1), and
-    /// `anchor.carryLine` is where that lives. A note the ladder cannot place
+    /// `anchor.carryLine` is where that lives. A comment the ladder cannot place
     /// becomes stale rather than moving to a plausible-looking wrong line: a
     /// remark attached to the wrong code is a lie, and a stale one is merely
     /// out of date.
@@ -243,7 +243,7 @@ pub const Store = struct {
         for (self.list.items) |*n| {
             if (n.state == .stale) continue;
             if (!std.mem.eql(u8, n.path, path)) continue;
-            // `carryLine` counts from zero; notes count from one, the way a
+            // `carryLine` counts from zero; comments count from one, the way a
             // reader does and the way every reference the tool sends does.
             const from: u32 = if (n.line == 0) 0 else n.line - 1;
             if (try anchor.carryLine(self.gpa, from_text, to_text, from)) |to| {
@@ -263,7 +263,7 @@ fn dist(a: u32, b: u32) u32 {
 
 // -- persistence -------------------------------------------------------------
 //
-// One note per line, our own escaping rather than `std.json`: the fields are
+// One comment per line, our own escaping rather than `std.json`: the fields are
 // four scalars and a string, the project already hand-rolls its TOML reader
 // for the same reason, and a format we own cannot break under a pre-1.0
 // standard library.
@@ -383,9 +383,9 @@ fn field(line: []const u8, key: []const u8) ?u64 {
 
 const testing = std.testing;
 
-test "a note owns its bytes, so the diff arena may go" {
+test "a comment owns its bytes, so the diff arena may go" {
     // Hard rule 4, stated as the test that would catch breaking it: the
-    // strings handed in are freed, and the note still reads correctly.
+    // strings handed in are freed, and the comment still reads correctly.
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     const path = try arena.allocator().dupe(u8, "src/auth.zig");
     const body = try arena.allocator().dupe(u8, "this allocates on every request");
@@ -401,7 +401,7 @@ test "a note owns its bytes, so the diff arena may go" {
     try testing.expectEqualStrings("this allocates on every request", n.body);
 }
 
-test "a note follows its line when the agent rewrites the file" {
+test "a comment follows its line when the agent rewrites the file" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     _ = try store.add("a.zig", 3, "why b and not a?");
@@ -414,7 +414,7 @@ test "a note follows its line when the agent rewrites the file" {
         \\}
         \\
     ;
-    // Two lines added at the top: the note's line moves from 3 to 5.
+    // Two lines added at the top: the comment's line moves from 3 to 5.
     const after =
         \\const std = @import("std");
         \\
@@ -430,7 +430,7 @@ test "a note follows its line when the agent rewrites the file" {
     try testing.expectEqual(State.open, store.items()[0].state);
 }
 
-test "a note that cannot be placed goes stale rather than moving somewhere wrong" {
+test "a comment that cannot be placed goes stale rather than moving somewhere wrong" {
     // Hard rule 7. A remark attached to the wrong code is a lie; one marked
     // stale is merely out of date, and the reader decides what to do with it.
     var store: Store = .init(testing.allocator);
@@ -455,7 +455,7 @@ test "a note that cannot be placed goes stale rather than moving somewhere wrong
     try testing.expectEqualStrings("this branch is dead", store.items()[0].body);
 }
 
-test "a note finds its line again after a restart, when the file moved" {
+test "a comment finds its line again after a restart, when the file moved" {
     // The gap `carry` cannot cover: lgtm was not running when the file
     // changed, so there is no previous version to diff. One line of stored
     // text is what is left, and it is enough.
@@ -476,7 +476,7 @@ test "a note finds its line again after a restart, when the file moved" {
     try testing.expectEqual(State.open, store.items()[0].state);
 }
 
-test "a note whose line is gone after a restart goes stale, not somewhere wrong" {
+test "a comment whose line is gone after a restart goes stale, not somewhere wrong" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     _ = try store.addAnchored("a.zig", 2, "dead branch", "    if (never()) unreachable;");
@@ -487,7 +487,7 @@ test "a note whose line is gone after a restart goes stale, not somewhere wrong"
 }
 
 test "a line that appears twice takes the nearest one" {
-    // Otherwise a note on the second `}` of a file jumps to the first.
+    // Otherwise a comment on the second `}` of a file jumps to the first.
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     _ = try store.addAnchored("a.zig", 6, "this one", "}");
@@ -496,7 +496,7 @@ test "a line that appears twice takes the nearest one" {
     try testing.expectEqual(@as(u32, 6), store.items()[0].line);
 }
 
-test "notes survive a round trip through the file, newlines and quotes included" {
+test "comments survive a round trip through the file, newlines and quotes included" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     _ = try store.addAnchored("src/a.zig", 12, "why \"this\" way?\nand not the other", "    const x = 1;");
@@ -525,12 +525,12 @@ test "notes survive a round trip through the file, newlines and quotes included"
     try testing.expect(back.next_id > back.items()[1].id);
 }
 
-test "a corrupt line costs one note, not all of them" {
+test "a corrupt line costs one comment, not all of them" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     try read(&store,
         \\{"id":1,"line":4,"state":"open","path":"a.zig","body":"first"}
-        \\this line is not a note
+        \\this line is not a comment
         \\{"id":2,"line":9,"state":"open","path":"b.zig","body":"second"}
         \\
     );
@@ -538,7 +538,7 @@ test "a corrupt line costs one note, not all of them" {
     try testing.expectEqualStrings("second", store.items()[1].body);
 }
 
-test "editing reopens a sent note, because the agent has the old text" {
+test "editing reopens a sent comment, because the agent has the old text" {
     var store: Store = .init(testing.allocator);
     defer store.deinit();
     const id = try store.add("a.zig", 1, "first thought");
