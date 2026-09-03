@@ -768,11 +768,14 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     const box_top = geom.top;
     const box_col = geom.col;
 
-    const title = try footerOf(f.arena, "", &.{}, if (v.normal)
-        &.{compose_title_normal}
+    const label = try std.fmt.allocPrint(f.arena, "{s} - {s}", .{
+        v.what, if (v.normal) "NORMAL" else "INSERT",
+    });
+    const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
+    const foot = try footerOf(f.arena, "", if (v.normal)
+        (if (v.to_agent) compose_normal_keys else note_normal_keys)
     else
-        &.{compose_title}, content);
-    const foot = try footerOf(f.arena, "", if (v.normal) compose_normal_keys else compose_keys, &.{}, content);
+        (if (v.to_agent) compose_keys else note_keys), &.{}, content);
     const box: Box = .{
         .cols = 1,
         .per = text_rows,
@@ -818,8 +821,23 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, box_h, width, top, height, sel);
 }
 
-const compose_title: keytext.HelpEntry = .{ .keys = "", .desc = "compose - INSERT" };
-const compose_title_normal: keytext.HelpEntry = .{ .keys = "", .desc = "compose - NORMAL" };
+/// A note is saved, not sent: it goes to the store and reaches the agent later
+/// as part of `review-N.md`. A footer that said "send" would promise the wrong
+/// thing about where the text is about to go.
+const note_keys: []const keytext.HelpEntry = &.{
+    .{ .keys = "<CR>", .desc = "save" },
+    .{ .keys = "<C-i>", .desc = "preset" },
+    .{ .keys = "@", .desc = "file" },
+    .{ .keys = "<S-CR>", .desc = "line" },
+    .{ .keys = "<Esc>", .desc = "cancel" },
+};
+
+const note_normal_keys: []const keytext.HelpEntry = &.{
+    .{ .keys = "o", .desc = "new line" },
+    .{ .keys = "i", .desc = "insert" },
+    .{ .keys = "<CR>", .desc = "save" },
+    .{ .keys = "<Esc>", .desc = "cancel" },
+};
 
 const compose_normal_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "o", .desc = "new line" },

@@ -529,8 +529,18 @@ pub const App = struct {
     /// The compose box as a view, for the callers that draw it without a
     /// `View` around it - the empty screen has no diff to build one from.
     pub fn composeView(self: *App, arena: Allocator) render.ComposeView {
-        _ = arena;
+        // The line a note is being written against, in the title. The store
+        // holds it, so the body does not have to - and a note whose text
+        // repeats its own line number would say it twice in `review-N.md`.
+        var what: []const u8 = "compose";
+        if (self.compose_is_note) {
+            what = if (self.noteLine()) |at|
+                std.fmt.allocPrint(arena, "note {s}:{d}", .{ at.path, at.line }) catch "note"
+            else
+                "note";
+        }
         return .{
+            .what = what,
             .text = self.compose.text(),
             .cursor = self.compose.cursor,
             .joins = compose_mod.hasBreak(self.compose.text()),
@@ -1199,8 +1209,18 @@ pub const App = struct {
 
         // No hunk and no line is a file whose body was never parsed. `#0` and
         // `:0` would both be lies, so the path is the whole reference.
-        const tmpl = if (r.line == 0 or r.change_id == hunk.no_id)
+        // Three shapes, twice: with a change id for a file in the review, and
+        // without for one being read outside it. The `#id` is a claim that
+        // this hunk changed, so a file with no hunks does not get one.
+        const tmpl = if (r.line == 0)
             self.templates.ref_file
+        else if (r.change_id == hunk.no_id)
+            (if (r.end != 0)
+                self.templates.ref_file_range
+            else if (r.span.len > 0)
+                self.templates.ref_file_span
+            else
+                self.templates.ref_file_line)
         else if (r.deleted)
             self.templates.ref_hunk
         else if (r.end != 0)

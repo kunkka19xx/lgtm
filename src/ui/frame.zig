@@ -351,6 +351,11 @@ pub const ComposeView = struct {
     /// Which half of the box has the keyboard, drawn in its title. A modal
     /// box that does not say which mode it is in is a box that eats keystrokes.
     normal: bool = false,
+    /// What the box is for, drawn in its title: `compose`, or `note a.zig:47`.
+    /// A note's line lives here rather than in the text, because the store
+    /// already knows it - typing it into the body would put it in the review
+    /// file twice.
+    what: []const u8 = "compose",
 };
 
 pub const Placement = enum { bottom, top, centre };

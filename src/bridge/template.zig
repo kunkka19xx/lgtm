@@ -28,6 +28,14 @@ pub const Table = struct {
     /// exceeded `large_file_lines`. The path is the whole of the honest answer.
     ref_file: []const u8 = "{path}",
 
+    /// A line in a file that has no hunks at all: one opened with `<Space>d`
+    /// and read rather than reviewed. There is no `#id` because nothing
+    /// changed in it, and inventing one would claim otherwise - but the line
+    /// is real and is the whole point of pointing at it.
+    ref_file_line: []const u8 = "{path}:{line}",
+    ref_file_range: []const u8 = "{path}:{start}-{end}",
+    ref_file_span: []const u8 = "{path}:{line} `{span}`",
+
     /// The ask presets (FEATURES.md 2.1). `{ref}` is whichever of the above
     /// the cursor produced.
     ask_why: []const u8 = "{ref} - why this approach?",
