@@ -11,11 +11,14 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const vaxis = @import("vaxis");
 
+const diff = @import("../core/diff.zig");
 const event = @import("../core/event.zig");
 const body_mod = @import("body.zig");
 const motion = @import("motion.zig");
 const frame_mod = @import("frame.zig");
+const devicon = @import("devicon.zig");
 const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
 
@@ -126,16 +129,30 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
     const counter_w = f.win.gwidth(counter);
     const counts_w = f.win.gwidth(bar) + f.win.gwidth(added) + 1 + f.win.gwidth(removed);
 
+    // The same two signals the `F` list carries, for the same reason: the row
+    // has to answer "which file" and "what happened to it" without being read
+    // word by word. Colour says what happened, the icon says what kind of file
+    // it is, and neither costs a column the path was using - the icon takes
+    // two and the colour takes none.
+    const icon = devicon.forPath(v.file.path(), f.glyphs.file_icons);
+    const icon_w: u16 = if (icon) |i| f.win.gwidth(i.glyph) + 1 else 0;
+
     const fit = statusFit(
-        f.width(),
+        f.width() -| icon_w,
         if (right.len > 0) f.win.gwidth(right) + 1 else 0,
         counter_w,
         counts_w,
     );
 
     var col: u16 = 1;
+    if (icon) |i| {
+        // The icon in its filetype hue and the path in its status colour, the
+        // way `popup.zig` draws a row: two questions, two channels.
+        f.put(row, col, i.glyph, .{ .fg = hueOf(t, i.hue) });
+        col += icon_w;
+    }
     const shown = try path_mod.elide(f.arena, v.file.path(), fit.path, g.ellipsis, f.method());
-    col += try f.print(row, col, t.path, "{s}", .{shown});
+    col += try f.print(row, col, statusStyle(t, v.file.status), "{s}", .{shown});
     if (fit.counter) {
         f.put(row, col, counter, t.dim);
         col += counter_w;
@@ -148,6 +165,31 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
         f.put(row, col, removed, t.removed_count);
     }
     if (fit.right and right.len > 0) f.putRight(row, right, t.hunk_id);
+}
+
+/// The path's colour: green arrived, red left, amber changed, blue moved, grey
+/// cannot be read. Shared with the `F` list by intent rather than by code -
+/// the same five answers, so a file that is blue in the list is blue here.
+fn statusStyle(t: Theme, status: diff.Status) vaxis.Style {
+    return switch (status) {
+        .added => t.file_added,
+        .deleted => t.file_deleted,
+        .modified => t.file_modified,
+        .renamed => t.file_renamed,
+        .binary => t.file_binary,
+    };
+}
+
+fn hueOf(t: Theme, hue: devicon.Hue) vaxis.Color {
+    return switch (hue) {
+        .red => t.hues.red,
+        .green => t.hues.green,
+        .yellow => t.hues.yellow,
+        .blue => t.hues.blue,
+        .magenta => t.hues.magenta,
+        .cyan => t.hues.cyan,
+        .muted => t.hues.muted,
+    };
 }
 
 const StatusFit = struct {

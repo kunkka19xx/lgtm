@@ -123,7 +123,7 @@ and sends the words themselves.
 
 `y` is the vim key doing the vim thing: it yanks the selected text, and `Y`
 yanks whole lines. The reference lives on `<Space>y`, with `<Space>Y` for the
-reference plus the lines under it. `a` `!` `<Space>t` `x` send the reference with a question
+reference plus the lines under it. `<Space>a` `<Space>r` `<Space>t` `<Space>x` send the reference with a question
 attached - "why this approach?", "revert this, keep the rest", "add a test
 covering this", "explain what this does".
 

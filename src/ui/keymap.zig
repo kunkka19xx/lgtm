@@ -300,10 +300,16 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('Y')}, .command = .copy_text_lines, .desc = "yank whole lines", .group = .send },
     .{ .chords = &.{ leader, c('y') }, .command = .copy_ref, .desc = "copy the reference", .group = .send },
     .{ .chords = &.{ leader, c('Y') }, .command = .copy_ref_lines, .desc = "copy the reference and the lines", .group = .send },
-    .{ .chords = &.{c('a')}, .command = .ask_why, .desc = "ask: why this approach?", .group = .send },
-    .{ .chords = &.{c('!')}, .command = .ask_revert, .desc = "ask: revert this, keep the rest", .group = .send },
+    // Every ask lives behind the leader, and none of them on a bare letter.
+    // `a` is append, `x` is delete-a-character and `!` is the filter operator:
+    // three keys vim will want back the moment editing lands, and editing is
+    // designed for rather than designed out (ARCHITECTURE.md 11). Taking them
+    // now costs one keystroke; taking them later costs a user's muscle memory
+    // twice - once to learn the wrong thing and once to unlearn it.
+    .{ .chords = &.{ leader, c('a') }, .command = .ask_why, .desc = "ask: why this approach?", .group = .send },
+    .{ .chords = &.{ leader, c('r') }, .command = .ask_revert, .desc = "ask: revert this, keep the rest", .group = .send },
     .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this", .group = .send },
-    .{ .chords = &.{c('x')}, .command = .ask_explain, .desc = "ask: explain what this does", .group = .send },
+    .{ .chords = &.{ leader, c('x') }, .command = .ask_explain, .desc = "ask: explain what this does", .group = .send },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match", .group = .find },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match", .group = .find },
@@ -537,7 +543,7 @@ test "a key under the leader keeps its own meaning outside it" {
     try testing.expectEqual(Command.search_next, km.feed(tap('n'), .normal).command);
     // And an unknown key after the leader drops without stranding the next.
     try testing.expect(km.feed(tap(' '), .normal) == .pending);
-    try testing.expect(km.feed(tap('x'), .normal) == .none);
+    try testing.expect(km.feed(tap('Z'), .normal) == .none);
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 

@@ -160,6 +160,7 @@ With the cursor on a diff line:
 - `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
 - `y` → yank the selected text (the characters under `v`, the lines under `V`, the cursor line with no selection)
 - `Y` → yank whole lines, whatever `v` selected - vim's linewise yank
+- `<Space>a` `<Space>r` `<Space>t` `<Space>x` → send the reference with a question attached
 - `<Space>y` → copy the reference to the clipboard
 - `<Space>Y` → copy the reference **and** the line contents
 

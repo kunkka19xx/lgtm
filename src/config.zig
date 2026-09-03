@@ -576,7 +576,7 @@ test "out of range is a problem, not a clamp" {
 test "keys are remapped by the spelling the popup shows" {
     var l = loadText(
         \\[keys]
-        \\refresh = ["<C-l>", "<Space>r"]
+        \\refresh = ["<C-l>", "<Space>R"]
         \\quit = "Q"
     );
     defer l.deinit();
@@ -585,7 +585,7 @@ test "keys are remapped by the spelling the popup shows" {
     var km: keymap.Keymap = .{ .bindings = l.cfg.keys };
     // The new spelling fires.
     try testing.expect(km.feed(.{ .codepoint = ' ', .mods = .{} }, .normal) == .pending);
-    try testing.expectEqual(keymap.Command.refresh, km.feed(.{ .codepoint = 'r', .mods = .{} }, .normal).command);
+    try testing.expectEqual(keymap.Command.refresh, km.feed(.{ .codepoint = 'R', .mods = .{} }, .normal).command);
     try testing.expectEqual(keymap.Command.quit, km.feed(.{ .codepoint = 'Q', .mods = .{} }, .normal).command);
     // And the old one does not.
     try testing.expect(km.feed(.{ .codepoint = 'q', .mods = .{} }, .normal) == .none);

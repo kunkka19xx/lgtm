@@ -185,5 +185,33 @@ and a yank never reaches `send-keys`. The test that guards the rule now drives
 Worth noting what this cost to find: nothing but using it. No test would have
 caught it, because every test asserted the behaviour that turned out to be wrong.
 
+**The ask presets sat on keys vim will want back.** `a` was "why this
+approach?", `x` was "explain what this does", `!` was "revert this". In vim
+those are append, delete-a-character and the filter operator - three of the
+keys insert mode needs on the day editing lands, and editing is designed *for*
+rather than out (ARCHITECTURE.md 11).
+
+Moved to `<Space>a` `<Space>r` `<Space>t` `<Space>x`. Doing it now costs one
+keystroke; doing it after v0.1 ships costs a user's muscle memory twice, once
+to learn the wrong thing and once to unlearn it. This is the cheapest kind of
+decision to get right early and among the most expensive to defer, which is
+why it went in mid-week rather than onto the list.
+
+**The status row's file name learned what the file list already knew.** It was
+one colour whatever had happened to the file, while the `F` overlay had said
+green/red/amber/blue for arrived/left/changed/moved since it was built. Same
+two signals now, and for the same reason: the row has to answer "which file"
+and "what happened to it" without being read word by word.
+
+The icon comes with it, in its filetype hue rather than the status colour - the
+split `popup.zig` already used, and it is the right one: shape and hue together
+find the Rust file without reading a name, while the path's colour still says
+what happened to it. Two questions, two channels. It costs two columns, taken
+out of the path's budget rather than out of the counts, and nothing at all when
+`ui.icons` is not `nerd`.
+
+Nothing new was written for either half. `theme.file_*`, `devicon.forPath` and
+`statusFit` all existed; this was three call sites finding them.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

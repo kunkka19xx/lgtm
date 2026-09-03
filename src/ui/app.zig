@@ -3166,17 +3166,19 @@ test "the ask presets are the reference plus a question" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try fx.press("a");
+    // All four behind the leader, so `a`, `x` and `!` stay free for the vim
+    // meanings editing will want.
+    try fx.press("<Space>a");
     try testing.expectEqualStrings("#1 a.zig:1 - why this approach?", fx.app.payload());
     try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
 
     try fx.press("<Space>t");
     try testing.expectEqualStrings("#1 a.zig:1 - add a test covering this", fx.app.payload());
 
-    try fx.press("x");
+    try fx.press("<Space>x");
     try testing.expectEqualStrings("#1 a.zig:1 - explain what this does", fx.app.payload());
 
-    try fx.press("!");
+    try fx.press("<Space>r");
     try testing.expectEqualStrings("#1 a.zig:1 - revert this, keep the rest", fx.app.payload());
 }
 
@@ -3188,7 +3190,7 @@ test "nothing sent to the agent ever contains a newline" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    for ([_][]const u8{ "<CR>", "<Space>y", "a", "!", "t", "x" }) |keys| {
+    for ([_][]const u8{ "<CR>", "<Space>y", "<Space>a", "<Space>r", "<Space>t", "<Space>x" }) |keys| {
         try fx.press("Vj");
         try fx.press(keys);
         try testing.expect(std.mem.indexOfScalar(u8, fx.app.payload(), '\n') == null);
