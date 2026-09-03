@@ -284,7 +284,8 @@ fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, group: ?keyma
 pub const compose_rows: []const HelpEntry = &.{
     .{ .keys = "<C-i>", .desc = "in the box: insert a preset at the caret" },
     .{ .keys = "@", .desc = "in the box: mention a file" },
-    .{ .keys = "<C-j>", .desc = "in the box: a line break, joined on send" },
+    .{ .keys = "<Esc>", .desc = "in the box: normal mode - o opens a line" },
+    .{ .keys = "<S-CR> <C-j>", .desc = "in the box: a line break, joined on send" },
 };
 
 /// The compose rows this filter and group keep, appended to whatever the

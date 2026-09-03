@@ -157,11 +157,13 @@ Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing 
 With the cursor on a diff line:
 
 - `Enter` → open the compose box on `#3 src/auth.rs:47`; Enter again sends it
+- **the box is modal.** `<Esc>` leaves insert for normal; a second `<Esc>` leaves the box. Normal mode has the motions the review has - `h l w b e W B E 0 ^ $ f t F T`, plus `j k` over the lines the box holds - and `i a I A o O x D C dd cc d{motion} c{motion} u`. It exists because the terminal made the alternative worse: `Shift-Enter` cannot be told from `Enter` without the kitty protocol *and* a tmux with `extended-keys on`, while `o` needs a terminal that can send `o`. Modality is how vim solved this in 1976 and the problem has not changed
 - in the box: `@` mention any file in the project - changed ones first, then everything else git tracks or does not ignore, capped at 50,000 (PERFORMANCE.md 9b) - `Ctrl-i` insert a preset at the caret, `Ctrl-j` line break, `Ctrl-a/e/u/w` readline editing, `<Esc>` abandon
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
 - `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
 - `y` → yank the selected text (the characters under `v`, the lines under `V`, the cursor line with no selection)
 - `Y` → yank whole lines, whatever `v` selected - vim's linewise yank
+- with **nothing to review**, `Enter` still opens the box, empty. A clean tree is where a review pane spends most of its day, and talking to the agent is a thing to want there; requiring a change first would be the tail wagging the dog. The prompt and any notice are drawn over the empty screen too, so `:q` is not typed blind
 - `<Space>a` → open the box **with the question list already up**. It was four keys carrying four fixed questions; the questions moved into `[presets]`, where they are the user's own and there can be any number of them, so one key that opens the list beats four that each hard-code a row of it. Nothing is inserted until a question is chosen
 - `<Space>y` → copy the reference to the clipboard
 - `<Space>Y` → copy the reference **and** the line contents

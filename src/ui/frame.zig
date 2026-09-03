@@ -339,7 +339,14 @@ pub const ComposeView = struct {
     selected: ?usize = null,
     /// Whether Enter sends to the agent or copies. Only the footer cares.
     to_agent: bool = true,
+    /// Where the box sits: `[ui] compose`.
+    at: Placement = .bottom,
+    /// Which half of the box has the keyboard, drawn in its title. A modal
+    /// box that does not say which mode it is in is a box that eats keystrokes.
+    normal: bool = false,
 };
+
+pub const Placement = enum { bottom, top, centre };
 
 pub const PresetEntry = struct {
     name: []const u8,

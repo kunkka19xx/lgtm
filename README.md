@@ -121,8 +121,7 @@ With the cursor on a line, `Enter` opens a compose box holding
 `#3 src/auth.zig:47` and nothing else; type what you want to say and Enter
 again sends it. `Ctrl-i` lists your presets and `@` lists every file git knows about -
 changed ones first, then the rest, ignoring whatever `.gitignore` does. Both
-drop what you pick in **at the caret**, deleting nothing. `Ctrl-j` types a line break, which is joined back into one line on the
-way out - the box says so while one is present, because a newline through
+drop what you pick in **at the caret**, deleting nothing. `<Esc>` puts the box in normal mode, where the review's own vim motions work and `o` opens a line; a second `<Esc>` leaves. Line breaks are joined back into one line on the way out - the box says so while one is present, because a newline through
 `tmux send-keys` *is* Enter and would submit the agent's half-written message. `V` selects a range first and sends `:47-52`; `v` selects within the line
 and sends the words themselves.
 
@@ -155,6 +154,10 @@ bundles - are the noise `.gitignore` cannot remove. `[review] ignore` does:
 [review]
 ignore = ["package-lock.json", "**/*.pb.go", "__snapshots__/**"]
 ```
+
+The compose box sits at the bottom by default; `[ui] compose = "top"` or
+`"centre"` moves it. The lists it opens - presets, `@` files - take whichever
+side of it has more room, so they never sit on top of it.
 
 They are hidden from the review, the mode row says how many, and `zi` brings
 them back for the session. Patterns are git pathspecs, so the globs behave

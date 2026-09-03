@@ -658,27 +658,121 @@ test "a file list is one column, however wide the pane" {
 /// small box and a paragraph grows one, up to half the body. A box that is
 /// always eight rows tall makes the common case - a reference and six words -
 /// look like a form to fill in.
-pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Allocator.Error!void {
-    if (height < 5 or f.width() < 24) return;
+/// Where the compose box sits and how big it is.
+///
+/// Pulled out because the overlays the box opens have to know: a file picker
+/// laid out against the whole screen lands on top of the box that opened it,
+/// and each hides rows of the other. `ComposeBox.above` is the room they get
+/// instead.
+/// The rows the box draws: hard lines first, each soft-wrapped inside them.
+///
+/// `ui/wrap.zig` wraps a diff line, which never contains a newline, so it
+/// treats one as a zero-width control byte - correct there and wrong here.
+/// `o` puts real newlines in the buffer, and a line break that renders as
+/// nothing is a key that appears not to work.
+const ComposeRows = struct {
+    text: []const u8,
+    width: u16,
+    method: wrap_mod.Method,
+    at: u32 = 0,
+    inner: ?wrap_mod.Iterator = null,
+    base: u32 = 0,
+    done: bool = false,
+
+    fn init(text: []const u8, width: u16, method: wrap_mod.Method) ComposeRows {
+        return .{ .text = text, .width = width, .method = method };
+    }
+
+    fn next(self: *ComposeRows) ?wrap_mod.Chunk {
+        while (true) {
+            if (self.inner) |*it| {
+                if (it.next()) |c| {
+                    return .{ .start = self.base + c.start, .end = self.base + c.end };
+                }
+                self.inner = null;
+            }
+            if (self.done) return null;
+
+            const rest = self.text[self.at..];
+            const nl = std.mem.indexOfScalar(u8, rest, '\n');
+            const line = if (nl) |n| rest[0..n] else rest;
+            self.base = self.at;
+            self.at += @intCast(line.len + @intFromBool(nl != null));
+            if (nl == null) self.done = true;
+            self.inner = .init(line, self.width, self.method);
+        }
+    }
+};
+
+pub const ComposeBox = struct {
+    col: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+    content: u16,
+    text_rows: u16,
+
+    /// Where that room starts, which is below the box when the box is at the
+    /// top of the screen.
+    pub fn roomTop(self: ComposeBox, top: u16, height: u16) u16 {
+        const over = self.top -| top;
+        const under = (top + height) -| (self.top + self.height);
+        return if (under > over) self.top + self.height else top;
+    }
+
+    pub fn room(self: ComposeBox, top: u16, height: u16) u16 {
+        const over = self.top -| top;
+        const under = (top + height) -| (self.top + self.height);
+        return @max(over, under);
+    }
+};
+
+pub fn composeBox(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) ?ComposeBox {
+    if (height < 5 or f.width() < 24) return null;
 
     const margin: u16 = 2;
     const width = @min(f.width() -| margin * 2, @as(u16, 72));
     const content = width -| 4;
-    if (content == 0) return;
+    if (content == 0) return null;
 
-    // How many rows the text needs, wrapped the way the box will draw it.
     var rows: u16 = 0;
-    {
-        var it: wrap_mod.Iterator = .init(v.text, content, f.method());
-        while (it.next()) |_| rows += 1;
-    }
+    var count: ComposeRows = .init(v.text, content, f.method());
+    while (count.next()) |_| rows += 1;
+
     const text_rows = @max(@as(u16, 1), @min(rows, height -| 4));
     const box_h = text_rows + 2;
-    const box_top = top + (height -| box_h) / 2;
-    const box_col = (f.width() -| width) / 2;
+    return .{
+        .col = (f.width() -| width) / 2,
+        .top = switch (v.at) {
+            // Low by default, which is where a terminal puts the thing you
+            // are typing into - and it leaves the room above in one piece for
+            // the lists the box opens. Centred splits that room in two and
+            // gives neither half enough.
+            .bottom => top + (height -| box_h) -| 1,
+            .top => top + 1,
+            .centre => top + (height -| box_h) / 2,
+        },
+        .width = width,
+        .height = box_h,
+        .content = content,
+        .text_rows = text_rows,
+    };
+}
 
-    const title = try footerOf(f.arena, "", &.{}, &.{compose_title}, content);
-    const foot = try footerOf(f.arena, "", compose_keys, &.{}, content);
+pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Allocator.Error!void {
+    const geom = composeBox(f, v, top, height) orelse return;
+    const width = geom.width;
+    const content = geom.content;
+    const text_rows = geom.text_rows;
+    const box_h = geom.height;
+    const box_top = geom.top;
+    const box_col = geom.col;
+
+    const title = try footerOf(f.arena, "", &.{}, if (v.normal)
+        &.{compose_title_normal}
+    else
+        &.{compose_title}, content);
+    const foot = try footerOf(f.arena, "", if (v.normal) compose_normal_keys else compose_keys, &.{}, content);
     const box: Box = .{
         .cols = 1,
         .per = text_rows,
@@ -699,8 +793,8 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     var caret_row: u16 = 0;
     var caret_col: u16 = 0;
     var row: u16 = 0;
-    var it: wrap_mod.Iterator = .init(v.text, content, f.method());
-    while (it.next()) |chunk| : (row += 1) {
+    var chunks: ComposeRows = .init(v.text, content, f.method());
+    while (chunks.next()) |chunk| : (row += 1) {
         if (row >= text_rows) break;
         const line = chunk.slice(v.text);
         f.put(box_top + 1 + row, box_col + 2, line, f.theme.text);
@@ -711,7 +805,9 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     }
 
     if (v.selected == null) {
-        f.win.setCursorShape(.beam);
+        // A block in normal mode and a beam in insert, which is how every
+        // modal editor says which one you are in without being read.
+        f.win.setCursorShape(if (v.normal) .block else .beam);
         f.win.showCursor(box_col + 2 + caret_col, box_top + 1 + caret_row);
     }
 
@@ -719,14 +815,23 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     if (v.joins and box_top + box_h < top + height) {
         f.put(box_top + box_h, box_col + 2, "line breaks become spaces when sent", f.theme.dim);
     }
-    if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, width, sel);
+    if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, box_h, width, top, height, sel);
 }
 
-const compose_title: keytext.HelpEntry = .{ .keys = "", .desc = "compose" };
+const compose_title: keytext.HelpEntry = .{ .keys = "", .desc = "compose - INSERT" };
+const compose_title_normal: keytext.HelpEntry = .{ .keys = "", .desc = "compose - NORMAL" };
+
+const compose_normal_keys: []const keytext.HelpEntry = &.{
+    .{ .keys = "o", .desc = "new line" },
+    .{ .keys = "i", .desc = "insert" },
+    .{ .keys = "<CR>", .desc = "send" },
+    .{ .keys = "<Esc>", .desc = "cancel" },
+};
 const compose_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "<CR>", .desc = "send" },
     .{ .keys = "<C-i>", .desc = "preset" },
     .{ .keys = "@", .desc = "file" },
+    .{ .keys = "<S-CR>", .desc = "line" },
     .{ .keys = "<Esc>", .desc = "cancel" },
 };
 
@@ -737,12 +842,19 @@ fn drawPresetList(
     v: frame_mod.ComposeView,
     col: u16,
     box_top: u16,
+    box_h: u16,
     width: u16,
+    area_top: u16,
+    area_height: u16,
     sel: usize,
 ) Allocator.Error!void {
     if (v.presets.len == 0) return;
     const rows: u16 = @intCast(@min(v.presets.len, 6));
-    const top = box_top -| (rows + 2);
+    // The same side the file list takes: whichever half of the screen the box
+    // is not sitting in.
+    const over = box_top -| area_top;
+    const under = (area_top + area_height) -| (box_top + box_h);
+    const top = if (under > over) box_top + box_h else box_top -| (rows + 2);
     const content = width -| 4;
 
     const title = try footerOf(f.arena, "", &.{}, &.{preset_title}, content);

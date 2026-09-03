@@ -151,6 +151,8 @@ pub const App = struct {
     /// Where the composed message is going once Enter is pressed. Fixed when
     /// the box opens, because the key that opened it is what decided.
     compose_to: Delivery = .send,
+    /// `[ui] compose`: where the box sits.
+    compose_at: render.Placement = .bottom,
     /// The `Ctrl-i` list, open over the box. An index into `presets()`, or
     /// null while the box has the keyboard.
     preset_index: ?usize = null,
@@ -364,14 +366,23 @@ pub const App = struct {
             } else null,
             .notice = self.notice.text(),
             .query = self.liveQuery(),
-            .compose = if (self.compose.open) .{
-                .text = self.compose.text(),
-                .cursor = self.compose.cursor,
-                .joins = compose_mod.hasBreak(self.compose.text()),
-                .presets = if (self.preset_index != null) self.presetEntries() else &.{},
-                .selected = self.preset_index,
-                .to_agent = self.compose_to == .send,
-            } else null,
+            .compose = if (self.compose.open) self.composeView(self.frame_arena.allocator()) else null,
+        };
+    }
+
+    /// The compose box as a view, for the callers that draw it without a
+    /// `View` around it - the empty screen has no diff to build one from.
+    pub fn composeView(self: *App, arena: Allocator) render.ComposeView {
+        _ = arena;
+        return .{
+            .text = self.compose.text(),
+            .cursor = self.compose.cursor,
+            .joins = compose_mod.hasBreak(self.compose.text()),
+            .presets = if (self.preset_index != null) self.presetEntries() else &.{},
+            .selected = self.preset_index,
+            .to_agent = self.compose_to == .send,
+            .at = self.compose_at,
+            .normal = self.compose.mode == .normal,
         };
     }
 
@@ -1106,6 +1117,20 @@ pub const App = struct {
     /// - had nowhere to go. The reference and the question are the seed, the
     /// caret is past them, and Enter is still what sends.
     fn openCompose(self: *App, how: Delivery, what: What) Allocator.Error!void {
+        // With nothing to review there is nothing to point at, and the box
+        // opens empty rather than refusing. A clean tree is where a pane
+        // spends most of its day (`ui/splash.zig`), and "talk to the agent"
+        // is a thing to want there - having to make a change first before the
+        // tool would let you type is the tail wagging the dog.
+        if (self.current() == null) {
+            self.outgoing.clearRetainingCapacity();
+            self.want_send = null;
+            self.compose_to = how;
+            self.compose.start("");
+            self.preset_index = null;
+            self.mode = .note_input;
+            return;
+        }
         // The seed is the reference and nothing else, whichever key opened the
         // box. A canned question typed in for you is a sentence you now have
         // to read and mostly delete - and the presets have their own key
@@ -1970,6 +1995,15 @@ const Fixture = struct {
     /// The ordinary review: two files, three lines each, nothing deleted.
     fn init(gpa: Allocator) !*Fixture {
         return build(gpa, null);
+    }
+
+    /// A review with no files in it. The state a pane sits in whenever the
+    /// tree is clean, which is most of the day.
+    fn emptyReview(gpa: Allocator) !*Fixture {
+        const self = try build(gpa, null);
+        self.app.review.parsed.?.diff.files = self.files[0..0];
+        try self.app.rebuildRows(.reset);
+        return self;
     }
 
     /// The same, with one line of the first file deleted - the case `e` and
@@ -3312,6 +3346,33 @@ test "the file overlay still jumps when it was not opened from the box" {
     try testing.expect(!fx.app.compose.open);
 }
 
+test "with nothing to review the box still opens, empty" {
+    var fx = try Fixture.emptyReview(testing.allocator);
+    defer fx.deinit();
+
+    // A clean tree is where a review pane spends most of its day, and "talk to
+    // the agent" is a thing to want there. Refusing until the reader makes a
+    // change first would be the tail wagging the dog.
+    try fx.press("<CR>");
+    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
+    try testing.expectEqualStrings("", fx.app.compose.text());
+
+    try fx.press("hi");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("hi", fx.app.payload());
+    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
+}
+
+test "an empty message sends nothing rather than a blank line" {
+    var fx = try Fixture.emptyReview(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    try fx.press("<CR>");
+    try testing.expect(fx.app.want_send == null);
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+}
+
 test "the box opens on the reference and nothing else" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
@@ -3334,6 +3395,8 @@ test "escape abandons the message and sends nothing" {
     defer fx.deinit();
 
     try fx.press("<CR>");
+    // Two escapes: the first leaves insert, the second leaves the box.
+    try fx.press("<Esc>");
     try fx.press("<Esc>");
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
     try testing.expect(fx.app.want_send == null);

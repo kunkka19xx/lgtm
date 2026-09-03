@@ -41,8 +41,14 @@ pub const max_bytes: usize = 256 << 10;
 /// default (FEATURES.md 4.2).
 pub const Icons = enum { unicode, ascii, nerd };
 
+/// Where the compose box sits, and therefore where the lists it opens go: they
+/// take the room on the other side of it. Bottom by default, which is where a
+/// terminal puts the thing you are typing into.
+pub const ComposeAt = enum { bottom, top, centre };
+
 pub const Ui = struct {
     icons: Icons = .unicode,
+    compose: ComposeAt = .bottom,
     /// Soft wrap. On, a line wider than the pane continues on the next screen
     /// row; off, it is cut at the edge. Default on because the pane this is
     /// designed for is a split one, and a review that hides the end of a line
@@ -240,6 +246,12 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.ui.cursor_ms = @intCast(n);
+                } else if (std.mem.eql(u8, key, "compose")) {
+                    const t = self.wantString(src, line, key, value) orelse return;
+                    self.cfg.ui.compose = std.meta.stringToEnum(ComposeAt, t) orelse {
+                        self.note(src, line, "ui.compose must be \"bottom\", \"top\" or \"centre\", not \"{s}\"", .{t});
+                        return;
+                    };
                 } else if (std.mem.eql(u8, key, "icons")) {
                     const s = self.wantString(src, line, key, value) orelse return;
                     self.cfg.ui.icons = std.meta.stringToEnum(Icons, s) orelse {

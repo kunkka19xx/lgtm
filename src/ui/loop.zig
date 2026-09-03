@@ -81,6 +81,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.presets_cfg = opts.cfg.presets;
+    app.compose_at = switch (opts.cfg.ui.compose) {
+        .bottom => .bottom,
+        .top => .top,
+        .centre => .centre,
+    };
     app.review.ignore = opts.cfg.ignore;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
@@ -409,8 +414,38 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         if (try app.help.view(app.mode, app.km.bindings, arena)) |hv| {
             try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
         }
+        // The compose box floats here too: with nothing to review there is
+        // still an agent to talk to, and the box opens empty rather than
+        // refusing. Drawn *before* the overlays it opens, the same order the
+        // diff path uses - drawing it last painted it over the file list it
+        // had just summoned.
+        var room_top: u16 = 0;
+        var room = win.height;
+        if (app.compose.open) {
+            const cv = app.composeView(arena);
+            try render.drawCompose(frameOf(app, win, arena), cv, 0, win.height);
+            if (render.composeBox(frameOf(app, win, arena), cv, 0, win.height)) |box| {
+                room_top = box.roomTop(0, win.height);
+                room = box.room(0, win.height);
+            }
+        }
         if (try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena)) |fv| {
-            try render.drawFileList(frameOf(app, win, arena), fv, 0, win.height);
+            try render.drawFileList(frameOf(app, win, arena), fv, room_top, room);
+        }
+        // The bottom row is the prompt when one is open, and whatever the last
+        // keystroke had to say otherwise. Without it `:q` is typed blind: the
+        // splash owns the whole window, so a line with nowhere to go is a line
+        // the reader never sees.
+        if (win.height > 0) {
+            const f = frameOf(app, win, arena);
+            if (app.prompt.open) {
+                render.drawPromptLine(f, .{
+                    .prefix = app.prompt.kind.prefix(),
+                    .text = app.prompt.text(),
+                }, win.height - 1);
+            } else if (app.notice.text().len > 0) {
+                f.put(win.height - 1, 1, app.notice.text(), f.theme.notice);
+            }
         }
     }
 

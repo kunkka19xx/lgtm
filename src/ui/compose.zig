@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const event = @import("../core/event.zig");
+const motion = @import("motion.zig");
 
 /// Room for a paragraph. Far past any reference plus a question, and still
 /// small enough to sit in the app struct rather than on the heap.
@@ -44,6 +45,24 @@ pub const Result = enum {
     files,
 };
 
+/// Which half of the box has the keyboard.
+///
+/// Modal because the terminal is: Shift-Enter cannot be told from Enter
+/// without the kitty keyboard protocol, and tmux swallows the difference
+/// unless `extended-keys` is on. Vim's modality exists for exactly that
+/// reason - `o` opens a line with no modifier to encode and nothing to
+/// negotiate. Chasing one chord through three layers of terminal was the
+/// argument for building this rather than against it.
+pub const Mode = enum { insert, normal };
+
+/// An operator waiting for the motion that says how far it reaches, or an
+/// `f`/`t` waiting for its character.
+const Pending = union(enum) {
+    delete,
+    change,
+    find: struct { forward: bool, till: bool },
+};
+
 pub const Compose = struct {
     buf: [max_bytes]u8 = undefined,
     len: usize = 0,
@@ -52,6 +71,16 @@ pub const Compose = struct {
     /// needs and hard rule 3 says byte offsets internally.
     cursor: usize = 0,
     open: bool = false,
+    mode: Mode = .insert,
+    pending: ?Pending = null,
+    /// One level, which is vi's own `u`: it undoes the last change, and again
+    /// redoes it. Enough to take back a `dd` typed by accident, which is what
+    /// undo is for here, and it costs one buffer rather than a stack of them
+    /// in a struct that lives on the caller's frame.
+    undo_buf: [max_bytes]u8 = undefined,
+    undo_len: usize = 0,
+    undo_cursor: usize = 0,
+    undo_valid: bool = false,
 
     /// Opens the box seeded with `text`, caret at the end - which is where
     /// someone about to add a sentence wants it. Nothing is selected and
@@ -62,6 +91,72 @@ pub const Compose = struct {
         @memcpy(self.buf[0..self.len], seed[0..self.len]);
         self.cursor = self.len;
         self.open = true;
+        // Insert, because the box was opened to write in. Normal mode is
+        // where you go to edit what is already there, which is the second
+        // thing that happens, not the first.
+        self.mode = .insert;
+        self.pending = null;
+        self.undo_valid = false;
+    }
+
+    /// Remembers the buffer so `u` can put it back. Called before anything
+    /// that changes the text in normal mode; insert-mode typing is one change
+    /// from the moment `i` was pressed, the way vi counts it.
+    fn mark(self: *Compose) void {
+        @memcpy(self.undo_buf[0..self.len], self.buf[0..self.len]);
+        self.undo_len = self.len;
+        self.undo_cursor = self.cursor;
+        self.undo_valid = true;
+    }
+
+    /// Swaps the buffer with the remembered one, so a second `u` is a redo.
+    fn undo(self: *Compose) void {
+        if (!self.undo_valid) return;
+        var tmp: [max_bytes]u8 = undefined;
+        const tmp_len = self.len;
+        const tmp_cursor = self.cursor;
+        @memcpy(tmp[0..tmp_len], self.buf[0..tmp_len]);
+
+        @memcpy(self.buf[0..self.undo_len], self.undo_buf[0..self.undo_len]);
+        self.len = self.undo_len;
+        self.cursor = @min(self.undo_cursor, self.len);
+
+        @memcpy(self.undo_buf[0..tmp_len], tmp[0..tmp_len]);
+        self.undo_len = tmp_len;
+        self.undo_cursor = tmp_cursor;
+    }
+
+    // -- lines ---------------------------------------------------------------
+
+    /// Start of the line the caret is on. The buffer is one string with
+    /// newlines in it rather than an array of lines: `flatten` has to see the
+    /// whole thing anyway, and a line array would be a second representation
+    /// to keep in step with the first.
+    pub fn lineStart(self: *const Compose) usize {
+        var i = self.cursor;
+        while (i > 0 and self.buf[i - 1] != '\n') i -= 1;
+        return i;
+    }
+
+    pub fn lineEnd(self: *const Compose) usize {
+        var i = self.cursor;
+        while (i < self.len and self.buf[i] != '\n') i += 1;
+        return i;
+    }
+
+    fn line(self: *const Compose) []const u8 {
+        return self.buf[self.lineStart()..self.lineEnd()];
+    }
+
+    fn col(self: *const Compose) u32 {
+        return @intCast(self.cursor - self.lineStart());
+    }
+
+    fn deleteRange(self: *Compose, from: usize, to: usize) void {
+        if (to <= from) return;
+        std.mem.copyForwards(u8, self.buf[from..], self.buf[to..self.len]);
+        self.len -= to - from;
+        self.cursor = from;
     }
 
     pub fn close(self: *Compose) void {
@@ -152,6 +247,166 @@ pub const Compose = struct {
     /// input box and that is what a terminal input box answers to everywhere
     /// else the user types.
     pub fn feed(self: *Compose, key: event.Key) Result {
+        if (self.mode == .normal) return self.feedNormal(key);
+        return self.feedInsert(key);
+    }
+
+    /// Normal mode: motions from `ui/motion.zig` - the same ones the diff uses,
+    /// so `w` means in the box what it means outside it - plus the operators
+    /// that make a long message editable.
+    fn feedNormal(self: *Compose, key: event.Key) Result {
+        const cp = key.codepoint;
+
+        // A pending `f`/`t` takes the next key as its character, never as a
+        // command, exactly the way the review does.
+        if (self.pending) |p| switch (p) {
+            .find => |fd| {
+                self.pending = null;
+                if (cp == event.code.escape) return .typing;
+                const ln = self.line();
+                if (motion.find(ln, self.col(), .{
+                    .target = cp,
+                    .forward = fd.forward,
+                    .till = fd.till,
+                })) |at| self.cursor = self.lineStart() + at;
+                return .typing;
+            },
+            else => {},
+        };
+
+        // An operator waiting for a motion. `dd` and `cc` are the operator
+        // doubled, which is how vim spells "this line".
+        if (self.pending) |p| {
+            const change = p == .change;
+            self.pending = null;
+            if (cp == event.code.escape) return .typing;
+            if ((change and cp == 'c') or (!change and cp == 'd')) {
+                self.mark();
+                const from = self.lineStart();
+                var to = self.lineEnd();
+                // `dd` takes the line's newline with it; `cc` leaves the line
+                // in place and empties it, which is what makes it a change.
+                if (!change and to < self.len) to += 1;
+                self.deleteRange(from, to);
+                if (change) self.mode = .insert;
+                return .typing;
+            }
+            if (self.motionTarget(cp)) |to| {
+                self.mark();
+                const from = self.cursor;
+                if (to > from) self.deleteRange(from, to) else self.deleteRange(to, from);
+                if (change) self.mode = .insert;
+            }
+            return .typing;
+        }
+
+        switch (cp) {
+            event.code.enter => return .submit,
+            event.code.escape => return .cancel,
+            // Entering insert, at the five places vim enters it.
+            'i' => self.mode = .insert,
+            'a' => {
+                self.cursor = motion.charRight(self.line(), self.col()) orelse self.col();
+                self.cursor += self.lineStart();
+                self.mode = .insert;
+            },
+            'I' => {
+                self.cursor = self.lineStart() + motion.firstNonBlank(self.line());
+                self.mode = .insert;
+            },
+            'A' => {
+                self.cursor = self.lineEnd();
+                self.mode = .insert;
+            },
+            // The keys this whole mode was built for: a new line with no
+            // modifier to encode and nothing for tmux to swallow.
+            'o' => {
+                self.mark();
+                self.cursor = self.lineEnd();
+                self.insert("\n");
+                self.mode = .insert;
+            },
+            'O' => {
+                self.mark();
+                self.cursor = self.lineStart();
+                self.insert("\n");
+                self.cursor -= 1;
+                self.mode = .insert;
+            },
+            'x' => {
+                self.mark();
+                self.deleteForward();
+            },
+            'D' => {
+                self.mark();
+                self.deleteRange(self.cursor, self.lineEnd());
+            },
+            'C' => {
+                self.mark();
+                self.deleteRange(self.cursor, self.lineEnd());
+                self.mode = .insert;
+            },
+            'd' => self.pending = .delete,
+            'c' => self.pending = .change,
+            'u' => self.undo(),
+            'f' => self.pending = .{ .find = .{ .forward = true, .till = false } },
+            't' => self.pending = .{ .find = .{ .forward = true, .till = true } },
+            'F' => self.pending = .{ .find = .{ .forward = false, .till = false } },
+            'T' => self.pending = .{ .find = .{ .forward = false, .till = true } },
+            'j' => self.lineStep(1),
+            'k' => self.lineStep(-1),
+            else => {
+                if (key.mods.ctrl and (cp == 'i' or cp == event.code.tab)) return .presets;
+                if (self.motionTarget(cp)) |at| self.cursor = at;
+            },
+        }
+        return .typing;
+    }
+
+    /// Where a motion key would put the caret, or null when the key is not a
+    /// motion. Shared by the operators, so `dw` and `w` cannot disagree about
+    /// where a word ends.
+    fn motionTarget(self: *Compose, cp: u21) ?usize {
+        const ln = self.line();
+        const at = self.col();
+        const base = self.lineStart();
+        const target: ?u32 = switch (cp) {
+            'h', event.code.left => motion.charLeft(ln, at),
+            'l', event.code.right => motion.charRight(ln, at),
+            'w' => motion.wordNext(ln, at, .word),
+            'b' => motion.wordPrev(ln, at, .word),
+            'e' => motion.wordEnd(ln, at, .word),
+            'W' => motion.wordNext(ln, at, .big),
+            'B' => motion.wordPrev(ln, at, .big),
+            'E' => motion.wordEnd(ln, at, .big),
+            '0' => motion.lineStart(ln),
+            '$' => motion.lineEnd(ln),
+            '^' => motion.firstNonBlank(ln),
+            else => return null,
+        };
+        return base + (target orelse at);
+    }
+
+    /// `j` and `k` over the real lines the buffer holds, keeping the column
+    /// where the caret already was - which is what makes them useful once `o`
+    /// has produced more than one line.
+    fn lineStep(self: *Compose, delta: i32) void {
+        const want = self.col();
+        if (delta < 0) {
+            const from = self.lineStart();
+            if (from == 0) return;
+            self.cursor = from - 1;
+            self.cursor = self.lineStart();
+        } else {
+            const to = self.lineEnd();
+            if (to >= self.len) return;
+            self.cursor = to + 1;
+        }
+        const ln = self.line();
+        self.cursor = self.lineStart() + motion.clamp(ln, want);
+    }
+
+    fn feedInsert(self: *Compose, key: event.Key) Result {
         const cp = key.codepoint;
         if (key.mods.ctrl) {
             switch (cp) {
@@ -173,9 +428,26 @@ pub const Compose = struct {
             return .typing;
         }
 
+        // Shift-Enter is a line break, the way every chat box in the world
+        // treats it. Whether it *arrives* is not up to this file: a terminal
+        // cannot tell Shift-Enter from Enter without the kitty keyboard
+        // protocol, which vaxis turns on where the terminal supports it - but
+        // tmux swallows the distinction unless `extended-keys` is on, and it
+        // is off by default. Under that tmux this key sends the message
+        // instead, which is why `Ctrl-j` stays and why both are advertised.
+        if (cp == event.code.enter and (key.mods.shift or key.mods.alt)) {
+            self.insert("\n");
+            return .typing;
+        }
+
         switch (cp) {
             event.code.enter => return .submit,
-            event.code.escape => return .cancel,
+            // Out to normal mode, not out of the box: `<Esc>` backs out one
+            // level, and from normal mode a second one leaves.
+            event.code.escape => {
+                self.mode = .normal;
+                self.cursor = motion.clamp(self.line(), self.col()) + self.lineStart();
+            },
             event.code.backspace => self.backspace(),
             event.code.tab => return .presets,
             event.code.left => self.left(),
@@ -335,14 +607,113 @@ test "@ offers the file list and stays typed either way" {
     try testing.expectEqual(c.text().len, c.cursor);
 }
 
-test "enter submits, escape abandons, ctrl-i asks for the presets" {
+test "enter submits, escape steps out one level at a time" {
     var c: Compose = .{};
     c.start("x");
     try testing.expectEqual(Result.submit, c.feed(tap(event.code.enter)));
-    try testing.expectEqual(Result.cancel, c.feed(tap(event.code.escape)));
     try testing.expectEqual(Result.presets, c.feed(ctrl('i')));
     // Tab is the same keystroke: terminals send 0x09 for both.
     try testing.expectEqual(Result.presets, c.feed(tap(event.code.tab)));
+
+    // The first `<Esc>` leaves insert, the second leaves the box. Abandoning
+    // a message should take two deliberate keystrokes, not one reflex.
+    try testing.expectEqual(Mode.insert, c.mode);
+    try testing.expectEqual(Result.typing, c.feed(tap(event.code.escape)));
+    try testing.expectEqual(Mode.normal, c.mode);
+    try testing.expectEqual(Result.cancel, c.feed(tap(event.code.escape)));
+}
+
+test "normal mode: o opens a line without a modifier to encode" {
+    // The reason this mode exists. Shift-Enter needs the kitty protocol and a
+    // tmux with `extended-keys on`; `o` needs a terminal that can send `o`.
+    var c: Compose = .{};
+    c.start("first");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('o'));
+    try testing.expectEqual(Mode.insert, c.mode);
+    _ = c.feed(tap('s'));
+    _ = c.feed(tap('e'));
+    _ = c.feed(tap('c'));
+    try testing.expectEqualStrings("first\nsec", c.text());
+
+    // `O` opens above instead.
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('O'));
+    _ = c.feed(tap('m'));
+    try testing.expectEqualStrings("first\nm\nsec", c.text());
+}
+
+test "normal mode: motions and operators agree with the review's own" {
+    var c: Compose = .{};
+    c.start("the quick brown fox");
+    _ = c.feed(tap(event.code.escape));
+
+    // `0` then `w` twice: the same word motion `w` runs in the diff, because
+    // it is literally the same function.
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('w'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqual(@as(usize, 10), c.cursor);
+
+    // `dw` deletes what `w` would have crossed.
+    _ = c.feed(tap('d'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqualStrings("the quick fox", c.text());
+
+    // `u` puts it back, and again takes it away: vi's own toggle.
+    _ = c.feed(tap('u'));
+    try testing.expectEqualStrings("the quick brown fox", c.text());
+    _ = c.feed(tap('u'));
+    try testing.expectEqualStrings("the quick fox", c.text());
+
+    // `D` to the end of the line, `x` a character, `A` to append.
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('x'));
+    try testing.expectEqualStrings("he quick fox", c.text());
+    _ = c.feed(tap('D'));
+    try testing.expectEqualStrings("", c.text());
+}
+
+test "normal mode: dd takes the line and j k walk them" {
+    var c: Compose = .{};
+    c.start("one");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('o'));
+    _ = c.feed(tap('t'));
+    _ = c.feed(tap('w'));
+    _ = c.feed(tap('o'));
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('o'));
+    _ = c.feed(tap('3'));
+    _ = c.feed(tap(event.code.escape));
+    try testing.expectEqualStrings("one\ntwo\n3", c.text());
+
+    // `k` up two lines keeps the column where it can.
+    _ = c.feed(tap('k'));
+    _ = c.feed(tap('k'));
+    try testing.expectEqual(@as(usize, 0), c.lineStart());
+
+    // `dd` removes the line and its newline.
+    _ = c.feed(tap('d'));
+    _ = c.feed(tap('d'));
+    try testing.expectEqualStrings("two\n3", c.text());
+}
+
+test "shift-enter is a line break, enter is still send" {
+    var c: Compose = .{};
+    c.start("one");
+    try testing.expectEqual(Result.typing, c.feed(.{
+        .codepoint = event.code.enter,
+        .mods = .{ .shift = true },
+    }));
+    try testing.expectEqualStrings("one\n", c.text());
+
+    // Alt-Enter too: the other spelling terminals use for the same idea.
+    _ = c.feed(.{ .codepoint = event.code.enter, .mods = .{ .alt = true } });
+    try testing.expectEqualStrings("one\n\n", c.text());
+
+    // Bare Enter still sends, or the box would have no way out.
+    try testing.expectEqual(Result.submit, c.feed(tap(event.code.enter)));
 }
 
 test "a newline is typed with ctrl-j and flattened on the way out" {

@@ -30,6 +30,7 @@ pub const PromptView = frame_mod.PromptView;
 pub const HelpView = frame_mod.HelpView;
 pub const ComposeView = frame_mod.ComposeView;
 pub const PresetEntry = frame_mod.PresetEntry;
+pub const Placement = frame_mod.Placement;
 pub const FileEntry = frame_mod.FileEntry;
 pub const HelpLayout = frame_mod.HelpLayout;
 pub const Theme = frame_mod.Theme;
@@ -39,6 +40,8 @@ pub const bodyHeight = frame_mod.bodyHeight;
 pub const drawHelpPopup = popup.draw;
 pub const drawFileList = popup.drawFiles;
 pub const drawCompose = popup.drawCompose;
+pub const drawPromptLine = drawPrompt;
+pub const composeBox = popup.composeBox;
 
 pub fn draw(f: Frame, v: View) Allocator.Error!void {
     f.win.clear();
@@ -52,7 +55,10 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         try body_mod.draw(f, v, 0, h);
         if (v.compose) |cv| try popup.drawCompose(f, cv, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
-        if (v.files) |fv| try popup.drawFiles(f, fv, 0, h);
+        if (v.files) |fv| {
+            const r = roomFor(f, v, 0, h);
+            try popup.drawFiles(f, fv, r.top, r.height);
+        }
         hideCursorUnder(f, v);
         return;
     }
@@ -71,8 +77,20 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     // the list it had just opened.
     if (v.compose) |cv| try popup.drawCompose(f, cv, 2, bodyHeight(h, false));
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
-    if (v.files) |fv| try popup.drawFiles(f, fv, 2, bodyHeight(h, false));
+    if (v.files) |fv| {
+        const r = roomFor(f, v, 2, bodyHeight(h, false));
+        try popup.drawFiles(f, fv, r.top, r.height);
+    }
     hideCursorUnder(f, v);
+}
+
+/// How tall an overlay opened *from* the compose box may be: the rows above
+/// the box, so the two do not sit on top of each other. The whole height when
+/// no box is open, which is every other case.
+fn roomFor(f: Frame, v: View, top: u16, height: u16) struct { top: u16, height: u16 } {
+    const cv = v.compose orelse return .{ .top = top, .height = height };
+    const box = popup.composeBox(f, cv, top, height) orelse return .{ .top = top, .height = height };
+    return .{ .top = box.roomTop(top, height), .height = box.room(top, height) };
 }
 
 /// The body parks the terminal cursor on the character under it. An overlay is
@@ -86,7 +104,7 @@ fn hideCursorUnder(f: Frame, v: View) void {
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
 /// A real cursor rather than a drawn block: it blinks the way the user's
 /// terminal blinks, and screen readers find it.
-fn drawPrompt(f: Frame, p: PromptView, row: u16) void {
+pub fn drawPrompt(f: Frame, p: PromptView, row: u16) void {
     f.put(row, 0, p.prefix, f.theme.prompt);
     const at = f.win.gwidth(p.prefix);
     f.put(row, at, p.text, f.theme.prompt);
