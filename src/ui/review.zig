@@ -77,11 +77,20 @@ pub const Review = struct {
     prev_work: []u8 = &.{},
     prev_line: u32 = 0,
 
+    /// Paths the reader has opened out of their summary (SPEC.md 6.1).
+    /// gpa-owned, for the same reason `prev_work` is: surviving the reset is
+    /// the whole point. A file that folded itself again every time the agent
+    /// touched anything would be a file you cannot read while it is being
+    /// written, which is the only time you want to.
+    expanded: std.ArrayList([]u8) = .empty,
+
     pub fn init(gpa: Allocator, io: std.Io) Review {
         return .{ .gpa = gpa, .io = io, .arena = .init(gpa) };
     }
 
     pub fn deinit(self: *Review) void {
+        for (self.expanded.items) |p| self.gpa.free(p);
+        self.expanded.deinit(self.gpa);
         self.gpa.free(self.prev_work);
         self.ids.deinit(self.gpa);
         self.cache.deinit(self.gpa);
@@ -167,6 +176,18 @@ pub const Review = struct {
         // to wonder what they have not looked at.
         self.hidden = git.hiddenCount(self.gpa, self.io, skip);
 
+        // Before the buffers are attached and before ids are inherited, both
+        // of which skip a summarised file: what the reader opened has to
+        // become a real file again first, or the next re-diff would quietly
+        // fold it back and lose their place in it.
+        for (self.expanded.items) |p| {
+            for (parsed.diff.files) |*f| {
+                if (!f.summarised) continue;
+                if (!std.mem.eql(u8, f.path(), p)) continue;
+                diff.materialise(arena, f, parsed.raw) catch {};
+            }
+        }
+
         // Buffers are the source of truth; the diff is an overlay on them.
         self.sources = source.load(arena, self.io, null, parsed.diff) catch null;
         if (self.sources) |srcs| {
@@ -194,6 +215,77 @@ pub const Review = struct {
             try self.ids.inherit(arena, prev, f.hunks);
         }
         return index;
+    }
+
+    /// Parses a summarised file's hunks now, and keeps it parsed across every
+    /// re-diff until it is folded again.
+    ///
+    /// Deferring a large file is a rendering decision, never a discard
+    /// (`core/diff.zig`), but for a while it was the same thing from the
+    /// reader's side: the summary row was where a big file stopped, because
+    /// nothing called `materialise`. This is that call.
+    ///
+    /// Returns false when there was nothing to open - the file renders in
+    /// full already, or its bytes are not in this generation's git output,
+    /// which is true of a synthesised entry for an untracked file.
+    pub fn expand(self: *Review, path: []const u8) !bool {
+        const p = self.parsed orelse return false;
+        const f = find(p.diff.files, path) orelse return false;
+        if (!f.summarised) return false;
+
+        const arena = self.arena.allocator();
+        try diff.materialise(arena, f, p.raw);
+        // `materialise` leaves the flag set when the range is unusable. It is
+        // the honest test for whether anything happened.
+        if (f.summarised) return false;
+
+        // The two things `regenerate` does to every other file, done late for
+        // this one: attach it to its buffers, then give its hunks ids. Neither
+        // reached it while it was a summary.
+        if (self.sources) |srcs| {
+            if (srcs.find(path)) |s| {
+                source.attach(f, s.*) catch |err| switch (err) {
+                    error.ContentMismatch => self.torn = true,
+                    else => return err,
+                };
+            }
+        }
+        try self.ids.inherit(arena, &.{}, f.hunks);
+
+        try self.remember(path);
+        return true;
+    }
+
+    /// Folds a file the reader opened. Returns false when it was not one -
+    /// an ordinary file has nothing to fold, and saying so is better than
+    /// appearing to do something.
+    ///
+    /// Only forgets; the caller re-diffs, which is what actually re-summarises
+    /// it. That is the same shape as `[review] ignore`: git is what decided,
+    /// so git is what gets asked again.
+    pub fn collapse(self: *Review, path: []const u8) bool {
+        for (self.expanded.items, 0..) |p, i| {
+            if (!std.mem.eql(u8, p, path)) continue;
+            self.gpa.free(self.expanded.swapRemove(i));
+            return true;
+        }
+        return false;
+    }
+
+    fn remember(self: *Review, path: []const u8) Allocator.Error!void {
+        for (self.expanded.items) |p| {
+            if (std.mem.eql(u8, p, path)) return;
+        }
+        const owned = try self.gpa.dupe(u8, path);
+        errdefer self.gpa.free(owned);
+        try self.expanded.append(self.gpa, owned);
+    }
+
+    fn find(in: []diff.FileDiff, path: []const u8) ?*diff.FileDiff {
+        for (in) |*f| {
+            if (std.mem.eql(u8, f.path(), path)) return f;
+        }
+        return null;
     }
 
     /// The working-tree and HEAD buffers for one path.

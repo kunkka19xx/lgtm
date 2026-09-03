@@ -77,6 +77,11 @@ pub const Command = enum {
     prev_comment,
     submit_review,
     toggle_ignored,
+    /// A file over `large_file_lines` renders as a summary row; these open it
+    /// and fold it again. `zo` and `zc` because a deferred file is a fold in
+    /// everything but name, and vim already decided what those keys mean.
+    expand_file,
+    collapse_file,
     copy_text,
     copy_text_lines,
     copy_ref,
@@ -350,6 +355,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
     .{ .chords = &.{ c('z'), c('i') }, .command = .toggle_ignored, .desc = "show the files [review] ignore hides", .group = .view },
+    .{ .chords = &.{ c('z'), c('o') }, .command = .expand_file, .desc = "open a file too large to render inline, or fold it again", .group = .view },
+    .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "open a file too large to render inline, or fold it again", .hint = null, .group = .view },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)", .group = .view },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
     // tmux *root* table and forwards them only to processes matching its vim

@@ -29,8 +29,9 @@ pub const Row = union(enum) {
     /// the motions step past it the way they step past a hunk header.
     note: u32,
     /// The file exceeded `large_file_lines`, so its body was never parsed.
-    /// Deferring is not discarding: core/diff.zig retains the bytes and can
-    /// materialise them on demand.
+    /// Deferring is not discarding: core/diff.zig retains the bytes and `zo`
+    /// materialises them (`Review.expand`), after which this row is gone and
+    /// the file has hunks like any other.
     summarised,
 };
 
@@ -164,7 +165,7 @@ pub fn buildWith(gpa: Allocator, f: *const diff.FileDiff, notes: []const Comment
     }
 
     // A file with no hunks but with lines is one being *read* rather than
-    // reviewed - `<Space>d` on something the agent has not touched. There is
+    // reviewed - `<Space>F` on something the agent has not touched. There is
     // no hunk header to draw because there is no hunk: it is the whole file,
     // and every line of it belongs.
     if (f.hunks.len == 0 and f.lines.len() > 0) {

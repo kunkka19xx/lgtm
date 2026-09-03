@@ -213,5 +213,38 @@ out of the path's budget rather than out of the counts, and nothing at all when
 Nothing new was written for either half. `theme.file_*`, `devicon.forPath` and
 `statusFit` all existed; this was three call sites finding them.
 
+### 2026-09-03 - the doc audit, and what it found in the code
+
+Scanning the docs for present-tense claims about things that were never built
+turned up two claims that were about the *code* rather than about the writing.
+
+**A file over 5,000 changed lines had nowhere to go.** SPEC.md said "the diff
+loads lazily on open"; `core/diff.zig` had `materialise`, with two tests, and
+nothing in `ui/` ever called it. So the summary row was where a large file
+stopped: no key, no hint, no way in. A `package-lock.json` is exactly the file
+you skip, which is presumably why it went a month without being noticed - and
+exactly the file you eventually need to look at once.
+
+Now `zo` opens it and `zc` folds it again, which is what those keys already
+mean in vim: a deferred file is a fold in everything but name. Three things it
+had to get right beyond calling the function. The file has to be materialised
+*before* buffers are attached and ids inherited, because both skip a summarised
+file - do it after and the diff renders from git's text rather than from the
+buffers, which is the one thing ARCHITECTURE.md 11.1 says never to do. Opening
+has to survive a re-diff, or a file the agent is writing folds itself every
+500 ms, which is precisely when you want it open; `ui/review.zig` keeps the
+opened paths on the gpa, next to `prev_work`, for that reason. And folding
+re-diffs rather than filtering, the same way `zi` does: git decided the file was
+large, so git is what gets asked again.
+
+The summary row names the key, read from the keymap rather than written into
+the string, so a remapped `zo` still tells the truth.
+
+**The one outgoing string that is not a template.** `submitReview` builds
+`review ready: .lgtm/review-3.md (4 comments)` with `bufPrint`. Every other
+outgoing string goes through `bridge/template.zig`. Logged rather than fixed:
+changing it changes what the agent is told, which is a decision and not a
+tidy-up.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

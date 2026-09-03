@@ -226,11 +226,15 @@ pub const HelpEntry = struct {
 /// matched. One predicate, used by both `helpEntries` and `helpCount`.
 /// Every spelling of `cmd` that `mode` can reach, joined: `]f <Space>nf`.
 ///
+/// Public because the odd message has to name a key in its own text rather
+/// than in a footer, and it must name the key the reader actually has: a
+/// hardcoded one would be another place to keep in step with `[keys]`.
+///
 /// The overlay lists one row per *action*, not one per binding. Two rows for
 /// the same command read as two commands, and the reader stops to work out
 /// what the difference is - there is none, which is the worst answer to have
 /// invited.
-fn keysFor(bindings: []const Binding, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
+pub fn keysFor(bindings: []const Binding, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
     var n: usize = 0;
     for (bindings) |b| {
         if (b.command != cmd or !b.modes.has(mode)) continue;

@@ -141,6 +141,10 @@ pub const View = struct {
     col: u32 = 0,
     mode: event.Mode = .normal,
     hints: []const u8 = "",
+    /// What to press to open a file too large to render inline. Read from the
+    /// keymap once per frame rather than written into the message, so a
+    /// remapped `zo` still tells the reader the truth.
+    open_key: []const u8 = "",
     /// What is selected, in body-row indexes, or null outside visual mode.
     selection: ?Selection = null,
     prompt: ?PromptView = null,

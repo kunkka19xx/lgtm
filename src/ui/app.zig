@@ -750,6 +750,44 @@ pub const App = struct {
                 else
                     self.notice.set("hiding ignored files again", .{});
             },
+            // Deferring a large file was never meant to be where it stops.
+            // The bytes are still in the generation's git output and
+            // `core/diff.zig` can parse them; this is the key that asks.
+            .expand_file => {
+                const f = self.current() orelse return;
+                if (!f.summarised) {
+                    self.notice.set("this file is already open", .{});
+                    return;
+                }
+                const changed = f.added + f.removed;
+                if (self.review.expand(f.path()) catch false) {
+                    // `.reset`: the reader was on the summary row, which was
+                    // not a line, so there is no line to come back to. The top
+                    // of the file is where opening one starts.
+                    try self.rebuildRows(.reset);
+                    self.clampScroll(body);
+                    self.notice.set("opened - {d} changed lines", .{changed});
+                } else {
+                    self.notice.set("this file cannot be opened inline", .{});
+                }
+            },
+            .collapse_file => {
+                const f = self.current() orelse return;
+                if (f.summarised) {
+                    self.notice.set("this file is already folded", .{});
+                    return;
+                }
+                if (!self.review.collapse(f.path())) {
+                    self.notice.set("only a file too large to render folds", .{});
+                    return;
+                }
+                // Forgetting it is not enough: git decided it was large, so
+                // git is asked again, exactly as `zi` does with the ignore
+                // patterns rather than filtering what is already parsed.
+                try self.rediff();
+                self.clampScroll(body);
+                self.notice.set("folded", .{});
+            },
             .copy_text => try self.yank(.selection),
             .copy_text_lines => try self.yank(.lines),
             .copy_ref => try self.buildPayload(.copy, .ref),
@@ -2937,6 +2975,36 @@ const Fixture = struct {
         return self;
     }
 
+    /// A review whose one file is over `large_file_lines`, parsed from real
+    /// diff text: `zo` opens the bytes git actually produced, so a fixture
+    /// that faked the byte range would test nothing.
+    fn summarised(gpa: Allocator) !*Fixture {
+        const self = try build(gpa, null);
+        errdefer self.deinit();
+
+        // Everything here goes in the review's own arena, which is where a
+        // real generation lives and where `expand` allocates. Parsing it on
+        // the gpa instead would leave the fixture freeing arena memory.
+        const arena = self.app.review.allocator();
+        var buf: std.ArrayList(u8) = .empty;
+        try buf.appendSlice(arena,
+            \\diff --git a/big.zig b/big.zig
+            \\--- a/big.zig
+            \\+++ b/big.zig
+            \\
+        );
+        const n = diff.large_file_lines + 10;
+        var header: [64]u8 = undefined;
+        try buf.appendSlice(arena, try std.fmt.bufPrint(&header, "@@ -1,{d} +1,{d} @@\n", .{ n, n }));
+        for (0..n) |i| try buf.appendSlice(arena, if (i % 2 == 0) "+added\n" else "-removed\n");
+
+        const raw = try buf.toOwnedSlice(arena);
+        self.app.review.parsed = .{ .diff = try diff.parse(arena, raw), .raw = raw, .stderr = &.{} };
+        self.app.file_index = 0;
+        try self.app.rebuildRows(.reset);
+        return self;
+    }
+
     fn deinit(self: *Fixture) void {
         const gpa = self.gpa;
         for (self.files) |*f| {
@@ -4488,4 +4556,84 @@ test "composing again replaces the payload rather than appending to it" {
     try fx.press("<CR>");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:2", fx.app.payload());
+}
+
+// -- large files -----------------------------------------------------------
+
+test "a file too large to render inline opens on zo" {
+    var fx = try Fixture.summarised(testing.allocator);
+    defer fx.deinit();
+
+    // One row, and it is the summary: this is where a large file used to stop,
+    // because nothing called `materialise`.
+    try testing.expectEqual(@as(u32, 1), fx.app.rows.len());
+    try testing.expect(fx.app.rows.items[0] == .summarised);
+
+    try fx.press("zo");
+    try testing.expect(!fx.app.current().?.summarised);
+    try testing.expect(fx.app.rows.len() > diff.large_file_lines);
+    try fx.expectNotice("opened");
+    // On a line, not on chrome, and at the top: the summary row it was on is
+    // not a line, so there is nowhere else honest to land.
+    try testing.expect(fx.app.rows.items[fx.app.cursor] == .line);
+}
+
+test "opening a large file gives its hunks change ids" {
+    // Ids are inherited during a re-diff, which skips a summarised file
+    // entirely. Without assigning them on open, every hunk in the file would
+    // render as the same id and `#N` would name nothing.
+    var fx = try Fixture.summarised(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("zo");
+    const f = fx.app.current().?;
+    try testing.expect(f.hunks.len > 0);
+    for (f.hunks) |h| try testing.expect(h.id != hunk.no_id);
+}
+
+test "zo on a file that is already open says so rather than doing nothing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("zo");
+    try fx.expectNotice("already open");
+}
+
+test "an opened file is remembered, so a re-diff does not fold it again" {
+    // The list is what `regenerate` reads to materialise it again. Asserted
+    // here rather than through a re-diff because a re-diff needs git; what
+    // this owns is the remembering.
+    var fx = try Fixture.summarised(testing.allocator);
+    defer fx.deinit();
+
+    try testing.expectEqual(@as(usize, 0), fx.app.review.expanded.items.len);
+    try fx.press("zo");
+    try testing.expectEqual(@as(usize, 1), fx.app.review.expanded.items.len);
+    try testing.expectEqualStrings("big.zig", fx.app.review.expanded.items[0]);
+
+    // And opening it twice remembers it once.
+    _ = try fx.app.review.expand("big.zig");
+    try testing.expectEqual(@as(usize, 1), fx.app.review.expanded.items.len);
+}
+
+test "folding forgets the file, and folding an ordinary one says it cannot" {
+    var fx = try Fixture.summarised(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("zo");
+    try testing.expect(fx.app.review.collapse("big.zig"));
+    try testing.expectEqual(@as(usize, 0), fx.app.review.expanded.items.len);
+    // A second fold has nothing left to forget.
+    try testing.expect(!fx.app.review.collapse("big.zig"));
+}
+
+test "zc on a file that was never folded says so instead of re-diffing" {
+    // The dispatch must not reach `rediff` here: an ordinary file has nothing
+    // to fold, and running git to discover that would be a keystroke that
+    // costs a subprocess and changes nothing.
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("zc");
+    try fx.expectNotice("too large");
 }
