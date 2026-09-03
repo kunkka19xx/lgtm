@@ -401,6 +401,42 @@ Keep it boring. One render thread, one watcher thread, one thread pool for paral
 
 ---
 
+## 9b. The `@` mention list
+
+`@` in the compose box lists every file git knows about, so its cost scales
+with the repository rather than with the change. Two numbers, both measured
+rather than assumed:
+
+| | |
+|---|---|
+| `git ls-files --cached --others --exclude-standard` | 10 ms on the largest repository to hand (750 files); one subprocess |
+| Fuzzy scan of the result, per keystroke | **~9.5 ms at 200,000 paths**, ReleaseFast |
+
+The subprocess is not the problem. The per-keystroke scan is, because it runs
+inside the 8 ms keystroke-to-frame budget:
+
+| Files | Scan |
+|---|---|
+| 1,000 | 0.05 ms |
+| 10,000 | 0.5 ms |
+| 50,000 - about the linux kernel | 2.4 ms |
+| 200,000 - about chromium | 9.5 ms, over budget |
+
+So `git.max_files` caps the list at **50,000**, which keeps the worst case
+inside a quarter of the budget. Past that the box would stutter as you type,
+and an incomplete list you can still filter is better than a complete one you
+cannot.
+
+Two things keep it cheap without any of the machinery §4 rejects. The list is
+loaded **lazily**, on the first `@` of a session rather than at startup, so a
+session that never mentions a file never pays for it - and cold start keeps its
+50 ms budget. And it is loaded **once** and kept, because `ls-files` output
+changes only when files appear or vanish, which is rare next to how often the
+box is opened.
+
+If a repository ever does need more than 50,000, the answer is the bitmask
+prefilter the three-scope finder already plans for (§4.2), not a bigger cap.
+
 ## 10. Explicitly rejected
 
 | Idea | Why not |

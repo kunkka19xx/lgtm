@@ -39,6 +39,9 @@ pub const Result = enum {
     cancel,
     /// `Ctrl-i`: the caller opens the preset list.
     presets,
+    /// `@` was typed. It is already in the text; the caller opens the file
+    /// picker so the path can follow it.
+    files,
 };
 
 pub const Compose = struct {
@@ -189,6 +192,11 @@ pub const Compose = struct {
                 var utf8: [4]u8 = undefined;
                 const n = std.unicode.utf8Encode(cp, &utf8) catch return .typing;
                 self.insert(utf8[0..n]);
+                // `@` is how every agent CLI is told about a file, so typing
+                // one offers the list rather than waiting to be asked. The
+                // character goes in first: a picker that is cancelled leaves
+                // the `@` that was typed, because it was typed.
+                if (cp == '@') return .files;
             },
         }
         return .typing;
@@ -315,6 +323,16 @@ test "editing keys behave the way a terminal input box does" {
 
     _ = c.feed(ctrl('u'));
     try testing.expectEqualStrings("", c.text());
+}
+
+test "@ offers the file list and stays typed either way" {
+    var c: Compose = .{};
+    c.start("look at ");
+    try testing.expectEqual(Result.files, c.feed(tap('@')));
+    // The character is in the text before the caller hears about it, so a
+    // cancelled picker leaves what was typed rather than eating it.
+    try testing.expectEqualStrings("look at @", c.text());
+    try testing.expectEqual(c.text().len, c.cursor);
 }
 
 test "enter submits, escape abandons, ctrl-i asks for the presets" {

@@ -8,10 +8,15 @@
 // things to learn, and there is nothing about a list of files that wants
 // different rules from a list of keys.
 //
-// It is *not* the three-scope fuzzy finder on `f` - that one reaches the whole
-// repository and the `look` index, and needs a SQLite reader to do it. This is
-// the changed-files scope of it, which needs nothing the review does not
-// already have.
+// It is *not* the three-scope fuzzy finder on `f` - that one also reaches the
+// `look` index for the whole machine, and needs a SQLite reader to do it. Two
+// of its three scopes are here: `<Space>f` lists the changed files, because
+// jumping to an unchanged one means nothing in a review, and `@` inside the
+// compose box lists every file git knows about, because mentioning one does.
+//
+// The list is `frame.FileEntry` rather than `diff.FileDiff` for exactly that
+// reason: a mentionable file has a path and no hunks, and a widget that
+// insisted on hunks could not show one.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -59,7 +64,7 @@ pub const Files = struct {
 
     /// One row, counted against the list as filtered, so the
     /// selection can never sit past the end of what is on screen.
-    pub fn move(self: *Files, files: []const diff.FileDiff, delta: i32) void {
+    pub fn move(self: *Files, files: []const frame.FileEntry, delta: i32) void {
         const n = count(files, self.filter.text());
         if (n == 0) {
             self.index = 0;
@@ -76,7 +81,7 @@ pub const Files = struct {
 
     /// The same step, stopping at the ends. What a page wants: wrapping a
     /// screenful lands nowhere the eye was looking.
-    fn moveClamped(self: *Files, files: []const diff.FileDiff, delta: i32) void {
+    fn moveClamped(self: *Files, files: []const frame.FileEntry, delta: i32) void {
         const n = count(files, self.filter.text());
         if (n == 0) {
             self.index = 0;
@@ -89,7 +94,7 @@ pub const Files = struct {
     /// One screenful sideways is one column, and the file list has exactly
     /// one - so this is a page, which is the useful reading of `H`/`L` in a
     /// single-column list rather than a key that does nothing.
-    pub fn movePage(self: *Files, files: []const diff.FileDiff, delta: i32) void {
+    pub fn movePage(self: *Files, files: []const frame.FileEntry, delta: i32) void {
         const per: i32 = @intCast(@min(@max(self.layout.per, 1), 1000));
         self.moveClamped(files, delta * per);
     }
@@ -97,10 +102,10 @@ pub const Files = struct {
     /// Which file the selection points at, as an index into the review's own
     /// file list - which is what the caller needs, since the overlay's indexes
     /// are into a filtered view of it.
-    pub fn selected(self: *const Files, files: []const diff.FileDiff) ?u32 {
+    pub fn selected(self: *const Files, files: []const frame.FileEntry) ?u32 {
         var shown: usize = 0;
         for (files, 0..) |f, i| {
-            if (fuzzy.match(f.path(), self.filter.text()) == null) continue;
+            if (fuzzy.match(f.path, self.filter.text()) == null) continue;
             if (shown == self.index) return @intCast(i);
             shown += 1;
         }
@@ -110,7 +115,7 @@ pub const Files = struct {
     pub fn view(
         self: *Files,
         mode: event.Mode,
-        files: []const diff.FileDiff,
+        files: []const frame.FileEntry,
         current: u32,
         bindings: []const keymap.Binding,
         arena: Allocator,
@@ -132,38 +137,34 @@ pub const Files = struct {
 /// it, and re-sorting on every keystroke takes that away. The tiers still
 /// matter for *which* rows survive, not for where they land.
 pub fn entries(
-    files: []const diff.FileDiff,
+    files: []const frame.FileEntry,
     current: u32,
     query: []const u8,
     arena: Allocator,
 ) Allocator.Error![]const frame.FileEntry {
     var out: std.ArrayList(frame.FileEntry) = .empty;
     for (files, 0..) |f, i| {
-        if (fuzzy.match(f.path(), query) == null) continue;
-        try out.append(arena, .{
-            .path = f.path(),
-            .added = f.added,
-            .removed = f.removed,
-            .status = f.status,
-            .current = i == current,
-        });
+        if (fuzzy.match(f.path, query) == null) continue;
+        var e = f;
+        e.current = i == current;
+        try out.append(arena, e);
     }
     return out.toOwnedSlice(arena);
 }
 
 /// How many rows survive `query`. Lets the selection be clamped without
 /// building the list first.
-pub fn count(files: []const diff.FileDiff, query: []const u8) usize {
+pub fn count(files: []const frame.FileEntry, query: []const u8) usize {
     var n: usize = 0;
     for (files) |f| {
-        if (fuzzy.match(f.path(), query) != null) n += 1;
+        if (fuzzy.match(f.path, query) != null) n += 1;
     }
     return n;
 }
 
 /// Where the current file sits in the unfiltered list, which is where the
 /// overlay opens.
-pub fn rowOf(files: []const diff.FileDiff, current: u32) usize {
+pub fn rowOf(files: []const frame.FileEntry, current: u32) usize {
     return if (current < files.len) current else 0;
 }
 
@@ -171,12 +172,12 @@ const testing = std.testing;
 
 /// Paths and counts are all these tests need; the rest of a `FileDiff` is
 /// what the body draws, not what the list does.
-fn fixture() [4]diff.FileDiff {
+fn fixture() [4]frame.FileEntry {
     return .{
-        .{ .old_path = "src/ui/app.zig", .new_path = "src/ui/app.zig", .status = .modified, .added = 12, .removed = 4 },
-        .{ .old_path = "src/core/diff.zig", .new_path = "src/core/diff.zig", .status = .modified, .added = 1, .removed = 0 },
-        .{ .old_path = "README.md", .new_path = "README.md", .status = .modified, .added = 30, .removed = 2 },
-        .{ .old_path = "src/ui/app_old.zig", .new_path = "src/ui/app_old.zig", .status = .deleted, .added = 0, .removed = 99 },
+        .{ .path = "src/ui/app.zig", .status = .modified, .added = 12, .removed = 4 },
+        .{ .path = "src/core/diff.zig", .status = .modified, .added = 1, .removed = 0 },
+        .{ .path = "README.md", .status = .modified, .added = 30, .removed = 2 },
+        .{ .path = "src/ui/app_old.zig", .status = .deleted, .added = 0, .removed = 99 },
     };
 }
 

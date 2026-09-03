@@ -119,17 +119,18 @@ On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: ru
 
 With the cursor on a line, `Enter` opens a compose box holding
 `#3 src/auth.zig:47` and nothing else; type what you want to say and Enter
-again sends it. `Ctrl-i` lists your presets and drops one in **at the caret**, deleting
-nothing. `Ctrl-j` types a line break, which is joined back into one line on the
+again sends it. `Ctrl-i` lists your presets and `@` lists every file git knows about -
+changed ones first, then the rest, ignoring whatever `.gitignore` does. Both
+drop what you pick in **at the caret**, deleting nothing. `Ctrl-j` types a line break, which is joined back into one line on the
 way out - the box says so while one is present, because a newline through
 `tmux send-keys` *is* Enter and would submit the agent's half-written message. `V` selects a range first and sends `:47-52`; `v` selects within the line
 and sends the words themselves.
 
 `y` is the vim key doing the vim thing: it yanks the selected text, and `Y`
 yanks whole lines. The reference lives on `<Space>y`, with `<Space>Y` for the
-reference plus the lines under it. `<Space>a` `<Space>r` `<Space>t` `<Space>x` send the reference with a question
-attached - "why this approach?", "revert this, keep the rest", "add a test
-covering this", "explain what this does".
+reference plus the lines under it. `<Space>a` opens the box with the question list
+already up. The questions come from `[presets]` in your config, and `Ctrl-i`
+reaches them from inside the box at any time.
 
 **It inserts text and never presses Enter.** The payload ends with a trailing
 space; you type your question and decide when to submit. A payload containing a
@@ -146,6 +147,19 @@ Outside tmux - or when a send fails - everything lands on the clipboard through
 OSC 52, which works over SSH.
 
 ## Configuring
+
+Generated files that are tracked on purpose - lockfiles, `*.pb.go`, committed
+bundles - are the noise `.gitignore` cannot remove. `[review] ignore` does:
+
+```toml
+[review]
+ignore = ["package-lock.json", "**/*.pb.go", "__snapshots__/**"]
+```
+
+They are hidden from the review, the mode row says how many, and `zi` brings
+them back for the session. Patterns are git pathspecs, so the globs behave
+exactly the way `.gitignore`'s do.
+
 
 `~/.config/lgtm/config.toml` (or `$XDG_CONFIG_HOME/lgtm/config.toml`), then
 `.lgtm/config.toml` in the repository, merged in that order - the repo file

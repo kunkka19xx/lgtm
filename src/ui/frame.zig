@@ -179,6 +179,10 @@ pub const View = struct {
     /// statement that reads like a bug.
     total_hunks: u32 = 0,
     hunk_ordinal: u32 = 0,
+    /// Changed files that `[review] ignore` kept out of this review. Shown in
+    /// the mode row, because a file hidden without a word is a file the reader
+    /// does not know they have not looked at.
+    hidden: u32 = 0,
     /// Set when the last re-diff hit a file changing underneath it. Shown
     /// rather than swallowed: a stale frame the user knows about beats a
     /// blended one they do not (SPEC.md 9).
@@ -296,6 +300,11 @@ pub const FileEntry = struct {
     /// The file the review is currently on, marked so the list opens showing
     /// the reader where they already are rather than at an arbitrary top.
     current: bool = false,
+    /// Whether this file is part of the review. False for the ones `@` adds
+    /// from the rest of the project: they have a path and nothing else, and
+    /// `+0 -0` beside them would be a fact about a file that did not change
+    /// dressed up as a change.
+    in_review: bool = true,
 };
 
 /// Everything the `F` overlay draws. Its own view for the same reason

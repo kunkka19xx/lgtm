@@ -30,6 +30,7 @@ pub const PromptView = frame_mod.PromptView;
 pub const HelpView = frame_mod.HelpView;
 pub const ComposeView = frame_mod.ComposeView;
 pub const PresetEntry = frame_mod.PresetEntry;
+pub const FileEntry = frame_mod.FileEntry;
 pub const HelpLayout = frame_mod.HelpLayout;
 pub const Theme = frame_mod.Theme;
 pub const Glyphs = frame_mod.Glyphs;
@@ -49,9 +50,9 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         // No chrome at all, and no prompt either: `/` leaves zen rather than
         // drawing an input line with nothing to anchor it.
         try body_mod.draw(f, v, 0, h);
+        if (v.compose) |cv| try popup.drawCompose(f, cv, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
         if (v.files) |fv| try popup.drawFiles(f, fv, 0, h);
-        if (v.compose) |cv| try popup.drawCompose(f, cv, 0, h);
         hideCursorUnder(f, v);
         return;
     }
@@ -65,9 +66,12 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
 
     // Last, and over everything: an overlay is a layer, not a pane. Only one
     // can be open, because each is its own mode.
+    // The compose box first, then anything floating over *it*: the `@` file
+    // picker is a layer on the box, and drawing the box last painted it over
+    // the list it had just opened.
+    if (v.compose) |cv| try popup.drawCompose(f, cv, 2, bodyHeight(h, false));
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
     if (v.files) |fv| try popup.drawFiles(f, fv, 2, bodyHeight(h, false));
-    if (v.compose) |cv| try popup.drawCompose(f, cv, 2, bodyHeight(h, false));
     hideCursorUnder(f, v);
 }
 
@@ -259,6 +263,10 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         .{ "file changed while reading, re-diffing", t.removed_count }
     else if (v.notice.len > 0)
         .{ v.notice, t.notice }
+    else if (v.hidden > 0)
+        .{ try std.fmt.allocPrint(f.arena, "{d} file{s} hidden - zi shows them", .{
+            v.hidden, if (v.hidden == 1) "" else "s",
+        }), t.dim }
     else if (v.selection) |sel|
         .{ try selectionSize(f, v, sel), t.dim }
     else

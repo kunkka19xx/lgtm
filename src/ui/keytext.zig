@@ -263,13 +263,80 @@ fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, group: ?keyma
 
 /// How many rows the popup will have. Lets the selection be clamped without
 /// laying the list out first.
-pub fn helpCount(bindings: []const Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8) usize {
+/// How many rows `helpEntries` will produce, without building them.
+///
+/// It has to agree with the list exactly: this is what clamps the selection,
+/// and a count that ran ahead of the list would let the highlight sit past the
+/// end of what is drawn. So it walks the same two tiers in the same order and
+/// applies the same `joins` rule - allocation-free, because `help.zig` asks on
+/// every navigation keystroke and has no arena to hand.
+/// Keys that belong to the compose box, not to the review.
+///
+/// They are not bindings: the box reads keys directly, the way `prompt.zig`
+/// does, so there is nothing in the keymap for the popup to find. But a reader
+/// looking for "how do I ask a question" looks in `?`, and finding nothing
+/// there is how a feature goes unused - which is exactly what happened when
+/// the four ask keys retired and took the only visible trace of presets with
+/// them. Listed under `send`, because that is the tab the box belongs to.
+///
+/// The same rows the box draws along its own bottom border, so the two cannot
+/// disagree about what its keys are.
+pub const compose_rows: []const HelpEntry = &.{
+    .{ .keys = "<C-i>", .desc = "in the box: insert a preset at the caret" },
+    .{ .keys = "@", .desc = "in the box: mention a file" },
+    .{ .keys = "<C-j>", .desc = "in the box: a line break, joined on send" },
+};
+
+/// The compose rows this filter and group keep, appended to whatever the
+/// bindings produced. One helper, so the list and the count agree.
+fn composeShown(mode: event.Mode, group: ?keymap.Group, filter: []const u8, out: ?*std.ArrayList(HelpEntry), arena: ?Allocator) Allocator.Error!usize {
+    // Only where the review's own keys are live. Inside the box the popup
+    // cannot be opened at all, and in a list of visual-mode keys these would
+    // be four rows about somewhere the reader is not.
+    if (mode != .normal) return 0;
+    if (group) |g| if (g != .send) return 0;
+
     var n: usize = 0;
-    var kbuf: [max_row_keys_bytes]u8 = undefined;
-    for (bindings) |b| {
-        if (ranked(bindings, b, mode, group, filter, &kbuf) != null) n += 1;
+    for (compose_rows) |r| {
+        var hay: [160]u8 = undefined;
+        const text = std.fmt.bufPrint(&hay, "{s} {s}", .{ r.keys, r.desc }) catch r.keys;
+        if (fuzzy.match(text, filter) == null) continue;
+        n += 1;
+        if (out) |list| try list.append(arena.?, r);
     }
     return n;
+}
+
+pub fn helpCount(bindings: []const Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8) usize {
+    var n: usize = 0;
+    for ([_]fuzzy.Tier{ .solid, .loose }) |tier| {
+        var open: ?[]const u8 = null;
+        var width: usize = 0;
+        var kbuf: [max_row_keys_bytes]u8 = undefined;
+        for (bindings) |b| {
+            const r = ranked(bindings, b, mode, group, filter, &kbuf) orelse continue;
+            if (r.tier != tier) continue;
+            const row: HelpEntry = .{ .keys = r.keys, .desc = r.desc };
+            if (open) |d| {
+                if (joins(d, width, row)) {
+                    width += 1 + row.keys.len;
+                    continue;
+                }
+            }
+            n += 1;
+            open = r.desc;
+            width = row.keys.len;
+        }
+    }
+    return n + (composeShown(mode, group, filter, null, null) catch 0);
+}
+
+/// Whether a row joins the one already open. The single place the merge rule
+/// lives: `mergeByDesc` builds the list with it and `helpCount` counts with
+/// it, so the two cannot drift into disagreeing about how many rows there are.
+fn joins(open_desc: []const u8, open_width: usize, next: HelpEntry) bool {
+    return std.mem.eql(u8, open_desc, next.desc) and
+        open_width + 1 + next.keys.len <= max_merged_keys;
 }
 
 pub fn helpEntries(
@@ -294,7 +361,53 @@ pub fn helpEntries(
         }
     }
     try solid.appendSlice(arena, loose.items);
-    return solid.toOwnedSlice(arena);
+    var rows: std.ArrayList(HelpEntry) = .empty;
+    try rows.appendSlice(arena, try mergeByDesc(arena, solid.items));
+    _ = try composeShown(mode, group, filter, &rows, arena);
+    return rows.toOwnedSlice(arena);
+}
+
+/// Neighbouring rows that say the same thing become one row with both keys.
+///
+/// The same rule the footer already uses, applied to the list: `j` and `k` are
+/// one idea, and two rows reading "down a line" and "up a line" spend two rows
+/// saying so. The `move` group was 22 rows - most of a pane - and half of them
+/// were the other half with a word changed.
+///
+/// Adjacent only, and only within a tier. Bindings that belong together are
+/// written together in the keymap, so adjacency *is* the relationship; pulling
+/// same-description rows together from opposite ends of the list would invent
+/// one that is not there.
+///
+/// And only while the joined keys stay narrow. `]h / <Space>nh [h / <Space>ph`
+/// is one row that has swallowed the description column - past
+/// `max_merged_keys` two short rows read better than one wide one, which is
+/// the whole point of merging in the first place.
+const max_merged_keys = 12;
+
+fn mergeByDesc(arena: Allocator, rows: []const HelpEntry) Allocator.Error![]const HelpEntry {
+    var out: std.ArrayList(HelpEntry) = .empty;
+    var i: usize = 0;
+    while (i < rows.len) {
+        var last = i;
+        var width = rows[i].keys.len;
+        while (last + 1 < rows.len and joins(rows[i].desc, width, rows[last + 1])) {
+            width += 1 + rows[last + 1].keys.len;
+            last += 1;
+        }
+        if (last == i) {
+            try out.append(arena, rows[i]);
+        } else {
+            var keys: std.ArrayList(u8) = .empty;
+            for (rows[i .. last + 1], 0..) |r, n| {
+                if (n > 0) try keys.append(arena, ' ');
+                try keys.appendSlice(arena, r.keys);
+            }
+            try out.append(arena, .{ .keys = try keys.toOwnedSlice(arena), .desc = rows[i].desc });
+        }
+        i = last + 1;
+    }
+    return out.toOwnedSlice(arena);
 }
 
 const testing = std.testing;
@@ -444,10 +557,17 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     // The filter reaches the keys too, so the leader bindings are findable by
     // the name a user would type for them.
     const leader_hits = try helpEntries(default_bindings, .normal, null, "space", arena);
-    try testing.expectEqual(@as(usize, 12), leader_hits.len);
+    var leaders: usize = 0;
+    for (leader_hits) |e| {
+        if (std.mem.indexOf(u8, e.keys, "<Space>") != null) leaders += 1;
+    }
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
-    for (leader_hits) |e| try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);
+    try testing.expectEqual(@as(usize, 9), leaders);
+    // The rows that actually contain the query come first, which is the whole
+    // point of the two tiers - the scattered-letter matches a query like this
+    // also drags in sit behind them rather than among them.
+    for (leader_hits[0..leaders]) |e| try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);
 
     const none = try helpEntries(default_bindings, .normal, null, "zzzz", arena);
     try testing.expectEqual(@as(usize, 0), none.len);

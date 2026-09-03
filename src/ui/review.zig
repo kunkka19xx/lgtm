@@ -60,6 +60,14 @@ pub const Review = struct {
     /// the buffer disagree. Surfaced rather than rendered as a blend of two
     /// states (SPEC.md 9).
     torn: bool = false,
+    /// `[review] ignore` patterns, and whether they are being applied. Held
+    /// here because a re-diff is where they take effect: toggling is a
+    /// re-diff, not a filter over what is already parsed.
+    ignore: []const []const u8 = &.{},
+    show_ignored: bool = false,
+    /// How many changed files the patterns kept out, so the status line can
+    /// say so. Nothing is ever hidden silently.
+    hidden: u32 = 0,
 
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
@@ -149,9 +157,15 @@ pub const Review = struct {
         self.torn = false;
 
         const git_span = metrics.span(.git_subprocess);
-        const parsed = try git.diffPathsIn(arena, self.io, null, &.{});
+        const skip: []const []const u8 = if (self.show_ignored) &.{} else self.ignore;
+        const parsed = try git.diffPathsIn(arena, self.io, null, &.{}, skip);
         git_span.end();
         self.parsed = parsed;
+
+        // What the patterns kept out, counted rather than assumed - which is
+        // what lets the status line say a number instead of leaving the reader
+        // to wonder what they have not looked at.
+        self.hidden = git.hiddenCount(self.gpa, self.io, skip);
 
         // Buffers are the source of truth; the diff is an overlay on them.
         self.sources = source.load(arena, self.io, null, parsed.diff) catch null;

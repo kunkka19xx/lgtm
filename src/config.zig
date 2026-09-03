@@ -91,6 +91,10 @@ pub const Config = struct {
     /// Empty until a `[presets]` table names some, and the four built-in asks
     /// stand in for it - so the list is never empty and never a surprise.
     presets: []const Preset = &.{},
+    /// `[review] ignore`: glob patterns for files kept out of the review.
+    /// Empty means everything git reports, which is the behaviour that was
+    /// there before this existed.
+    ignore: []const []const u8 = &.{},
 };
 
 /// One insertable question. The name is what the picker lists; the text is
@@ -108,7 +112,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, keys, theme, presets };
+const Section = enum { nav, ui, keys, theme, presets, review };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -250,8 +254,46 @@ pub const Loader = struct {
             // Every key is a preset name, so there is no fixed list to check
             // against - what the user writes is what the picker offers.
             .presets => self.applyPreset(src, line, key, value),
+            .review => {
+                if (std.mem.eql(u8, key, "ignore")) {
+                    self.applyIgnore(src, line, value);
+                } else self.unknownKey(src, line, section, key);
+            },
             .theme => self.applyTheme(src, line, key, value),
         }
+    }
+
+    /// `ignore = ["package-lock.json", "**/*.pb.go"]`, replacing rather than
+    /// appending: a repo that lists its own generated files means those, not
+    /// those plus whatever the global file happened to name.
+    ///
+    /// The patterns are not validated here, because git owns their meaning.
+    /// A pattern that matches nothing hides nothing, which is the same thing
+    /// a typo in a `.gitignore` does, and reporting it would mean
+    /// reimplementing the matcher to find out.
+    fn applyIgnore(self: *Loader, src: []const u8, line: u32, value: toml.Value) void {
+        const arena = self.arena.allocator();
+        var one: [1][]const u8 = undefined;
+        const items: []const []const u8 = switch (value) {
+            .list => |l| l,
+            .string => |t| blk: {
+                one[0] = t;
+                break :blk one[0..1];
+            },
+            else => {
+                self.note(src, line, "review.ignore wants a string or a list, not {s}", .{value.typeName()});
+                return;
+            },
+        };
+
+        const out = arena.alloc([]const u8, items.len) catch return;
+        var n: usize = 0;
+        for (items) |pat| {
+            if (pat.len == 0) continue;
+            out[n] = arena.dupe(u8, pat) catch return;
+            n += 1;
+        }
+        self.cfg.ignore = out[0..n];
     }
 
     /// `name = "the question"`, appended in file order so the picker lists
@@ -614,6 +656,39 @@ test "out of range is a problem, not a clamp" {
     defer l.deinit();
     try testing.expectEqual(@as(usize, 1), l.problems.items.len);
     try testing.expectEqual(@as(u32, 3), l.cfg.nav.scrolloff);
+}
+
+test "review.ignore takes one pattern or a list, and replaces rather than adds" {
+    var l = loadText(
+        \\[review]
+        \\ignore = ["package-lock.json", "**/*.pb.go", ""]
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+    // The empty entry is dropped: it would exclude nothing and git would take
+    // it as a pathspec matching everything.
+    try testing.expectEqual(@as(usize, 2), l.cfg.ignore.len);
+    try testing.expectEqualStrings("package-lock.json", l.cfg.ignore[0]);
+
+    // A repo file naming its own generated files means those, not those plus
+    // whatever the global file happened to list.
+    l.merge(".lgtm/config.toml",
+        \\[review]
+        \\ignore = "dist/**"
+    );
+    try testing.expectEqual(@as(usize, 1), l.cfg.ignore.len);
+    try testing.expectEqualStrings("dist/**", l.cfg.ignore[0]);
+}
+
+test "a bad review.ignore is reported and the review still starts" {
+    // Hard rule 8: a config error is a status-line notice, never a refusal.
+    var l = loadText(
+        \\[review]
+        \\ignore = 42
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 1), l.problems.items.len);
+    try testing.expectEqual(@as(usize, 0), l.cfg.ignore.len);
 }
 
 test "keys are remapped by the spelling the popup shows" {

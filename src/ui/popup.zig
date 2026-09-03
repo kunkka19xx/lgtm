@@ -608,7 +608,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // Counts right-aligned inside the box, so the paths stay readable as a
         // column even when one of them is very long.
         const counts_col = text_col + box.content - countsWidth(e);
-        if (counts_col > text_col + lead + f.win.gwidth(shown)) {
+        if (e.in_review and counts_col > text_col + lead + f.win.gwidth(shown)) {
             var col = counts_col;
             col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
             _ = try f.print(row, col, frame_mod.withBg(f.theme.removed_count, bg), "{s}{d}", .{ f.glyphs.del, e.removed });
@@ -726,6 +726,7 @@ const compose_title: keytext.HelpEntry = .{ .keys = "", .desc = "compose" };
 const compose_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "<CR>", .desc = "send" },
     .{ .keys = "<C-i>", .desc = "preset" },
+    .{ .keys = "@", .desc = "file" },
     .{ .keys = "<Esc>", .desc = "cancel" },
 };
 

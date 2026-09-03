@@ -81,6 +81,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.presets_cfg = opts.cfg.presets;
+    app.review.ignore = opts.cfg.ignore;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
@@ -395,7 +396,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         var hint_buf: [256]u8 = undefined;
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
-        shown.files = try app.file_list.view(app.mode, app.review.files(), app.file_index, app.km.bindings, arena);
+        shown.files = try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
@@ -408,7 +409,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         if (try app.help.view(app.mode, app.km.bindings, arena)) |hv| {
             try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
         }
-        if (try app.file_list.view(app.mode, app.review.files(), app.file_index, app.km.bindings, arena)) |fv| {
+        if (try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena)) |fv| {
             try render.drawFileList(frameOf(app, win, arena), fv, 0, win.height);
         }
     }

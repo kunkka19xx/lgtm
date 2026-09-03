@@ -117,6 +117,7 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; matches light up as the query is typed; `N` runs it backwards |
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
+| `zi` | show the files `[review] ignore` hides, and hide them again |
 | `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
@@ -156,12 +157,12 @@ Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing 
 With the cursor on a diff line:
 
 - `Enter` → open the compose box on `#3 src/auth.rs:47`; Enter again sends it
-- in the box: `Ctrl-i` insert a preset at the caret, `Ctrl-j` line break, `Ctrl-a/e/u/w` readline editing, `<Esc>` abandon
+- in the box: `@` mention any file in the project - changed ones first, then everything else git tracks or does not ignore, capped at 50,000 (PERFORMANCE.md 9b) - `Ctrl-i` insert a preset at the caret, `Ctrl-j` line break, `Ctrl-a/e/u/w` readline editing, `<Esc>` abandon
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
 - `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
 - `y` → yank the selected text (the characters under `v`, the lines under `V`, the cursor line with no selection)
 - `Y` → yank whole lines, whatever `v` selected - vim's linewise yank
-- `<Space>a` `<Space>r` `<Space>t` `<Space>x` → open the box on the reference, same as `Enter`. The questions live in `Ctrl-i` now, so these four are shortcuts into the box rather than four different messages
+- `<Space>a` → open the box **with the question list already up**. It was four keys carrying four fixed questions; the questions moved into `[presets]`, where they are the user's own and there can be any number of them, so one key that opens the list beats four that each hard-code a row of it. Nothing is inserted until a question is chosen
 - `<Space>y` → copy the reference to the clipboard
 - `<Space>Y` → copy the reference **and** the line contents
 

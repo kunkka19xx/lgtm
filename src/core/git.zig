@@ -25,12 +25,34 @@ pub const Error = proc.RunError || diff.ParseError || error{GitFailed};
 /// startup costs 5-20 ms and will dominate the profile long before the diff
 /// itself does (PERFORMANCE.md 8.1).
 pub fn diffPaths(gpa: Allocator, io: std.Io, paths: []const []const u8) Error!Parsed {
-    return diffPathsIn(gpa, io, null, paths);
+    return diffPathsIn(gpa, io, null, paths, &.{});
+}
+
+/// Files kept out of the review by `[review] ignore`.
+///
+/// Passed to git as `:(exclude)<pattern>` pathspecs rather than matched here,
+/// which buys exact gitignore glob semantics - the syntax the user already
+/// knows - for no matching code of our own to get subtly wrong. It also means
+/// git never parses the hunks, so a 900-line lockfile costs nothing rather
+/// than being parsed and then dropped.
+///
+/// What it is *for* is the file `.gitignore` cannot help with: the generated
+/// ones that are tracked on purpose. A lockfile, a `*.pb.go`, a committed
+/// bundle - all real files, none of them decisions, and all of them sitting
+/// between two hunks that are.
+pub fn excludeSpec(arena: Allocator, pattern: []const u8) Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(arena, ":(exclude){s}", .{pattern});
 }
 
 /// As `diffPaths`, against a named repository. Uses `git -C` rather than
 /// changing the process working directory, which is shared mutable state.
-pub fn diffPathsIn(gpa: Allocator, io: std.Io, repo: ?[]const u8, paths: []const []const u8) Error!Parsed {
+pub fn diffPathsIn(
+    gpa: Allocator,
+    io: std.Io,
+    repo: ?[]const u8,
+    paths: []const []const u8,
+    ignore: []const []const u8,
+) Error!Parsed {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
 
@@ -45,10 +67,16 @@ pub fn diffPathsIn(gpa: Allocator, io: std.Io, repo: ?[]const u8, paths: []const
         "--find-renames",
         "-U3",
     });
-    if (paths.len > 0) {
+    if (paths.len > 0 or ignore.len > 0) {
         try argv.append(gpa, "--");
-        try argv.appendSlice(gpa, paths);
+        // A pathspec list of only exclusions matches nothing, so `.` has to
+        // stand in for "everything" before the exclusions narrow it.
+        if (paths.len > 0) try argv.appendSlice(gpa, paths) else if (ignore.len > 0) try argv.append(gpa, ".");
+        for (ignore) |pat| try argv.append(gpa, try excludeSpec(gpa, pat));
     }
+    defer for (argv.items) |a| {
+        if (std.mem.startsWith(u8, a, ":(exclude)")) gpa.free(a);
+    };
 
     const out = try proc.run(gpa, io, argv.items, max_diff_bytes);
     errdefer out.deinit(gpa);
@@ -63,12 +91,12 @@ pub fn diffPathsIn(gpa: Allocator, io: std.Io, repo: ?[]const u8, paths: []const
     // `git diff HEAD` does not see untracked files, and an agent creating a
     // new file is one of the most common things it does. Without this they
     // would be silently absent from the review.
-    var extra = try untracked(gpa, io, repo, paths);
+    var extra = try untracked(gpa, io, repo, paths, ignore);
     defer extra.deinit(gpa);
     if (extra.files.len > 0) {
         var all = try gpa.alloc(diff.FileDiff, parsed.files.len + extra.files.len);
         @memcpy(all[0..parsed.files.len], parsed.files);
-        @memcpy(all[parsed.files.len ..], extra.files);
+        @memcpy(all[parsed.files.len..], extra.files);
         gpa.free(parsed.files);
         gpa.free(extra.files);
         extra.files = &.{};
@@ -114,16 +142,29 @@ const Untracked = struct {
     }
 };
 
-fn untracked(gpa: Allocator, io: std.Io, repo: ?[]const u8, paths: []const []const u8) Error!Untracked {
+fn untracked(
+    gpa: Allocator,
+    io: std.Io,
+    repo: ?[]const u8,
+    paths: []const []const u8,
+    ignore: []const []const u8,
+) Error!Untracked {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
     try argv.append(gpa, "git");
     if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
     try argv.appendSlice(gpa, &.{ "ls-files", "--others", "--exclude-standard" });
-    if (paths.len > 0) {
+    // The same exclusions the tracked side got. A new generated file is still
+    // a generated file, and hiding it from one half of the review only would
+    // be worse than not hiding it at all.
+    if (paths.len > 0 or ignore.len > 0) {
         try argv.append(gpa, "--");
-        try argv.appendSlice(gpa, paths);
+        if (paths.len > 0) try argv.appendSlice(gpa, paths) else try argv.append(gpa, ".");
+        for (ignore) |pat| try argv.append(gpa, try excludeSpec(gpa, pat));
     }
+    defer for (argv.items) |a| {
+        if (std.mem.startsWith(u8, a, ":(exclude)")) gpa.free(a);
+    };
 
     const out = try proc.run(gpa, io, argv.items, max_diff_bytes);
     defer out.deinit(gpa);
@@ -219,6 +260,73 @@ pub fn changedPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
         try list.append(gpa, try gpa.dupe(u8, p));
     }
     return list.toOwnedSlice(gpa);
+}
+
+/// A ceiling on the mention list. At this many paths one filter pass is a few
+/// milliseconds against an 8 ms frame budget; past it the box stutters as you
+/// type, which is worse than an incomplete list you can still filter.
+pub const max_files = 50_000;
+
+/// Every file git knows about and does not ignore: tracked plus untracked,
+/// minus everything `.gitignore` covers. Git's own ordering, which is sorted -
+/// what the `@` mention list wants underneath the changed files.
+///
+/// Measured rather than assumed: 10 ms on the largest repository to hand. The
+/// cost that matters is not this one but the per-keystroke scan over the
+/// result, about 9.5 ms at 200,000 paths, which is what `max_files` is for.
+pub fn projectFiles(gpa: Allocator, io: std.Io) Error![][]const u8 {
+    const out = try proc.run(gpa, io, &.{
+        "git", "ls-files", "--cached", "--others", "--exclude-standard",
+    }, max_diff_bytes);
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |p| gpa.free(p);
+        list.deinit(gpa);
+    }
+    var it = std.mem.splitScalar(u8, out.stdout, '\n');
+    while (it.next()) |line| {
+        const p = std.mem.trim(u8, line, " \t\r");
+        if (p.len == 0) continue;
+        if (list.items.len >= max_files) break;
+        try list.append(gpa, try gpa.dupe(u8, p));
+    }
+    return list.toOwnedSlice(gpa);
+}
+
+/// How many changed files the ignore patterns kept out.
+///
+/// Asked as the *inverse* pathspec - the patterns as includes rather than
+/// excludes - so it counts exactly the files that were hidden, from the same
+/// two populations the review is built from. Subtracting one list length from
+/// another was the obvious way and the wrong one: `git diff` never sees
+/// untracked files, so the two lists were not the same population and the
+/// count came out short.
+pub fn hiddenCount(gpa: Allocator, io: std.Io, ignore: []const []const u8) u32 {
+    if (ignore.len == 0) return 0;
+    return countMatching(gpa, io, &.{ "git", "diff", "HEAD", "--name-only" }, ignore) +
+        countMatching(gpa, io, &.{ "git", "ls-files", "--others", "--exclude-standard" }, ignore);
+}
+
+fn countMatching(gpa: Allocator, io: std.Io, base: []const []const u8, pats: []const []const u8) u32 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    argv.appendSlice(gpa, base) catch return 0;
+    argv.append(gpa, "--") catch return 0;
+    argv.appendSlice(gpa, pats) catch return 0;
+
+    const out = proc.run(gpa, io, argv.items, max_diff_bytes) catch return 0;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return 0;
+
+    var n: u32 = 0;
+    var it = std.mem.splitScalar(u8, out.stdout, '\n');
+    while (it.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r").len > 0) n += 1;
+    }
+    return n;
 }
 
 pub fn freePaths(gpa: Allocator, paths: [][]const u8) void {

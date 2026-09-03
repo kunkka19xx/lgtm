@@ -63,6 +63,8 @@ pub const Command = enum {
     /// box; the two copies go to the clipboard whatever the backend is.
     send_ref,
     clear_search,
+    compose_ask,
+    toggle_ignored,
     copy_text,
     copy_text_lines,
     copy_ref,
@@ -70,10 +72,6 @@ pub const Command = enum {
     /// Ask presets: one keystroke, a whole question (FEATURES.md 2.1). Each
     /// is the reference plus a template, which is why they cost four enum
     /// values and no dispatch of their own.
-    ask_why,
-    ask_revert,
-    ask_test,
-    ask_explain,
     /// Hide the chrome and give the body the whole pane.
     toggle_zen,
     /// Soft wrap on and off. A long line either continues on the next screen
@@ -263,29 +261,29 @@ pub const leader: Chord = c(' ');
 /// The v0.1 set. Only bindings that do something are listed: a hint strip that
 /// advertises keys the build does not implement is worse than a shorter one.
 pub const default_bindings: []const Binding = &.{
-    .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down a line", .group = .move },
-    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "up a line", .group = .move },
-    .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "down half a page", .group = .move },
-    .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "up half a page", .group = .move },
-    .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first line", .group = .move },
-    .{ .chords = &.{c('G')}, .command = .bottom, .desc = "last line", .group = .move },
-    .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left a character", .group = .move },
-    .{ .chords = &.{c('l')}, .command = .char_right, .desc = "right a character", .group = .move },
-    .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next word", .group = .move },
-    .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "previous word", .group = .move },
-    .{ .chords = &.{c('e')}, .command = .word_end, .desc = "end of word", .group = .move },
-    .{ .chords = &.{c('W')}, .command = .big_word_next, .desc = "next WORD - only blanks separate", .group = .move },
-    .{ .chords = &.{c('B')}, .command = .big_word_prev, .desc = "previous WORD", .group = .move },
-    .{ .chords = &.{c('E')}, .command = .big_word_end, .desc = "end of WORD", .group = .move },
-    .{ .chords = &.{c('0')}, .command = .line_start, .desc = "first column", .group = .move },
-    .{ .chords = &.{c('$')}, .command = .line_end, .desc = "last column", .group = .move },
-    .{ .chords = &.{c('^')}, .command = .first_non_blank, .desc = "first non-blank column", .group = .move },
-    .{ .chords = &.{c('f')}, .command = .find_char, .desc = "to the next <char> on this line", .group = .move },
-    .{ .chords = &.{c('t')}, .command = .till_char, .desc = "before the next <char>", .group = .move },
-    .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "back to the previous <char>", .group = .move },
-    .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "back to after the previous <char>", .group = .move },
-    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T", .group = .move },
-    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat it backwards", .group = .move },
+    .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down and up a line", .group = .move },
+    .{ .chords = &.{c('k')}, .command = .line_up, .desc = "down and up a line", .group = .move },
+    .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "half a page, down and up", .group = .move },
+    .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "half a page, down and up", .group = .move },
+    .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first and last line", .group = .move },
+    .{ .chords = &.{c('G')}, .command = .bottom, .desc = "first and last line", .group = .move },
+    .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left and right a character", .group = .move },
+    .{ .chords = &.{c('l')}, .command = .char_right, .desc = "left and right a character", .group = .move },
+    .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next, previous, end of word", .group = .move },
+    .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "next, previous, end of word", .group = .move },
+    .{ .chords = &.{c('e')}, .command = .word_end, .desc = "next, previous, end of word", .group = .move },
+    .{ .chords = &.{c('W')}, .command = .big_word_next, .desc = "the same for WORDs - only blanks separate", .group = .move },
+    .{ .chords = &.{c('B')}, .command = .big_word_prev, .desc = "the same for WORDs - only blanks separate", .group = .move },
+    .{ .chords = &.{c('E')}, .command = .big_word_end, .desc = "the same for WORDs - only blanks separate", .group = .move },
+    .{ .chords = &.{c('0')}, .command = .line_start, .desc = "first, last, first non-blank column", .group = .move },
+    .{ .chords = &.{c('$')}, .command = .line_end, .desc = "first, last, first non-blank column", .group = .move },
+    .{ .chords = &.{c('^')}, .command = .first_non_blank, .desc = "first, last, first non-blank column", .group = .move },
+    .{ .chords = &.{c('f')}, .command = .find_char, .desc = "to or before <char>, forwards and back", .group = .move },
+    .{ .chords = &.{c('t')}, .command = .till_char, .desc = "to or before <char>, forwards and back", .group = .move },
+    .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "to or before <char>, forwards and back", .group = .move },
+    .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "to or before <char>, forwards and back", .group = .move },
+    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T, either way", .group = .move },
+    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat the last f/t/F/T, either way", .group = .move },
     .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)", .group = .jump },
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)", .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .group = .jump },
@@ -295,31 +293,29 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('n'), c('f') }, .command = .next_file, .group = .jump },
     .{ .chords = &.{ leader, c('p'), c('f') }, .command = .prev_file, .group = .jump },
     .{ .chords = &.{ c('z'), c('z') }, .command = .center, .desc = "centre cursor line", .group = .move },
-    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "send the reference to the agent", .group = .send },
-    .{ .chords = &.{c('y')}, .command = .copy_text, .desc = "yank the selected text", .group = .send },
-    .{ .chords = &.{c('Y')}, .command = .copy_text_lines, .desc = "yank whole lines", .group = .send },
+    .{ .chords = &.{c(event.code.enter)}, .command = .send_ref, .desc = "compose a message to the agent", .group = .send },
+    .{ .chords = &.{c('y')}, .command = .copy_text, .desc = "yank the selection, or whole lines", .group = .send },
+    .{ .chords = &.{c('Y')}, .command = .copy_text_lines, .desc = "yank the selection, or whole lines", .group = .send },
     .{ .chords = &.{ leader, c('y') }, .command = .copy_ref, .desc = "copy the reference", .group = .send },
     .{ .chords = &.{ leader, c('Y') }, .command = .copy_ref_lines, .desc = "copy the reference and the lines", .group = .send },
-    // Every ask lives behind the leader, and none of them on a bare letter.
-    // `a` is append, `x` is delete-a-character and `!` is the filter operator:
-    // three keys vim will want back the moment editing lands, and editing is
-    // designed for rather than designed out (ARCHITECTURE.md 11). Taking them
-    // now costs one keystroke; taking them later costs a user's muscle memory
-    // twice - once to learn the wrong thing and once to unlearn it.
-    .{ .chords = &.{ leader, c('a') }, .command = .ask_why, .desc = "ask: why this approach?", .group = .send },
-    .{ .chords = &.{ leader, c('r') }, .command = .ask_revert, .desc = "ask: revert this, keep the rest", .group = .send },
-    .{ .chords = &.{ leader, c('t') }, .command = .ask_test, .desc = "ask: add a test covering this", .group = .send },
-    .{ .chords = &.{ leader, c('x') }, .command = .ask_explain, .desc = "ask: explain what this does", .group = .send },
+    // `<Space>a` is the ask shortcut: the box *and* the question list, in one
+    // keystroke. It used to be four keys carrying four fixed questions; the
+    // questions moved into `[presets]`, where they are the user's own and
+    // there can be any number of them, so one key that opens the list beats
+    // four that each hard-code a row of it. Nothing is inserted until a
+    // question is chosen - summoning the box never types into it.
+    .{ .chords = &.{ leader, c('a') }, .command = .compose_ask, .desc = "compose, with the question list open", .group = .send },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
-    .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next match", .group = .find },
-    .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "previous match", .group = .find },
+    .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
+    .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "next and previous match", .group = .find },
     .{ .chords = &.{c(event.code.escape)}, .command = .clear_search, .modes = Modes.normal_only, .desc = "clear the search highlight (:noh)", .group = .find },
-    .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select", .group = .send },
-    .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual line select", .group = .send },
+    .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select, characters or lines", .group = .send },
+    .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual select, characters or lines", .group = .send },
     .{ .chords = &.{c(event.code.escape)}, .command = .visual_cancel, .modes = Modes.visual_only, .hint = "cancel", .desc = "leave visual select", .group = .send },
     .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR", .group = .view },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
+    .{ .chords = &.{ c('z'), c('i') }, .command = .toggle_ignored, .desc = "show the files [review] ignore hides", .group = .view },
     .{ .chords = &.{c(':')}, .command = .command_line, .hint = "quit", .hint_keys = ":q", .desc = "command line (:q)", .group = .view },
     // `<C-r>` and not `<C-l>`: vim-tmux-navigator binds C-h/C-j/C-k/C-l at the
     // tmux *root* table and forwards them only to processes matching its vim

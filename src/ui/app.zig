@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 
 const diff = @import("../core/diff.zig");
 const event = @import("../core/event.zig");
+const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
 
@@ -153,6 +154,19 @@ pub const App = struct {
     /// The `Ctrl-i` list, open over the box. An index into `presets()`, or
     /// null while the box has the keyboard.
     preset_index: ?usize = null,
+    /// What the file overlay is being used for. It is the same list, the same
+    /// filter and the same drawing either way; only what happens on Enter
+    /// differs, which is one field rather than a second overlay.
+    files_purpose: enum { jump, mention } = .jump,
+    /// The list the overlay is showing: the changed files for a jump, every
+    /// file git knows about for a mention. Rebuilt when the overlay opens and
+    /// owned here, because `selected` is asked outside any frame.
+    pick_list: std.ArrayList(render.FileEntry) = .empty,
+    /// Every path in the project, from `git ls-files`, loaded the first time
+    /// `@` asks and kept for the session. Not loaded at startup: most sessions
+    /// never mention a file, and cold start has a 50 ms budget.
+    project_paths: [][]const u8 = &.{},
+    project_loaded: bool = false,
     /// Questions the box can insert, from `[presets]`. Empty falls back to the
     /// four built-in asks, so the list is never empty.
     presets_cfg: []const config.Preset = &.{},
@@ -208,6 +222,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
+        self.pick_list.deinit(self.gpa);
+        if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
         self.frame_arena.deinit();
         self.* = undefined;
     }
@@ -337,6 +353,7 @@ pub const App = struct {
             .work_runs = self.review.runsFor(f.path(), f.new_blob, bufs.work),
             .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
             .torn = self.review.torn,
+            .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .mode = self.mode,
             .zen = self.zen,
             .wrap = self.wrap,
@@ -459,15 +476,26 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.openCompose(.send, .ref),
+            .compose_ask => {
+                try self.openCompose(.send, .ref);
+                self.preset_index = 0;
+            },
             .clear_search => self.finder.hide(),
+            .toggle_ignored => {
+                self.review.show_ignored = !self.review.show_ignored;
+                // A re-diff, not a filter: git is what applied the patterns,
+                // so git is what has to be asked again without them.
+                try self.rediff();
+                self.clampScroll(body);
+                if (self.review.show_ignored)
+                    self.notice.set("showing ignored files", .{})
+                else
+                    self.notice.set("hiding ignored files again", .{});
+            },
             .copy_text => try self.yank(.selection),
             .copy_text_lines => try self.yank(.lines),
             .copy_ref => try self.buildPayload(.copy, .ref),
             .copy_ref_lines => try self.buildPayload(.copy, .ref_lines),
-            .ask_why => try self.openCompose(.send, .{ .ask = self.templates.ask_why }),
-            .ask_revert => try self.openCompose(.send, .{ .ask = self.templates.ask_revert }),
-            .ask_test => try self.openCompose(.send, .{ .ask = self.templates.ask_test }),
-            .ask_explain => try self.openCompose(.send, .{ .ask = self.templates.ask_explain }),
             // Both relay out every row under the cursor, so it is placed
             // rather than walked: zen changes the body's height and wrap
             // changes what every line is worth in screen rows. Travelling
@@ -588,12 +616,68 @@ pub const App = struct {
     /// bottom-line prompt follows, and why `help` is a mode the keymap ignores.
     /// `F` opens the file list; `F`, `Esc` or backspacing out of an empty
     /// filter closes it. One command for both, the way `?` and `V` are one.
+    /// Shuts the overlay and hands the keyboard back to whoever had it: the
+    /// compose box when the list was opened from inside one, the diff
+    /// otherwise.
+    fn closeFiles(self: *App) void {
+        self.file_list.close();
+        self.mode = if (self.files_purpose == .mention and self.compose.open) .note_input else .normal;
+        self.files_purpose = .jump;
+    }
+
+    /// The rows the overlay will show, for whichever job it was opened to do.
+    ///
+    /// A jump lists the changed files, because jumping to an unchanged one
+    /// means nothing in a review. A mention lists every file git knows about -
+    /// changed ones first, in review order, then the rest - because mentioning
+    /// an unchanged file to an agent is the whole point of `@`, and the file
+    /// you are looking at is the one you are most likely to name.
+    fn buildPickList(self: *App) void {
+        self.pick_list.clearRetainingCapacity();
+        const changed = self.review.files();
+        for (changed) |f| {
+            self.pick_list.append(self.gpa, .{
+                .path = f.path(),
+                .added = f.added,
+                .removed = f.removed,
+                .status = f.status,
+            }) catch return;
+        }
+        if (self.files_purpose != .mention) return;
+
+        self.loadProject();
+        for (self.project_paths) |p| {
+            // The changed ones are already at the top; git lists them again.
+            var seen = false;
+            for (changed) |f| {
+                if (std.mem.eql(u8, f.path(), p)) {
+                    seen = true;
+                    break;
+                }
+            }
+            if (seen) continue;
+            // No counts: it is a path, not a change, and `+0 -0` beside it
+            // would dress up a file that did not change as one that did.
+            self.pick_list.append(self.gpa, .{ .path = p, .added = 0, .removed = 0, .in_review = false }) catch return;
+        }
+    }
+
+    /// Best effort, once. A repository that cannot be listed leaves the
+    /// mention list as the changed files, which is what it was before `@`
+    /// reached further and is still useful.
+    fn loadProject(self: *App) void {
+        if (self.project_loaded) return;
+        self.project_loaded = true;
+        self.project_paths = git.projectFiles(self.gpa, self.io) catch &.{};
+    }
+
     fn toggleFiles(self: *App) void {
         if (self.mode == .finder) {
-            self.file_list.close();
-            self.mode = .normal;
+            self.closeFiles();
         } else {
-            self.file_list.open(files_mod.rowOf(self.review.files(), self.file_index));
+            self.files_purpose = .jump;
+            self.buildPickList();
+            self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
             self.mode = .finder;
         }
     }
@@ -601,7 +685,7 @@ pub const App = struct {
     fn moveList(self: *App, delta: i32) void {
         switch (self.mode) {
             .help => self.help.move(self.km.bindings, delta),
-            .finder => self.file_list.move(self.review.files(), delta),
+            .finder => self.file_list.move(self.pick_list.items, delta),
             else => {},
         }
     }
@@ -609,7 +693,7 @@ pub const App = struct {
     fn pageList(self: *App, delta: i32) void {
         switch (self.mode) {
             .help => self.help.moveGroup(delta),
-            .finder => self.file_list.movePage(self.review.files(), delta),
+            .finder => self.file_list.movePage(self.pick_list.items, delta),
             else => {},
         }
     }
@@ -624,15 +708,23 @@ pub const App = struct {
         }
         switch (self.file_list.feed(key)) {
             .stay => {},
-            .close => self.toggleFiles(),
+            .close => self.closeFiles(),
             .open => {
-                if (self.file_list.selected(self.review.files())) |i| {
+                const picked = self.file_list.selected(self.pick_list.items);
+                if (self.files_purpose == .mention) {
+                    // The path lands at the caret, straight after the `@` that
+                    // opened the list, and nothing else is touched.
+                    if (picked) |i| self.compose.insert(self.pick_list.items[i].path);
+                    self.closeFiles();
+                    return;
+                }
+                if (picked) |i| {
                     if (i != self.file_index) {
                         self.file_index = i;
                         try self.rebuildRows(.reset);
                     }
                 }
-                self.toggleFiles();
+                self.closeFiles();
                 self.clampScroll(body);
             },
         }
@@ -1045,6 +1137,14 @@ pub const App = struct {
             .typing => {},
             .cancel => self.closeCompose(),
             .presets => self.preset_index = 0,
+            .files => {
+                // The compose box stays open underneath: the picker is a
+                // layer over it, not a place the reader has gone instead.
+                self.files_purpose = .mention;
+                self.buildPickList();
+                self.file_list.open(0);
+                self.mode = .finder;
+            },
             .submit => {
                 // Flattened here and nowhere else: hard rule 1 is about what
                 // `send-keys` does with a newline, and this is the last point
@@ -2864,7 +2964,7 @@ test "F opens the file list on the file the review is showing" {
     try fx.expectMode(.finder);
     // Opened on the current file, so the list says where the reader is before
     // it offers to move them.
-    try testing.expectEqual(@as(u32, 1), fx.app.file_list.selected(fx.app.files()).?);
+    try testing.expectEqual(@as(u32, 1), fx.app.file_list.selected(fx.app.pick_list.items).?);
 
     // The key that opened it does *not* close it: inside the overlay a
     // keystroke is filter text, letters included. Escape closes, the way it
@@ -2926,7 +3026,7 @@ test "the file list filters by path and opens what it is showing" {
 
     try fx.press("<Space>f");
     try fx.typeIn("b.z");
-    try testing.expectEqual(@as(usize, 1), files_mod.count(fx.app.files(), fx.app.file_list.filter.text()));
+    try testing.expectEqual(@as(usize, 1), files_mod.count(fx.app.pick_list.items, fx.app.file_list.filter.text()));
     try fx.press("<CR>");
     try fx.expectFile(1);
 
@@ -3165,6 +3265,53 @@ test "Enter composes a reference to the line under the cursor" {
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
 }
 
+test "@ picks a file out of the review and puts its path at the caret" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    try fx.press(" see");
+    try fx.press(" @");
+    // The `@` is typed, and the picker is over the box rather than instead of
+    // it - the box is still open underneath.
+    try testing.expectEqual(event.Mode.finder, fx.app.mode);
+    try testing.expect(fx.app.compose.open);
+    try testing.expectEqualStrings("#1 a.zig:1 see @", fx.app.compose.text());
+
+    // Enter takes the highlighted file; the keyboard goes back to the box.
+    try fx.press("<CR>");
+    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
+    try testing.expectEqualStrings("#1 a.zig:1 see @a.zig", fx.app.compose.text());
+
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1 see @a.zig", fx.app.payload());
+}
+
+test "cancelling the file picker leaves the @ that was typed" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    try fx.press("@");
+    try fx.press("<Esc>");
+    // Back in the box, not out of it, and the character stands: it was typed.
+    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
+    try testing.expectEqualStrings("#1 a.zig:1@", fx.app.compose.text());
+}
+
+test "the file overlay still jumps when it was not opened from the box" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Same list, same filter, same drawing - only Enter differs, and that is
+    // what `files_purpose` is for.
+    try fx.press("<Space>f");
+    try testing.expectEqual(event.Mode.finder, fx.app.mode);
+    try fx.press("<CR>");
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try testing.expect(!fx.app.compose.open);
+}
+
 test "the box opens on the reference and nothing else" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
@@ -3172,7 +3319,7 @@ test "the box opens on the reference and nothing else" {
     // No question is typed in for the reader. A canned sentence that arrives
     // uninvited is one they have to read and mostly delete; the presets have
     // their own key for when they are actually wanted.
-    try fx.press("<Space>a");
+    try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
 
     try fx.press(" it");
@@ -3341,12 +3488,10 @@ test "every opener seeds the same thing: the reference" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    // All four asks are behind the leader, so `a`, `x` and `!` stay free for
-    // the vim meanings editing will want - and none of them types a question
-    // in for the reader any more. They differ from Enter only in which key
-    // you pressed. Recorded rather than left as a surprise: if they stay, it
-    // is because a shortcut into the box is worth four bindings.
-    for ([_][]const u8{ "<CR>", "<Space>a", "<Space>r", "<Space>t", "<Space>x" }) |keys| {
+    // One opener, because there is only one thing to open. The four ask keys
+    // that used to sit beside it are gone: once the box stopped typing a
+    // question in for you, they did exactly what Enter does.
+    for ([_][]const u8{"<CR>"}) |keys| {
         try fx.press(keys);
         try testing.expectEqual(event.Mode.note_input, fx.app.mode);
         try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
@@ -3364,7 +3509,7 @@ test "nothing sent to the agent ever contains a newline" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    for ([_][]const u8{ "<CR>", "<Space>y", "<Space>a", "<Space>r", "<Space>t", "<Space>x" }) |keys| {
+    for ([_][]const u8{ "<CR>", "<Space>y" }) |keys| {
         try fx.press("Vj");
         try fx.press(keys);
         // Everything but the yank now goes through the compose box, and the
