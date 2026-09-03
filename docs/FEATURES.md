@@ -298,6 +298,7 @@ All four hold. A bad line costs that one key its value and nothing else - the li
 |---|---|---|
 | `?` help popup | **v0.1** | Ship with the first keybinding, not after |
 | Themes (bundled) | v0.1 | Reuse `look`'s |
+| Compose box | v0.1 | Every send opens it (`ui/compose.zig`), holding the reference and nothing else: a canned question typed in for you is a sentence you have to read and mostly delete. `Ctrl-i` inserts a `[presets]` entry at the caret and deletes nothing. Reused by v0.2 notes - same box, different destination |
 | Ask presets | v0.1 | Shipped: `<Space>a` `<Space>r` `<Space>t` `<Space>x`, four templates and no dispatch of their own. All behind the leader: `a`, `x` and `!` are vim keys editing will want back, and it is designed for rather than out (ARCHITECTURE.md 11) |
 | Keymap remapping | v0.2 | Needs the command-name indirection from day one |
 | Template strings | v0.2 | The table itself shipped in v0.1 (`bridge/template.zig`); `[templates]` overrides it in v0.2 |

@@ -87,6 +87,17 @@ pub const Config = struct {
     /// defaults until something overrides them, so the ordinary run - no
     /// config file, or one that does not touch keys - allocates nothing.
     keys: []const keymap.Binding = keymap.default_bindings,
+    /// Questions the compose box can drop in at the caret, in file order.
+    /// Empty until a `[presets]` table names some, and the four built-in asks
+    /// stand in for it - so the list is never empty and never a surprise.
+    presets: []const Preset = &.{},
+};
+
+/// One insertable question. The name is what the picker lists; the text is
+/// what lands in the message.
+pub const Preset = struct {
+    name: []const u8,
+    text: []const u8,
 };
 
 /// One thing wrong with one line, in the words the user needs to fix it: which
@@ -97,7 +108,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, keys, theme };
+const Section = enum { nav, ui, keys, theme, presets };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -107,6 +118,8 @@ pub const Loader = struct {
     arena: std.heap.ArenaAllocator,
     cfg: Config = .{},
     problems: std.ArrayList(Problem) = .empty,
+    /// Grown as `[presets]` is parsed; `cfg.presets` points at its items.
+    preset_list: std.ArrayList(Preset) = .empty,
 
     pub fn init(gpa: Allocator) Loader {
         return .{ .gpa = gpa, .arena = .init(gpa) };
@@ -115,6 +128,7 @@ pub const Loader = struct {
     /// Frees everything the config points at, so it must outlive the app that
     /// is using it - `cfg.keys` and every problem string live in the arena.
     pub fn deinit(self: *Loader) void {
+        self.preset_list.deinit(self.gpa);
         self.problems.deinit(self.gpa);
         self.arena.deinit();
         self.* = undefined;
@@ -233,8 +247,37 @@ pub const Loader = struct {
             // `[keys]` keys are command names, so there is no fixed list to
             // check against - the `Command` enum is the list.
             .keys => self.applyKeys(src, line, key, value),
+            // Every key is a preset name, so there is no fixed list to check
+            // against - what the user writes is what the picker offers.
+            .presets => self.applyPreset(src, line, key, value),
             .theme => self.applyTheme(src, line, key, value),
         }
+    }
+
+    /// `name = "the question"`, appended in file order so the picker lists
+    /// them the way they were written rather than in some internal order.
+    ///
+    /// A later file overrides a name it repeats rather than listing it twice:
+    /// a repo config refining one of the global questions should leave one
+    /// entry, and `[presets]` is merged per key like everything else.
+    fn applyPreset(self: *Loader, src: []const u8, line: u32, key: []const u8, value: toml.Value) void {
+        const arena = self.arena.allocator();
+        const text = self.wantString(src, line, key, value) orelse return;
+        if (text.len == 0) {
+            self.note(src, line, "presets.{s} is empty", .{key});
+            return;
+        }
+
+        const name = arena.dupe(u8, key) catch return;
+        const body = arena.dupe(u8, text) catch return;
+        for (self.preset_list.items) |*p| {
+            if (std.mem.eql(u8, p.name, name)) {
+                p.text = body;
+                return;
+            }
+        }
+        self.preset_list.append(self.gpa, .{ .name = name, .text = body }) catch return;
+        self.cfg.presets = self.preset_list.items;
     }
 
     /// `command = "<seq>"` or `command = ["<seq>", "<seq>"]`, replacing every

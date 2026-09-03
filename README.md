@@ -117,8 +117,12 @@ On NixOS, the subprocess tests need an FHS `/bin` to spawn `git` and friends: ru
 
 ## Sending
 
-With the cursor on a line, `Enter` puts `#3 src/auth.zig:47` into the agent's
-pane. `V` selects a range first and sends `:47-52`; `v` selects within the line
+With the cursor on a line, `Enter` opens a compose box holding
+`#3 src/auth.zig:47` and nothing else; type what you want to say and Enter
+again sends it. `Ctrl-i` lists your presets and drops one in **at the caret**, deleting
+nothing. `Ctrl-j` types a line break, which is joined back into one line on the
+way out - the box says so while one is present, because a newline through
+`tmux send-keys` *is* Enter and would submit the agent's half-written message. `V` selects a range first and sends `:47-52`; `v` selects within the line
 and sends the words themselves.
 
 `y` is the vim key doing the vim thing: it yanks the selected text, and `Y`

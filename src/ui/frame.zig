@@ -162,6 +162,8 @@ pub const View = struct {
     /// The `F` popup, the same way. Only one overlay is ever open, because
     /// each is its own mode.
     files: ?FilesView = null,
+    /// The compose box, floating over the body while a message is written.
+    compose: ?ComposeView = null,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -307,6 +309,32 @@ pub const FilesView = struct {
     /// The popup's own keys, along its bottom border.
     keys: []const keytext.HelpEntry = &.{},
     layout: ?*HelpLayout = null,
+};
+
+/// The compose box: the message being written, and the preset list when it is
+/// open over it. Its own view for the same reason `HelpView` is - it floats
+/// over the body and the body has no say in it.
+pub const ComposeView = struct {
+    /// The whole message, wrapped by the box rather than by the caller.
+    text: []const u8,
+    /// Byte offset of the caret within `text`, for placing the terminal
+    /// cursor on the character it sits before.
+    cursor: usize = 0,
+    /// True while the text contains a newline, so the footer can say that the
+    /// payload will be joined into one line before it is sent. Said before it
+    /// happens rather than discovered afterwards in the agent's input box.
+    joins: bool = false,
+    /// `Ctrl-i`: names and their questions, and which one is selected. Null
+    /// when the box has the keyboard.
+    presets: []const PresetEntry = &.{},
+    selected: ?usize = null,
+    /// Whether Enter sends to the agent or copies. Only the footer cares.
+    to_agent: bool = true,
+};
+
+pub const PresetEntry = struct {
+    name: []const u8,
+    text: []const u8,
 };
 
 /// The grid the popup last drew: how many columns, and how tall each is.

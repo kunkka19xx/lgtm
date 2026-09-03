@@ -48,6 +48,17 @@ pub const Glyphs = struct {
     box_bl: []const u8,
     box_br: []const u8,
 
+    /// A heavier border, for the one overlay that takes the keyboard rather
+    /// than merely showing something. The compose box is where the reader is
+    /// *writing*, and a box that looks the same as the help popup does not
+    /// say so.
+    heavy_h: []const u8,
+    heavy_v: []const u8,
+    heavy_tl: []const u8,
+    heavy_tr: []const u8,
+    heavy_bl: []const u8,
+    heavy_br: []const u8,
+
     /// Stands in for the part of a path there was no room to draw.
     ellipsis: []const u8,
 
@@ -77,6 +88,16 @@ pub const Glyphs = struct {
         .box_tr = "\u{256e}",
         .box_bl = "\u{2570}",
         .box_br = "\u{256f}",
+        // U+250F..U+251B, the heavy box-drawing corners. No rounded heavy
+        // exists in Unicode, so the compose box has square corners and the
+        // informational overlays keep their soft ones - which reads as the
+        // difference it is.
+        .heavy_h = "\u{2501}",
+        .heavy_v = "\u{2503}",
+        .heavy_tl = "\u{250f}",
+        .heavy_tr = "\u{2513}",
+        .heavy_bl = "\u{2517}",
+        .heavy_br = "\u{251b}",
         .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
@@ -116,6 +137,14 @@ pub const Glyphs = struct {
         .box_tr = "+",
         .box_bl = "+",
         .box_br = "+",
+        // No heavy glyphs without box drawing, so the weight is carried by a
+        // different character instead of a thicker one.
+        .heavy_h = "=",
+        .heavy_v = "|",
+        .heavy_tl = "+",
+        .heavy_tr = "+",
+        .heavy_bl = "+",
+        .heavy_br = "+",
         .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.

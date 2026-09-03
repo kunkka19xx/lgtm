@@ -32,6 +32,7 @@ const keymap = @import("keymap.zig");
 const keytext = @import("keytext.zig");
 const anim = @import("anim.zig");
 const motion = @import("motion.zig");
+const compose_mod = @import("compose.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
 const review_mod = @import("review.zig");
@@ -143,6 +144,18 @@ pub const App = struct {
     /// Config-owned behaviour; see `Nav`.
     nav: Nav = .{},
     prompt: prompt_mod.Prompt = .{},
+    /// The message being written, when one is. Seeded from the reference and
+    /// whichever question opened it (`ui/compose.zig`).
+    compose: compose_mod.Compose = .{},
+    /// Where the composed message is going once Enter is pressed. Fixed when
+    /// the box opens, because the key that opened it is what decided.
+    compose_to: Delivery = .send,
+    /// The `Ctrl-i` list, open over the box. An index into `presets()`, or
+    /// null while the box has the keyboard.
+    preset_index: ?usize = null,
+    /// Questions the box can insert, from `[presets]`. Empty falls back to the
+    /// four built-in asks, so the list is never empty.
+    presets_cfg: []const config.Preset = &.{},
     finder: search.State = .{},
     notice: Notice = .{},
     /// The viewport catching up with where it has settled, in screen rows.
@@ -334,7 +347,24 @@ pub const App = struct {
             } else null,
             .notice = self.notice.text(),
             .query = self.liveQuery(),
+            .compose = if (self.compose.open) .{
+                .text = self.compose.text(),
+                .cursor = self.compose.cursor,
+                .joins = compose_mod.hasBreak(self.compose.text()),
+                .presets = if (self.preset_index != null) self.presetEntries() else &.{},
+                .selected = self.preset_index,
+                .to_agent = self.compose_to == .send,
+            } else null,
         };
+    }
+
+    /// The presets as the popup lists them. Built into the frame arena, so
+    /// the view holds no pointer that outlives the frame that drew it.
+    fn presetEntries(self: *App) []const render.PresetEntry {
+        const list = self.presets();
+        const out = self.frame_arena.allocator().alloc(render.PresetEntry, list.len) catch return &.{};
+        for (list, 0..) |p, i| out[i] = .{ .name = p.name, .text = p.text };
+        return out;
     }
 
     /// The pattern the renderer highlights this frame.
@@ -428,16 +458,16 @@ pub const App = struct {
             // The run loop owns the terminal and is the only thing that can
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
-            .send_ref => try self.compose(.send, .ref),
+            .send_ref => try self.openCompose(.send, .ref),
             .clear_search => self.finder.hide(),
             .copy_text => try self.yank(.selection),
             .copy_text_lines => try self.yank(.lines),
-            .copy_ref => try self.compose(.copy, .ref),
-            .copy_ref_lines => try self.compose(.copy, .ref_lines),
-            .ask_why => try self.compose(.send, .{ .ask = self.templates.ask_why }),
-            .ask_revert => try self.compose(.send, .{ .ask = self.templates.ask_revert }),
-            .ask_test => try self.compose(.send, .{ .ask = self.templates.ask_test }),
-            .ask_explain => try self.compose(.send, .{ .ask = self.templates.ask_explain }),
+            .copy_ref => try self.buildPayload(.copy, .ref),
+            .copy_ref_lines => try self.buildPayload(.copy, .ref_lines),
+            .ask_why => try self.openCompose(.send, .{ .ask = self.templates.ask_why }),
+            .ask_revert => try self.openCompose(.send, .{ .ask = self.templates.ask_revert }),
+            .ask_test => try self.openCompose(.send, .{ .ask = self.templates.ask_test }),
+            .ask_explain => try self.openCompose(.send, .{ .ask = self.templates.ask_explain }),
             // Both relay out every row under the cursor, so it is placed
             // rather than walked: zen changes the body's height and wrap
             // changes what every line is worth in screen rows. Travelling
@@ -963,7 +993,112 @@ pub const App = struct {
         if (self.mode == .visual) self.leaveVisual();
     }
 
-    fn compose(self: *App, how: Delivery, what: What) Allocator.Error!void {
+    /// The four built-ins, for a config with no `[presets]` of its own. The
+    /// same questions the ask keys send, because someone who liked them
+    /// enough to bind a key to them will want them in the box too.
+    fn presets(self: *App) []const config.Preset {
+        if (self.presets_cfg.len > 0) return self.presets_cfg;
+        return &.{
+            .{ .name = "why", .text = "why this approach?" },
+            .{ .name = "revert", .text = "revert this, keep the rest" },
+            .{ .name = "test", .text = "add a test covering this" },
+            .{ .name = "explain", .text = "explain what this does" },
+        };
+    }
+
+    /// Opens the compose box on what `compose` would have sent outright.
+    ///
+    /// Every send goes through here now. A fixed string was the wrong shape
+    /// for the thing being said: "why this approach?" is the first half of a
+    /// sentence, and the second half - the part that says *what* looked wrong
+    /// - had nowhere to go. The reference and the question are the seed, the
+    /// caret is past them, and Enter is still what sends.
+    fn openCompose(self: *App, how: Delivery, what: What) Allocator.Error!void {
+        // The seed is the reference and nothing else, whichever key opened the
+        // box. A canned question typed in for you is a sentence you now have
+        // to read and mostly delete - and the presets have their own key
+        // (`Ctrl-i`), which puts them in when they are wanted rather than
+        // before anyone has decided.
+        _ = what;
+        try self.buildPayload(how, .ref);
+        // `compose` sets `want_send`; the box is what decides now, so take it
+        // back and hold the delivery until Enter.
+        self.want_send = null;
+        self.compose_to = how;
+        self.compose.start(self.outgoing.items);
+        self.preset_index = null;
+        self.mode = .note_input;
+    }
+
+    fn closeCompose(self: *App) void {
+        self.compose.close();
+        self.preset_index = null;
+        self.mode = .normal;
+    }
+
+    /// One keystroke inside the box, or inside the preset list floating over
+    /// it. Text, not actions, so it never reaches the keymap.
+    fn feedCompose(self: *App, key: event.Key, body: u16) !void {
+        if (self.preset_index) |idx| return self.feedPresets(key, idx);
+
+        switch (self.compose.feed(key)) {
+            .typing => {},
+            .cancel => self.closeCompose(),
+            .presets => self.preset_index = 0,
+            .submit => {
+                // Flattened here and nowhere else: hard rule 1 is about what
+                // `send-keys` does with a newline, and this is the last point
+                // where one can still exist.
+                var flat: [compose_mod.max_bytes]u8 = undefined;
+                const line = compose_mod.flatten(&flat, self.compose.text());
+                const how = self.compose_to;
+                self.closeCompose();
+                if (line.len == 0) {
+                    self.notice.set("nothing to send", .{});
+                    return;
+                }
+                self.outgoing.clearRetainingCapacity();
+                try self.outgoing.appendSlice(self.gpa, line);
+                self.want_send = how;
+                self.clampScroll(body);
+            },
+        }
+    }
+
+    /// The `Ctrl-i` list. Escape closes it and gives the box back; Enter drops
+    /// the question in at the caret and deletes nothing.
+    fn feedPresets(self: *App, key: event.Key, idx: usize) void {
+        const list = self.presets();
+        const n = list.len;
+        switch (key.codepoint) {
+            event.code.escape => self.preset_index = null,
+            event.code.enter => {
+                if (idx < n) {
+                    // A space in front unless the caret is already after one,
+                    // so a preset dropped mid-sentence does not weld itself to
+                    // the previous word.
+                    const before = self.compose.text();
+                    const at = self.compose.cursor;
+                    if (at > 0 and before[at - 1] != ' ') self.compose.insert(" ");
+                    self.compose.insert(list[idx].text);
+                }
+                self.preset_index = null;
+            },
+            event.code.up => self.preset_index = if (idx == 0) n -| 1 else idx - 1,
+            event.code.down => self.preset_index = if (idx + 1 >= n) 0 else idx + 1,
+            'k' => self.preset_index = if (idx == 0) n -| 1 else idx - 1,
+            'j' => self.preset_index = if (idx + 1 >= n) 0 else idx + 1,
+            else => {
+                if (key.mods.ctrl and (key.codepoint == 'p')) {
+                    self.preset_index = if (idx == 0) n -| 1 else idx - 1;
+                } else if (key.mods.ctrl and (key.codepoint == 'n')) {
+                    self.preset_index = if (idx + 1 >= n) 0 else idx + 1;
+                }
+            },
+        }
+    }
+
+    fn buildPayload(self: *App, how: Delivery, what: What) Allocator.Error!void {
         const r = self.refAt() orelse {
             self.notice.set("nothing here to point at", .{});
             return;
@@ -1455,6 +1590,7 @@ pub const App = struct {
                 if (self.mode == .command) return self.feedPrompt(k, body);
                 if (self.mode == .help) return self.feedHelp(k, body);
                 if (self.mode == .finder) return self.feedFiles(k, body);
+                if (self.mode == .note_input) return self.feedCompose(k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
@@ -2072,6 +2208,7 @@ test "a charwise selection points the agent at the words, not at a column" {
     try fx.press("v");
     try fx.press("e");
     try fx.press("<CR>");
+    try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1 `alpha`", fx.app.payload());
 
     // Grown past one line, the text would have to carry the newline between
@@ -2079,6 +2216,7 @@ test "a charwise selection points the agent at the words, not at a column" {
     try fx.press("w");
     try fx.press("v");
     try fx.press("j");
+    try fx.press("<CR>");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
 }
@@ -3013,10 +3151,46 @@ test "Enter composes a reference to the line under the cursor" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
+    // Enter opens the box seeded with the reference; nothing is sent yet.
     try fx.press("<CR>");
-    // A request, not an action: the loop owns the terminal and the subprocess.
+    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
+    try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
+    try testing.expect(fx.app.want_send == null);
+
+    // The second Enter is the send. A request, not an action: the loop owns
+    // the terminal and the subprocess.
+    try fx.press("<CR>");
     try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
     try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+}
+
+test "the box opens on the reference and nothing else" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // No question is typed in for the reader. A canned sentence that arrives
+    // uninvited is one they have to read and mostly delete; the presets have
+    // their own key for when they are actually wanted.
+    try fx.press("<Space>a");
+    try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
+
+    try fx.press(" it");
+    try fx.press("s wr");
+    try fx.press("ong");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("#1 a.zig:1 its wrong", fx.app.payload());
+}
+
+test "escape abandons the message and sends nothing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("<CR>");
+    try fx.press("<Esc>");
+    try testing.expectEqual(event.Mode.normal, fx.app.mode);
+    try testing.expect(fx.app.want_send == null);
+    try testing.expect(!fx.app.compose.open);
 }
 
 test "a selection sends a range, and using it ends the selection" {
@@ -3025,6 +3199,7 @@ test "a selection sends a range, and using it ends the selection" {
 
     try fx.press("Vj");
     try testing.expectEqual(@as(u32, 2), fx.app.selection().?.count());
+    try fx.press("<CR>");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
 
@@ -3162,24 +3337,23 @@ test "a selection spanning a deletion keeps the lines that still exist" {
     try testing.expectEqualStrings("#1 a.zig:1-3", fx.app.payload());
 }
 
-test "the ask presets are the reference plus a question" {
+test "every opener seeds the same thing: the reference" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    // All four behind the leader, so `a`, `x` and `!` stay free for the vim
-    // meanings editing will want.
-    try fx.press("<Space>a");
-    try testing.expectEqualStrings("#1 a.zig:1 - why this approach?", fx.app.payload());
-    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
-
-    try fx.press("<Space>t");
-    try testing.expectEqualStrings("#1 a.zig:1 - add a test covering this", fx.app.payload());
-
-    try fx.press("<Space>x");
-    try testing.expectEqualStrings("#1 a.zig:1 - explain what this does", fx.app.payload());
-
-    try fx.press("<Space>r");
-    try testing.expectEqualStrings("#1 a.zig:1 - revert this, keep the rest", fx.app.payload());
+    // All four asks are behind the leader, so `a`, `x` and `!` stay free for
+    // the vim meanings editing will want - and none of them types a question
+    // in for the reader any more. They differ from Enter only in which key
+    // you pressed. Recorded rather than left as a surprise: if they stay, it
+    // is because a shortcut into the box is worth four bindings.
+    for ([_][]const u8{ "<CR>", "<Space>a", "<Space>r", "<Space>t", "<Space>x" }) |keys| {
+        try fx.press(keys);
+        try testing.expectEqual(event.Mode.note_input, fx.app.mode);
+        try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
+        try fx.press("<CR>");
+        try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
+        try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
+    }
 }
 
 test "nothing sent to the agent ever contains a newline" {
@@ -3193,6 +3367,9 @@ test "nothing sent to the agent ever contains a newline" {
     for ([_][]const u8{ "<CR>", "<Space>y", "<Space>a", "<Space>r", "<Space>t", "<Space>x" }) |keys| {
         try fx.press("Vj");
         try fx.press(keys);
+        // Everything but the yank now goes through the compose box, and the
+        // flattening on submit is the last place a newline could survive.
+        if (fx.app.mode == .note_input) try fx.press("<CR>");
         try testing.expect(std.mem.indexOfScalar(u8, fx.app.payload(), '\n') == null);
     }
 }
@@ -3213,7 +3390,9 @@ test "composing again replaces the payload rather than appending to it" {
     defer fx.deinit();
 
     try fx.press("<CR>");
+    try fx.press("<CR>");
     try fx.press("j");
+    try fx.press("<CR>");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:2", fx.app.payload());
 }

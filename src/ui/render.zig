@@ -28,6 +28,8 @@ pub const Range = frame_mod.Range;
 pub const Selection = frame_mod.Selection;
 pub const PromptView = frame_mod.PromptView;
 pub const HelpView = frame_mod.HelpView;
+pub const ComposeView = frame_mod.ComposeView;
+pub const PresetEntry = frame_mod.PresetEntry;
 pub const HelpLayout = frame_mod.HelpLayout;
 pub const Theme = frame_mod.Theme;
 pub const Glyphs = frame_mod.Glyphs;
@@ -35,6 +37,7 @@ pub const chrome_rows = frame_mod.chrome_rows;
 pub const bodyHeight = frame_mod.bodyHeight;
 pub const drawHelpPopup = popup.draw;
 pub const drawFileList = popup.drawFiles;
+pub const drawCompose = popup.drawCompose;
 
 pub fn draw(f: Frame, v: View) Allocator.Error!void {
     f.win.clear();
@@ -48,6 +51,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         try body_mod.draw(f, v, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
         if (v.files) |fv| try popup.drawFiles(f, fv, 0, h);
+        if (v.compose) |cv| try popup.drawCompose(f, cv, 0, h);
         hideCursorUnder(f, v);
         return;
     }
@@ -63,6 +67,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     // can be open, because each is its own mode.
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
     if (v.files) |fv| try popup.drawFiles(f, fv, 2, bodyHeight(h, false));
+    if (v.compose) |cv| try popup.drawCompose(f, cv, 2, bodyHeight(h, false));
     hideCursorUnder(f, v);
 }
 
@@ -70,6 +75,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
 /// drawn over that character, so the cursor has to go with it - a block
 /// blinking on top of the popup points at nothing.
 fn hideCursorUnder(f: Frame, v: View) void {
+    // The compose box is the exception: it parks the cursor on its own caret.
     if (v.help != null or v.files != null) f.win.hideCursor();
 }
 
@@ -308,6 +314,7 @@ const testing = std.testing;
 // something references it, so a split that forgets this line is a split that
 // silently stops running two hundred lines of tests. See `app.zig`.
 test {
+    _ = @import("compose.zig");
     _ = body_mod;
     _ = frame_mod;
     _ = popup;

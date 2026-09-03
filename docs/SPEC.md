@@ -155,12 +155,13 @@ Hunk and file stepping both wrap. `]h` walks every hunk in the review, crossing 
 
 With the cursor on a diff line:
 
-- `Enter` → send `#3 src/auth.rs:47`
+- `Enter` → open the compose box on `#3 src/auth.rs:47`; Enter again sends it
+- in the box: `Ctrl-i` insert a preset at the caret, `Ctrl-j` line break, `Ctrl-a/e/u/w` readline editing, `<Esc>` abandon
 - `V` to select a range → `Enter` → send `#3 src/auth.rs:47-52`
 - `v` to select within one line → `Enter` → send ``#3 src/auth.rs:47 `verify_token` ``
 - `y` → yank the selected text (the characters under `v`, the lines under `V`, the cursor line with no selection)
 - `Y` → yank whole lines, whatever `v` selected - vim's linewise yank
-- `<Space>a` `<Space>r` `<Space>t` `<Space>x` → send the reference with a question attached
+- `<Space>a` `<Space>r` `<Space>t` `<Space>x` → open the box on the reference, same as `Enter`. The questions live in `Ctrl-i` now, so these four are shortcuts into the box rather than four different messages
 - `<Space>y` → copy the reference to the clipboard
 - `<Space>Y` → copy the reference **and** the line contents
 

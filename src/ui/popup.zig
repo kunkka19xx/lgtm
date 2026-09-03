@@ -14,6 +14,8 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const vaxis = @import("vaxis");
+
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
 const HelpView = frame_mod.HelpView;
@@ -22,6 +24,7 @@ const keytext = @import("keytext.zig");
 const keymap = @import("keymap.zig");
 const path_mod = @import("path.zig");
 const prompt_mod = @import("prompt.zig");
+const wrap_mod = @import("wrap.zig");
 
 /// A byte range inside a border label.
 const Span = struct { start: usize, len: usize };
@@ -46,15 +49,19 @@ const Footer = struct {
 /// description here is - and erring short only ever drops a group early. `tail` is for the keys that are not bindings:
 /// `<CR>` and `<Esc>` are `prompt.zig`'s submit and cancel, the same two every
 /// prompt has, so they are passed in rather than generated.
+/// `lead` is what the label opens with before any key: the filterable
+/// overlays say so there, and the compose box - which is a text box, not a
+/// list - says nothing.
 fn footerOf(
     arena: Allocator,
+    lead: []const u8,
     keys: []const keytext.HelpEntry,
     tail: []const keytext.HelpEntry,
     max: u16,
 ) Allocator.Error!Footer {
     var out: std.ArrayList(u8) = .empty;
     var spans: std.ArrayList(Span) = .empty;
-    try out.appendSlice(arena, " type to filter  ");
+    try out.appendSlice(arena, lead);
 
     var all: std.ArrayList(keytext.HelpEntry) = .empty;
     try all.appendSlice(arena, keys);
@@ -121,19 +128,22 @@ fn tabsOf(arena: Allocator, active: ?keymap.Group) Allocator.Error!Footer {
 /// What closing an overlay is bound to, in both of them.
 const close_key: keytext.HelpEntry = .{ .keys = "<Esc>", .desc = "close" };
 
+/// What a filterable overlay opens its label with.
+const filter_lead = " type to filter  ";
+
 /// The prefix drawn before the filter text, from the prompt that collects it.
 const prompt_filter_prefix = prompt_mod.Kind.help_filter.prefix();
 
 /// One horizontal border of the box, with a label let into it.
-fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []const u8, inner: u16) Allocator.Error![]const u8 {
+fn borderLine(f: Frame, b: Border, corner_l: []const u8, corner_r: []const u8, label: []const u8, inner: u16) Allocator.Error![]const u8 {
     var out: std.ArrayList(u8) = .empty;
     try out.appendSlice(f.arena, corner_l);
     const lw = f.win.gwidth(label);
     const lead: u16 = if (lw == 0) 0 else 1;
-    if (lead > 0) try out.appendSlice(f.arena, try f.rule(f.glyphs.box_h, lead));
+    if (lead > 0) try out.appendSlice(f.arena, try f.rule(b.h, lead));
     if (lw <= inner) try out.appendSlice(f.arena, label);
     const used = if (lw <= inner) lead + lw else 0;
-    try out.appendSlice(f.arena, try f.rule(f.glyphs.box_h, inner -| used));
+    try out.appendSlice(f.arena, try f.rule(b.h, inner -| used));
     try out.appendSlice(f.arena, corner_r);
     return out.toOwnedSlice(f.arena);
 }
@@ -142,16 +152,49 @@ fn borderLine(f: Frame, corner_l: []const u8, corner_r: []const u8, label: []con
 /// returns a run of spaces as wide as the box - which the list then uses to
 /// paint a selected row. Shared by both overlays, because a box is a box: only
 /// what goes inside it differs.
+/// Which set of corners an overlay draws with. The informational ones are
+/// light and rounded; the compose box is heavy, because it is the only overlay
+/// that takes the keyboard and should not look like the others.
+const Border = struct {
+    h: []const u8,
+    v: []const u8,
+    tl: []const u8,
+    tr: []const u8,
+    bl: []const u8,
+    br: []const u8,
+
+    fn light(g: frame_mod.Glyphs) Border {
+        return .{ .h = g.box_h, .v = g.box_v, .tl = g.box_tl, .tr = g.box_tr, .bl = g.box_bl, .br = g.box_br };
+    }
+
+    fn heavy(g: frame_mod.Glyphs) Border {
+        return .{ .h = g.heavy_h, .v = g.heavy_v, .tl = g.heavy_tl, .tr = g.heavy_tr, .bl = g.heavy_bl, .br = g.heavy_br };
+    }
+};
+
 fn chromeOf(f: Frame, box: Box, title: Footer, foot: Footer, title_width: u16, footer_width: u16) Allocator.Error![]u8 {
+    return chromeWith(f, box, title, foot, title_width, footer_width, Border.light(f.glyphs), f.theme.popup_border);
+}
+
+fn chromeWith(
+    f: Frame,
+    box: Box,
+    title: Footer,
+    foot: Footer,
+    title_width: u16,
+    footer_width: u16,
+    b: Border,
+    border_style: vaxis.Style,
+) Allocator.Error![]u8 {
     const blank = try f.arena.alloc(u8, box.width);
     @memset(blank, ' ');
     var r: u16 = 0;
     while (r < box.height) : (r += 1) f.put(box.top + r, box.col, blank, f.theme.text);
 
-    const border = f.theme.popup_border;
+    const border = border_style;
     const inner = box.content + 2;
-    f.put(box.top, box.col, try borderLine(f, f.glyphs.box_tl, f.glyphs.box_tr, title.text, inner), border);
-    f.put(box.top + box.height - 1, box.col, try borderLine(f, f.glyphs.box_bl, f.glyphs.box_br, foot.text, inner), border);
+    f.put(box.top, box.col, try borderLine(f, b, b.tl, b.tr, title.text, inner), border);
+    f.put(box.top + box.height - 1, box.col, try borderLine(f, b, b.bl, b.br, foot.text, inner), border);
     // `borderLine` lays the label after a corner and one rule glyph, so the
     // label starts two columns in. Key names are ASCII, so a byte offset into
     // the label is also a column offset.
@@ -167,8 +210,8 @@ fn chromeOf(f: Frame, box: Box, title: Footer, foot: Footer, title_width: u16, f
     }
     var body_row: u16 = 1;
     while (body_row < box.height - 1) : (body_row += 1) {
-        f.put(box.top + body_row, box.col, f.glyphs.box_v, border);
-        f.put(box.top + body_row, box.col + box.width - 1, f.glyphs.box_v, border);
+        f.put(box.top + body_row, box.col, b.v, border);
+        f.put(box.top + body_row, box.col + box.width - 1, b.v, border);
     }
     return blank;
 }
@@ -291,7 +334,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
     // The popup's own keys, along the bottom with the filter hint. `<Esc>` is
     // `prompt.zig`'s hardcoded cancel rather than a binding, which is why that
     // one is written out and the rest are generated.
-    const foot = try footerOf(f.arena, v.keys, &.{close_key}, f.width() -| 2);
+    const foot = try footerOf(f.arena, filter_lead, v.keys, &.{close_key}, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -352,7 +395,7 @@ test "the popup footer marks exactly its key names, and no other text" {
         .{ .keys = "J", .desc = "move" },
         .{ .keys = "<Right>", .desc = "column" },
     };
-    const foot = try footerOf(arena, nav, &.{close_key}, 200);
+    const foot = try footerOf(arena, filter_lead, nav, &.{close_key}, 200);
 
     // Same description, so `H` and `J` collapse under one label.
     try testing.expectEqualStrings(" type to filter  H J move  <Right> column  <Esc> close ", foot.text);
@@ -374,13 +417,13 @@ test "a footer too wide for the box sheds whole groups, and never all of them" {
         .{ .keys = "H", .desc = "tab" },
     };
     // Wide: everything is there.
-    const full = try footerOf(arena, nav, &.{close_key}, 200);
+    const full = try footerOf(arena, filter_lead, nav, &.{close_key}, 200);
     try std.testing.expect(std.mem.indexOf(u8, full.text, "close") != null);
 
     // Narrow: the last group goes rather than the whole row. A footer that
     // vanishes for being one column too wide is the bug this replaced - it is
     // the only thing on screen saying what the keys are.
-    const cut = try footerOf(arena, nav, &.{close_key}, 30);
+    const cut = try footerOf(arena, filter_lead, nav, &.{close_key}, 30);
     try std.testing.expect(cut.text.len <= 30);
     try std.testing.expect(std.mem.indexOf(u8, cut.text, "move") != null);
     try std.testing.expect(std.mem.indexOf(u8, cut.text, "close") == null);
@@ -390,7 +433,7 @@ test "a footer too wide for the box sheds whole groups, and never all of them" {
     for (cut.keys) |sp| try std.testing.expect(sp.start + sp.len <= cut.text.len);
 
     // Even a budget of nothing leaves the hint rather than an empty border.
-    const tiny = try footerOf(arena, nav, &.{close_key}, 1);
+    const tiny = try footerOf(arena, filter_lead, nav, &.{close_key}, 1);
     try std.testing.expect(tiny.text.len > 0);
 }
 
@@ -491,7 +534,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
     const title: Footer = .{ .text = " files ", .keys = &.{} };
-    const foot = try footerOf(f.arena, v.keys, &.{
+    const foot = try footerOf(f.arena, filter_lead, v.keys, &.{
         .{ .keys = "<CR>", .desc = "open" },
         close_key,
     }, f.width() -| 2);
@@ -605,3 +648,136 @@ test "a file list is one column, however wide the pane" {
     keys.max_cols = 2;
     try testing.expectEqual(@as(u16, 2), fit(keys, 0, .{ .width = 200, .top = 0, .height = 30 }).?.cols);
 }
+
+// -- the compose box ---------------------------------------------------------
+
+/// The message being written, floating over the body, with the preset list
+/// over that when `Ctrl-i` is open.
+///
+/// Sized to the text rather than to the screen: a one-line question gets a
+/// small box and a paragraph grows one, up to half the body. A box that is
+/// always eight rows tall makes the common case - a reference and six words -
+/// look like a form to fill in.
+pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Allocator.Error!void {
+    if (height < 5 or f.width() < 24) return;
+
+    const margin: u16 = 2;
+    const width = @min(f.width() -| margin * 2, @as(u16, 72));
+    const content = width -| 4;
+    if (content == 0) return;
+
+    // How many rows the text needs, wrapped the way the box will draw it.
+    var rows: u16 = 0;
+    {
+        var it: wrap_mod.Iterator = .init(v.text, content, f.method());
+        while (it.next()) |_| rows += 1;
+    }
+    const text_rows = @max(@as(u16, 1), @min(rows, height -| 4));
+    const box_h = text_rows + 2;
+    const box_top = top + (height -| box_h) / 2;
+    const box_col = (f.width() -| width) / 2;
+
+    const title = try footerOf(f.arena, "", &.{}, &.{compose_title}, content);
+    const foot = try footerOf(f.arena, "", compose_keys, &.{}, content);
+    const box: Box = .{
+        .cols = 1,
+        .per = text_rows,
+        .offset = 0,
+        .shown = text_rows,
+        .hidden = 0,
+        .col = box_col,
+        .top = box_top,
+        .width = width,
+        .height = box_h,
+        .content = content,
+        .column = content,
+    };
+    _ = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
+
+    // The caret's cell falls out of the same wrap the text is drawn with, so
+    // the two cannot disagree - the bug `ui/wrap.zig` exists to prevent.
+    var caret_row: u16 = 0;
+    var caret_col: u16 = 0;
+    var row: u16 = 0;
+    var it: wrap_mod.Iterator = .init(v.text, content, f.method());
+    while (it.next()) |chunk| : (row += 1) {
+        if (row >= text_rows) break;
+        const line = chunk.slice(v.text);
+        f.put(box_top + 1 + row, box_col + 2, line, f.theme.text);
+        if (v.cursor >= chunk.start and v.cursor <= chunk.end) {
+            caret_row = row;
+            caret_col = f.win.gwidth(v.text[chunk.start..v.cursor]);
+        }
+    }
+
+    if (v.selected == null) {
+        f.win.setCursorShape(.beam);
+        f.win.showCursor(box_col + 2 + caret_col, box_top + 1 + caret_row);
+    }
+
+    // Said before it happens, not discovered afterwards in the agent's input.
+    if (v.joins and box_top + box_h < top + height) {
+        f.put(box_top + box_h, box_col + 2, "line breaks become spaces when sent", f.theme.dim);
+    }
+    if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, width, sel);
+}
+
+const compose_title: keytext.HelpEntry = .{ .keys = "", .desc = "compose" };
+const compose_keys: []const keytext.HelpEntry = &.{
+    .{ .keys = "<CR>", .desc = "send" },
+    .{ .keys = "<C-i>", .desc = "preset" },
+    .{ .keys = "<Esc>", .desc = "cancel" },
+};
+
+/// The `Ctrl-i` list, directly under the box so the caret it will insert at
+/// stays on screen and in view while a question is chosen.
+fn drawPresetList(
+    f: Frame,
+    v: frame_mod.ComposeView,
+    col: u16,
+    box_top: u16,
+    width: u16,
+    sel: usize,
+) Allocator.Error!void {
+    if (v.presets.len == 0) return;
+    const rows: u16 = @intCast(@min(v.presets.len, 6));
+    const top = box_top -| (rows + 2);
+    const content = width -| 4;
+
+    const title = try footerOf(f.arena, "", &.{}, &.{preset_title}, content);
+    const foot = try footerOf(f.arena, "", preset_keys, &.{}, content);
+    const box: Box = .{
+        .cols = 1,
+        .per = rows,
+        .offset = 0,
+        .shown = rows,
+        .hidden = 0,
+        .col = col,
+        .top = top,
+        .width = width,
+        .height = rows + 2,
+        .content = content,
+        .column = content,
+    };
+    const blank = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
+
+    var i: u16 = 0;
+    while (i < rows) : (i += 1) {
+        const e = v.presets[i];
+        const on = i == sel;
+        if (on) f.put(top + 1 + i, col + 1, blank[0 .. content + 2], f.theme.cursor_line);
+        const bg = if (on) f.theme.cursor_line.bg else null;
+        const name = try std.fmt.allocPrint(f.arena, "{s: <10}", .{e.name});
+        f.put(top + 1 + i, col + 2, name, frame_mod.withBg(f.theme.accent, bg));
+        const room = content -| 11;
+        const shown = if (f.win.gwidth(e.text) <= room) e.text else e.text[0..@min(e.text.len, room)];
+        f.put(top + 1 + i, col + 2 + 11, shown, frame_mod.withBg(f.theme.dim, bg));
+    }
+}
+
+const preset_title: keytext.HelpEntry = .{ .keys = "", .desc = "insert at the caret" };
+const preset_keys: []const keytext.HelpEntry = &.{
+    .{ .keys = "j k", .desc = "pick" },
+    .{ .keys = "<CR>", .desc = "insert" },
+    .{ .keys = "<Esc>", .desc = "back" },
+};

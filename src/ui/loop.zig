@@ -80,6 +80,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
+    app.presets_cfg = opts.cfg.presets;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
