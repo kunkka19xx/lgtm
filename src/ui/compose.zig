@@ -294,7 +294,15 @@ pub const Compose = struct {
             if (self.motionTarget(cp)) |to| {
                 self.mark();
                 const from = self.cursor;
-                if (to > from) self.deleteRange(from, to) else self.deleteRange(to, from);
+                var target = to;
+                // `dw` on the last word of a line deletes to the end of it.
+                // `wordNext` has nowhere to go and reports so, which as a
+                // *motion* correctly leaves the caret where it is - but as an
+                // operator that silently deletes nothing, which is the key
+                // appearing not to work. Vim's rule is the same: a forward
+                // motion that would run off the line stops at its end.
+                if (target == from and forward(cp)) target = self.lineEnd();
+                if (target > from) self.deleteRange(from, target) else self.deleteRange(target, from);
                 if (change) self.mode = .insert;
             }
             return .typing;
@@ -361,6 +369,15 @@ pub const Compose = struct {
             },
         }
         return .typing;
+    }
+
+    /// Whether a motion runs towards the end of the line, and so should be
+    /// clamped there rather than doing nothing when it runs out of line.
+    fn forward(cp: u21) bool {
+        return switch (cp) {
+            'w', 'W', 'e', 'E', 'l' => true,
+            else => false,
+        };
     }
 
     /// Where a motion key would put the caret, or null when the key is not a
@@ -672,6 +689,55 @@ test "normal mode: motions and operators agree with the review's own" {
     try testing.expectEqualStrings("he quick fox", c.text());
     _ = c.feed(tap('D'));
     try testing.expectEqualStrings("", c.text());
+}
+
+test "dw on the last word of a line deletes to the end of it" {
+    // The bug: `wordNext` has nowhere to go and says so, which is right for a
+    // motion and silently wrong for an operator - `dw` deleted nothing.
+    var c: Compose = .{};
+    c.start("solo");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('d'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqualStrings("", c.text());
+
+    // The same on the last word of a longer line, which is the common case.
+    c.start("two words");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('w'));
+    _ = c.feed(tap('d'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqualStrings("two ", c.text());
+
+    // `de` too, and `cw` leaves you in insert where the word was.
+    c.start("alpha beta");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('$'));
+    _ = c.feed(tap('d'));
+    _ = c.feed(tap('e'));
+    try testing.expectEqualStrings("alpha bet", c.text());
+
+    c.start("only");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('c'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqual(Mode.insert, c.mode);
+    try testing.expectEqualStrings("", c.text());
+}
+
+test "a word motion that goes nowhere still moves nothing on its own" {
+    // The clamp is for operators only: `w` on the last word leaves the caret
+    // where it is, which is what the review's own `w` does.
+    var c: Compose = .{};
+    c.start("solo");
+    _ = c.feed(tap(event.code.escape));
+    _ = c.feed(tap('0'));
+    _ = c.feed(tap('w'));
+    try testing.expectEqual(@as(usize, 0), c.cursor);
+    try testing.expectEqualStrings("solo", c.text());
 }
 
 test "normal mode: dd takes the line and j k walk them" {

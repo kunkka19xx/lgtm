@@ -153,6 +153,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // a `.lgtm/` left behind by a version that did not write the ignore; a no-op
     // in a repo lgtm has never written to.
     fs.ensureSelfIgnore(io);
+    // Notes outlive the process: the whole point of `.lgtm/` is that killing
+    // the pane costs scroll position and nothing else (ARCHITECTURE.md 1).
+    app.loadNotes();
 
     try app.rediff();
 

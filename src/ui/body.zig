@@ -224,7 +224,24 @@ fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i3
     // The sign and the number go on the first row only. A continuation row
     // repeating them would read as a second line of the file - and a first row
     // scrolled off the top takes them with it.
-    if (onScreen(f, row)) |at| f.put(at, 0, prefix, sign_style);
+    if (onScreen(f, row)) |at| {
+        f.put(at, 0, prefix, sign_style);
+        // A note is marked in the last gutter column, after the prefix has
+        // been drawn over it - the two spaces between the line number and the
+        // code are the only ones a marker can have without the code moving.
+        const no_new = lines.new_no[li];
+        if (no_new != 0 and col > 0) {
+            for (v.notes) |m| {
+                if (m.line != no_new) continue;
+                f.put(at, col - 1, g.note, withBg(switch (m.state) {
+                    .open => t.note_open,
+                    .sent => t.note_sent,
+                    .stale => t.note_stale,
+                }, bg));
+                break;
+            }
+        }
+    }
     try drawCode(f, v, row, col, li, kind, bg, height, mark);
 
     return height;

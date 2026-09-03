@@ -179,6 +179,13 @@ pub const View = struct {
     /// statement that reads like a bug.
     total_hunks: u32 = 0,
     hunk_ordinal: u32 = 0,
+    /// True while a file outside the review is being read, so the status row
+    /// can say the counters mean nothing here.
+    preview: bool = false,
+    /// New-file line numbers carrying a note, and which kind, for the gutter.
+    /// A slice built per frame: the body asks per row and a scan of a handful
+    /// of notes beats a map that has to be kept in step with the store.
+    notes: []const NoteMark = &.{},
     /// Changed files that `[review] ignore` kept out of this review. Shown in
     /// the mode row, because a file hidden without a word is a file the reader
     /// does not know they have not looked at.
@@ -347,6 +354,14 @@ pub const ComposeView = struct {
 };
 
 pub const Placement = enum { bottom, top, centre };
+
+/// One note, as the gutter needs it.
+pub const NoteMark = struct {
+    line: u32,
+    /// Drawn differently, because "I still mean this" and "the code moved out
+    /// from under it" are different things to know at a glance.
+    state: enum { open, sent, stale },
+};
 
 pub const PresetEntry = struct {
     name: []const u8,

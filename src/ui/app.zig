@@ -19,7 +19,10 @@ const Allocator = std.mem.Allocator;
 
 const diff = @import("../core/diff.zig");
 const event = @import("../core/event.zig");
+const fs_mod = @import("../io/fs.zig");
 const git = @import("../core/git.zig");
+const notes_mod = @import("../core/notes.zig");
+const review_file = @import("../core/review.zig");
 const hunk = @import("../core/hunk.zig");
 const metrics = @import("../io/metrics.zig");
 
@@ -153,13 +156,39 @@ pub const App = struct {
     compose_to: Delivery = .send,
     /// `[ui] compose`: where the box sits.
     compose_at: render.Placement = .bottom,
+    /// Every note in the session. Session-lived and owning its own bytes, so
+    /// a re-diff resetting the arena cannot take a remark with it (rule 4).
+    notes: notes_mod.Store = undefined,
+    /// What the compose box will do with what is typed: send it, or attach it
+    /// to a line as a note. The box itself does not know or care.
+    compose_note: ?u32 = null,
+    compose_is_note: bool = false,
+    /// How many reviews have been submitted this session, for the file name.
+    review_n: u32 = 0,
+    /// A file being read that has no diff at all. `<Space>d` on an unchanged
+    /// file lands here: there is nothing for the review to show, but there is
+    /// still a file to read and to write notes against, so it is rendered as
+    /// every line being context. Outside the review by construction - it is
+    /// not in `review.files()`, `]f` does not reach it, and the status row
+    /// says so.
+    preview: ?diff.FileDiff = null,
+    preview_arena: std.heap.ArenaAllocator = undefined,
     /// The `Ctrl-i` list, open over the box. An index into `presets()`, or
     /// null while the box has the keyboard.
     preset_index: ?usize = null,
     /// What the file overlay is being used for. It is the same list, the same
     /// filter and the same drawing either way; only what happens on Enter
     /// differs, which is one field rather than a second overlay.
-    files_purpose: enum { jump, mention } = .jump,
+    files_purpose: enum {
+        /// `<Space>f`: the changed files, and Enter goes to one.
+        jump,
+        /// `@` in the box: every file, and Enter puts its path at the caret.
+        mention,
+        /// `<Space>d`: every file, and Enter does whichever of those two
+        /// makes sense - there is nothing to show for a file with no diff, so
+        /// picking one starts a message about it instead of a blank screen.
+        browse,
+    } = .jump,
     /// The list the overlay is showing: the changed files for a jump, every
     /// file git knows about for a mention. Rebuilt when the overlay opens and
     /// owned here, because `selected` is asked outside any frame.
@@ -217,6 +246,8 @@ pub const App = struct {
             .io = io,
             .queue = queue,
             .review = .init(gpa, io),
+            .notes = .init(gpa),
+            .preview_arena = .init(gpa),
             .frame_arena = .init(gpa),
         };
     }
@@ -224,6 +255,8 @@ pub const App = struct {
     pub fn deinit(self: *App) void {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
+        self.preview_arena.deinit();
+        self.notes.deinit();
         self.pick_list.deinit(self.gpa);
         if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
         self.frame_arena.deinit();
@@ -235,7 +268,72 @@ pub const App = struct {
     }
 
     fn current(self: *App) ?*diff.FileDiff {
+        if (self.preview) |*p| return p;
         return self.review.fileAt(self.file_index);
+    }
+
+    /// Reads a file that is not in the review and shows it whole.
+    ///
+    /// Every line is context, because that is what it is: nothing changed.
+    /// The body already renders a file with no hunks correctly, and a line
+    /// with a `new_no` is all a note or a reference needs - so browsing,
+    /// noting and pointing all work here for free. Syntax highlighting does
+    /// not: the lexer runs over the review's own buffers, and this file is not
+    /// one of them. The body falls back to unstyled, which is legible.
+    fn openPreview(self: *App, path: []const u8) !void {
+        _ = self.preview_arena.reset(.retain_capacity);
+        const arena = self.preview_arena.allocator();
+
+        const bytes = fs_mod.readFile(self.io, arena, path, 8 << 20) catch {
+            self.notice.set("cannot read {s}", .{path});
+            return;
+        };
+
+        var count: usize = 0;
+        var scan = std.mem.splitScalar(u8, bytes, '\n');
+        while (scan.next()) |_| count += 1;
+        // A trailing newline ends the last line rather than starting an empty
+        // one, the same way the diff parser counts.
+        if (count > 0 and bytes.len > 0 and bytes[bytes.len - 1] == '\n') count -= 1;
+
+        var lines: hunk.DiffLines = .{
+            .kind = try arena.alloc(hunk.LineKind, count),
+            .old_no = try arena.alloc(u32, count),
+            .new_no = try arena.alloc(u32, count),
+            .text = try arena.alloc([]const u8, count),
+        };
+        var it = std.mem.splitScalar(u8, bytes, '\n');
+        var i: usize = 0;
+        while (it.next()) |raw| {
+            if (i >= count) break;
+            lines.kind[i] = .context;
+            lines.old_no[i] = @intCast(i + 1);
+            lines.new_no[i] = @intCast(i + 1);
+            lines.text[i] = std.mem.trimEnd(u8, raw, "\r");
+            i += 1;
+        }
+
+        const p = try arena.dupe(u8, path);
+        self.preview = .{
+            .old_path = p,
+            .new_path = p,
+            .status = .modified,
+            .hunks = &.{},
+            .lines = lines,
+        };
+        try self.rebuildRows(.reset);
+        self.cursor = 0;
+        self.scroll = 0;
+        self.notice.set("{s} - not in the review, {d} lines", .{ path, count });
+    }
+
+    /// Any move back into the review drops the preview: it was a detour, and
+    /// leaving it visible while `]f` walks the changed files would be two
+    /// different answers to "which file am I on".
+    fn clearPreview(self: *App) void {
+        if (self.preview == null) return;
+        self.preview = null;
+        self.rebuildRows(.reset) catch {};
     }
 
     /// A new generation, and the reader put back where they were. The work
@@ -245,11 +343,50 @@ pub const App = struct {
         const span = metrics.span(.diff_parse);
         defer span.end();
 
+        // The working-tree text of every file carrying a note, copied before
+        // the arena that holds it is reset. Re-anchoring needs the old text
+        // and the new one at the same moment (PERFORMANCE.md 3.1), and the old
+        // one is about to stop existing.
+        var before: std.ArrayList(struct { path: []u8, text: []u8 }) = .empty;
+        defer {
+            for (before.items) |b| {
+                self.gpa.free(b.path);
+                self.gpa.free(b.text);
+            }
+            before.deinit(self.gpa);
+        }
+        for (self.notes.items()) |n| {
+            var seen = false;
+            for (before.items) |b| {
+                if (std.mem.eql(u8, b.path, n.path)) seen = true;
+            }
+            if (seen) continue;
+            const work = self.review.buffersFor(n.path).work orelse continue;
+            const p = self.gpa.dupe(u8, n.path) catch continue;
+            const t = self.gpa.dupe(u8, work.bytes) catch {
+                self.gpa.free(p);
+                continue;
+            };
+            before.append(self.gpa, .{ .path = p, .text = t }) catch {
+                self.gpa.free(p);
+                self.gpa.free(t);
+            };
+        }
+
         self.file_index = try self.review.regenerate(.{
             .path = if (self.current()) |f| f.path() else null,
             .hunks = self.prev_hunks,
             .line = self.cursorLine(),
         });
+        // Notes move with the code they were written against, or say they
+        // could not (hard rule 7). Done here, on every re-diff, because that
+        // is the only moment both versions of the file exist.
+        for (before.items) |b| {
+            const now = self.review.buffersFor(b.path).work orelse continue;
+            self.notes.carry(b.path, b.text, now.bytes) catch {};
+        }
+        self.saveNotes();
+
         self.rows = rows_mod.Rows.empty;
         self.fn_names = &.{};
         self.prev_hunks = &.{};
@@ -356,6 +493,8 @@ pub const App = struct {
             .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
+            .notes = self.noteMarks(),
+            .preview = self.preview != null,
             .mode = self.mode,
             .zen = self.zen,
             .wrap = self.wrap,
@@ -368,6 +507,23 @@ pub const App = struct {
             .query = self.liveQuery(),
             .compose = if (self.compose.open) self.composeView(self.frame_arena.allocator()) else null,
         };
+    }
+
+    /// The notes on the current file, for the gutter. Built into the frame
+    /// arena: the body reads them this frame and nothing keeps them.
+    fn noteMarks(self: *App) []const render.NoteMark {
+        const f = self.current() orelse return &.{};
+        var out: std.ArrayList(render.NoteMark) = .empty;
+        const arena = self.frame_arena.allocator();
+        for (self.notes.items()) |n| {
+            if (!std.mem.eql(u8, n.path, f.path())) continue;
+            out.append(arena, .{ .line = n.line, .state = switch (n.state) {
+                .open => .open,
+                .sent => .sent,
+                .stale => .stale,
+            } }) catch return out.items;
+        }
+        return out.items;
     }
 
     /// The compose box as a view, for the callers that draw it without a
@@ -472,8 +628,14 @@ pub const App = struct {
             .find_reverse => if (self.last_find) |f| self.applyFind(f.flip()),
             .next_hunk => try self.stepHunk(1),
             .prev_hunk => try self.stepHunk(-1),
-            .next_file => try self.stepFile(1),
-            .prev_file => try self.stepFile(-1),
+            .next_file => {
+                self.clearPreview();
+                try self.stepFile(1);
+            },
+            .prev_file => {
+                self.clearPreview();
+                try self.stepFile(-1);
+            },
             .center => self.centerCursor(body),
             .refresh => try self.rediff(),
             .visual_toggle => self.toggleVisual(.line),
@@ -487,6 +649,12 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.openCompose(.send, .ref),
+            .note_add => try self.noteAdd(),
+            .note_edit => try self.noteEdit(),
+            .note_delete => self.noteDelete(),
+            .next_note => self.noteStep(1, body),
+            .prev_note => self.noteStep(-1, body),
+            .submit_review => try self.submitReview(),
             .compose_ask => {
                 try self.openCompose(.send, .ref);
                 self.preset_index = 0;
@@ -525,7 +693,17 @@ pub const App = struct {
                 self.notice.set("soft wrap {s}", .{if (self.wrap) "on" else "off"});
             },
             .help => self.toggleHelp(),
-            .file_list => self.toggleFiles(),
+            .file_list => {
+                self.clearPreview();
+                self.toggleFiles();
+            },
+            .file_browse => {
+                if (self.mode == .finder) return self.closeFiles();
+                self.files_purpose = .browse;
+                self.buildPickList();
+                self.file_list.open(0);
+                self.mode = .finder;
+            },
             // One set of list keys, two overlays. Which one they move is the
             // mode, because only one of them can be open.
             .list_down => self.moveList(1),
@@ -632,7 +810,7 @@ pub const App = struct {
     /// otherwise.
     fn closeFiles(self: *App) void {
         self.file_list.close();
-        self.mode = if (self.files_purpose == .mention and self.compose.open) .note_input else .normal;
+        self.mode = if (self.files_purpose != .jump and self.compose.open) .note_input else .normal;
         self.files_purpose = .jump;
     }
 
@@ -654,7 +832,7 @@ pub const App = struct {
                 .status = f.status,
             }) catch return;
         }
-        if (self.files_purpose != .mention) return;
+        if (self.files_purpose == .jump) return;
 
         self.loadProject();
         for (self.project_paths) |p| {
@@ -722,6 +900,38 @@ pub const App = struct {
             .close => self.closeFiles(),
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
+                if (self.files_purpose == .browse) {
+                    const i = picked orelse {
+                        self.closeFiles();
+                        return;
+                    };
+                    const e = self.pick_list.items[i];
+                    if (e.in_review) {
+                        // It is in the review, so show it: that is what the
+                        // reader asked for by picking a file with a diff.
+                        self.clearPreview();
+                        for (self.review.files(), 0..) |f, fi| {
+                            if (!std.mem.eql(u8, f.path(), e.path)) continue;
+                            if (fi != self.file_index) {
+                                self.file_index = @intCast(fi);
+                                try self.rebuildRows(.reset);
+                            }
+                            break;
+                        }
+                        self.closeFiles();
+                        self.clampScroll(body);
+                        return;
+                    }
+                    // Nothing changed in it, so the review has nothing to
+                    // show - but the file is still there to read. Opened
+                    // whole, every line context, outside the review.
+                    var buf: [4096]u8 = undefined;
+                    const p = std.fmt.bufPrint(&buf, "{s}", .{e.path}) catch e.path;
+                    self.closeFiles();
+                    try self.openPreview(p);
+                    self.clampScroll(body);
+                    return;
+                }
                 if (self.files_purpose == .mention) {
                     // The path lands at the caret, straight after the `@` that
                     // opened the list, and nothing else is touched.
@@ -1147,6 +1357,170 @@ pub const App = struct {
         self.mode = .note_input;
     }
 
+    // -- notes ---------------------------------------------------------------
+
+    /// The line the cursor points at, as the note store counts them: the new
+    /// file's line, which is what survives a re-diff and what a reference
+    /// names. Null on a row that is chrome, or a line that exists only in HEAD.
+    fn noteLine(self: *App) ?struct { path: []const u8, line: u32 } {
+        const f = self.current() orelse return null;
+        const li = self.rows.lineAt(self.cursor) orelse return null;
+        if (li >= f.lines.len()) return null;
+        const no = f.lines.new_no[li];
+        if (no == 0) return null;
+        return .{ .path = f.path(), .line = no };
+    }
+
+    /// `c`: the compose box, pointed at a line instead of at the agent.
+    fn noteAdd(self: *App) Allocator.Error!void {
+        const at = self.noteLine() orelse {
+            self.notice.set("no line here to note", .{});
+            return;
+        };
+        _ = at;
+        self.compose_is_note = true;
+        self.compose_note = null;
+        self.compose_to = .copy;
+        self.outgoing.clearRetainingCapacity();
+        self.compose.start("");
+        self.preset_index = null;
+        self.mode = .note_input;
+    }
+
+    /// `C`: the same box, seeded with what the note already says.
+    fn noteEdit(self: *App) Allocator.Error!void {
+        const at = self.noteLine() orelse return;
+        const n = self.notes.at(at.path, at.line) orelse {
+            self.notice.set("no note on this line", .{});
+            return;
+        };
+        self.compose_is_note = true;
+        self.compose_note = n.id;
+        self.compose.start(n.body);
+        self.preset_index = null;
+        self.mode = .note_input;
+    }
+
+    fn noteDelete(self: *App) void {
+        const at = self.noteLine() orelse return;
+        const n = self.notes.at(at.path, at.line) orelse {
+            self.notice.set("no note on this line", .{});
+            return;
+        };
+        self.notes.remove(n.id);
+        self.notice.set("note deleted", .{});
+    }
+
+    /// `]c` / `[c`: the next note anywhere in the review, the way `]h` walks
+    /// hunks. Notes are why the tool exists; stopping at a file boundary would
+    /// leave the key unable to reach most of them.
+    fn noteStep(self: *App, delta: i32, body: u16) void {
+        if (self.notes.len() == 0) {
+            self.notice.set("no notes yet - `c` writes one", .{});
+            return;
+        }
+        const all = self.files();
+        const here = self.noteLine();
+
+        // Sorted by (file index, line), walked from where the cursor is.
+        var best: ?struct { fi: u32, line: u32 } = null;
+        for (self.notes.items()) |n| {
+            var fi: ?u32 = null;
+            for (all, 0..) |f, i| {
+                if (std.mem.eql(u8, f.path(), n.path)) fi = @intCast(i);
+            }
+            const at_fi = fi orelse continue;
+            const cur_fi = self.file_index;
+            const cur_line = if (here) |h| h.line else 0;
+            const after = at_fi > cur_fi or (at_fi == cur_fi and n.line > cur_line);
+            const before = at_fi < cur_fi or (at_fi == cur_fi and n.line < cur_line);
+            if (delta > 0 and !after) continue;
+            if (delta < 0 and !before) continue;
+            if (best) |b| {
+                const closer = if (delta > 0)
+                    (at_fi < b.fi or (at_fi == b.fi and n.line < b.line))
+                else
+                    (at_fi > b.fi or (at_fi == b.fi and n.line > b.line));
+                if (!closer) continue;
+            }
+            best = .{ .fi = at_fi, .line = n.line };
+        }
+
+        const target = best orelse {
+            self.notice.set("no more notes that way", .{});
+            return;
+        };
+        if (target.fi != self.file_index) {
+            self.file_index = target.fi;
+            self.rebuildRows(.reset) catch return;
+        }
+        // The row whose new-file line is the note's. Rows are the laid-out
+        // view of the file, so this is a scan of what is on screen rather than
+        // a lookup - the lists are short and it runs on a keystroke.
+        const f = self.current();
+        if (f) |file| {
+            var row: u32 = 0;
+            while (row < self.rows.len()) : (row += 1) {
+                const li = self.rows.lineAt(row) orelse continue;
+                if (li < file.lines.len() and file.lines.new_no[li] == target.line) {
+                    self.moveTo(row);
+                    break;
+                }
+            }
+        }
+        self.clampScroll(body);
+    }
+
+    /// `Ctrl-s`: the review as one file, and one line telling the agent where
+    /// it is. The point of collecting notes rather than sending each: a dozen
+    /// remarks is a dozen interruptions, or it is one file.
+    fn submitReview(self: *App) !void {
+        if (self.notes.openCount() == 0) {
+            self.notice.set("no open notes to submit", .{});
+            return;
+        }
+        self.review_n += 1;
+
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        const written = try review_file.render(&out, self.gpa, &self.notes, self.review_n);
+
+        var buf: [64]u8 = undefined;
+        const rel = review_file.path(&buf, self.review_n);
+        fs_mod.writeStateFile(self.io, rel, out.items) catch {
+            self.notice.set("could not write {s}", .{rel});
+            self.review_n -= 1;
+            return;
+        };
+        self.notes.markSent();
+        self.saveNotes();
+
+        // One line, no newline in it: hard rule 1, and the reason the notes
+        // themselves may be as long as they like.
+        self.outgoing.clearRetainingCapacity();
+        var line_buf: [256]u8 = undefined;
+        const one = std.fmt.bufPrint(&line_buf, "review ready: {s} ({d} note{s})", .{
+            rel, written, if (written == 1) "" else "s",
+        }) catch rel;
+        try self.outgoing.appendSlice(self.gpa, one);
+        self.want_send = .send;
+    }
+
+    pub fn saveNotes(self: *App) void {
+        if (!self.notes.dirty) return;
+        var out: std.ArrayList(u8) = .empty;
+        defer out.deinit(self.gpa);
+        notes_mod.write(&out, self.gpa, &self.notes) catch return;
+        fs_mod.writeStateFile(self.io, ".lgtm/notes.jsonl", out.items) catch return;
+        self.notes.dirty = false;
+    }
+
+    pub fn loadNotes(self: *App) void {
+        const text = fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return;
+        defer self.gpa.free(text);
+        notes_mod.read(&self.notes, text) catch {};
+    }
+
     fn closeCompose(self: *App) void {
         self.compose.close();
         self.preset_index = null;
@@ -1160,7 +1534,11 @@ pub const App = struct {
 
         switch (self.compose.feed(key)) {
             .typing => {},
-            .cancel => self.closeCompose(),
+            .cancel => {
+                self.compose_is_note = false;
+                self.compose_note = null;
+                self.closeCompose();
+            },
             .presets => self.preset_index = 0,
             .files => {
                 // The compose box stays open underneath: the picker is a
@@ -1180,6 +1558,20 @@ pub const App = struct {
                 self.closeCompose();
                 if (line.len == 0) {
                     self.notice.set("nothing to send", .{});
+                    return;
+                }
+                if (self.compose_is_note) {
+                    self.compose_is_note = false;
+                    if (self.compose_note) |id| {
+                        try self.notes.edit(id, line);
+                        self.notice.set("note updated", .{});
+                    } else if (self.noteLine()) |at| {
+                        _ = try self.notes.add(at.path, at.line, line);
+                        self.notice.set("note added - <C-s> submits the review", .{});
+                    }
+                    self.compose_note = null;
+                    self.saveNotes();
+                    self.clampScroll(body);
                     return;
                 }
                 self.outgoing.clearRetainingCapacity();

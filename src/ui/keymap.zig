@@ -64,6 +64,13 @@ pub const Command = enum {
     send_ref,
     clear_search,
     compose_ask,
+    file_browse,
+    note_add,
+    note_edit,
+    note_delete,
+    next_note,
+    prev_note,
+    submit_review,
     toggle_ignored,
     copy_text,
     copy_text_lines,
@@ -185,6 +192,7 @@ pub const Group = enum {
     move,
     jump,
     send,
+    note,
     find,
     view,
 
@@ -305,6 +313,15 @@ pub const default_bindings: []const Binding = &.{
     // four that each hard-code a row of it. Nothing is inserted until a
     // question is chosen - summoning the box never types into it.
     .{ .chords = &.{ leader, c('a') }, .command = .compose_ask, .desc = "compose, with the question list open", .group = .send },
+    // Notes are the second half of the loop: collect while reading, submit
+    // once. `c` for comment, the letter every review tool uses; `]c`/`[c`
+    // walk them the way `]h` walks hunks.
+    .{ .chords = &.{c('c')}, .command = .note_add, .desc = "write a note on this line", .group = .note },
+    .{ .chords = &.{c('C')}, .command = .note_edit, .desc = "edit the note under the cursor", .group = .note },
+    .{ .chords = &.{ c('d'), c('c') }, .command = .note_delete, .desc = "delete the note under the cursor", .group = .note },
+    .{ .chords = &.{ c(']'), c('c') }, .command = .next_note, .desc = "next and previous note", .group = .note },
+    .{ .chords = &.{ c('['), c('c') }, .command = .prev_note, .desc = "next and previous note", .group = .note },
+    .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .note },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "next and previous match", .group = .find },
@@ -324,6 +341,7 @@ pub const default_bindings: []const Binding = &.{
     // redo/reload key everywhere else and nothing takes it.
     .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff", .group = .view },
     .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files", .group = .find },
+    .{ .chords = &.{ leader, c('d') }, .command = .file_browse, .desc = "list every file in the project", .group = .find },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help", .group = .view },
@@ -553,8 +571,13 @@ test "leader motions are live in visual mode like the bracket forms" {
 test "ctrl is part of the match, not ignored" {
     var km: Keymap = .{};
     try testing.expectEqual(Command.page_down, km.feed(ctrlTap('d'), .normal).command);
-    // Plain 'd' is not bound, and must not fall through to Ctrl-d.
-    try testing.expect(km.feed(tap('d'), .normal) == .none);
+    // Plain 'd' opens the `dc` sequence and must not fall through to Ctrl-d.
+    try testing.expect(km.feed(tap('d'), .normal) == .pending);
+    try testing.expectEqual(Command.note_delete, km.feed(tap('c'), .normal).command);
+    // And a `d` that goes nowhere drops without stranding the next keystroke.
+    try testing.expect(km.feed(tap('d'), .normal) == .pending);
+    try testing.expect(km.feed(tap('z'), .normal) == .none);
+    try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
 }
 
 test "case is significant" {

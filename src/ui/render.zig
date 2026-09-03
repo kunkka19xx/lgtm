@@ -31,6 +31,7 @@ pub const HelpView = frame_mod.HelpView;
 pub const ComposeView = frame_mod.ComposeView;
 pub const PresetEntry = frame_mod.PresetEntry;
 pub const Placement = frame_mod.Placement;
+pub const NoteMark = frame_mod.NoteMark;
 pub const FileEntry = frame_mod.FileEntry;
 pub const HelpLayout = frame_mod.HelpLayout;
 pub const Theme = frame_mod.Theme;
@@ -147,9 +148,13 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
             v.file.hunks[hi].id, g.sep, v.hunk_ordinal, v.total_hunks,
         });
     };
-    const counter = try std.fmt.allocPrint(f.arena, " {s} {d}/{d}", .{
-        g.sep, v.file_index + 1, v.file_count,
-    });
+    // A file outside the review has no place in "3 of 15", and no counts
+    // worth printing: nothing changed in it. Saying so is shorter than
+    // printing three numbers that are all lies.
+    const counter = if (v.preview)
+        try std.fmt.allocPrint(f.arena, " {s} not in the review", .{g.sep})
+    else
+        try std.fmt.allocPrint(f.arena, " {s} {d}/{d}", .{ g.sep, v.file_index + 1, v.file_count });
     const bar = try std.fmt.allocPrint(f.arena, " {s} ", .{g.sep});
     const added = try std.fmt.allocPrint(f.arena, "+{d}", .{v.file.added});
     const removed = try std.fmt.allocPrint(f.arena, "{s}{d}", .{ g.del, v.file.removed });
@@ -185,7 +190,7 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
         f.put(row, col, counter, t.dim);
         col += counter_w;
     }
-    if (fit.counts) {
+    if (fit.counts and !v.preview) {
         f.put(row, col, bar, t.dim);
         col += f.win.gwidth(bar);
         f.put(row, col, added, t.added_count);

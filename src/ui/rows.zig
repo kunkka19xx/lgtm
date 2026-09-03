@@ -148,6 +148,19 @@ pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
         };
     }
 
+    // A file with no hunks but with lines is one being *read* rather than
+    // reviewed - `<Space>d` on something the agent has not touched. There is
+    // no hunk header to draw because there is no hunk: it is the whole file,
+    // and every line of it belongs.
+    if (f.hunks.len == 0 and f.lines.len() > 0) {
+        var i: u32 = 0;
+        while (i < f.lines.len()) : (i += 1) try items.append(gpa, .{ .line = i });
+        return .{
+            .items = try items.toOwnedSlice(gpa),
+            .hunk_rows = try hunk_rows.toOwnedSlice(gpa),
+        };
+    }
+
     for (f.hunks, 0..) |h, hi| {
         if (hi > 0) try items.append(gpa, .gap);
         try hunk_rows.append(gpa, @intCast(items.items.len));

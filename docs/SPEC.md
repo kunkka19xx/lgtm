@@ -116,8 +116,13 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `Ctrl-d` / `Ctrl-u` | half page |
 | `gg` / `G` | top / bottom |
 | `/` `n` `N` | search within the diff; matches light up as the query is typed; `N` runs it backwards |
+| `<Space>f` | the changed files; `Enter` goes to one |
+| `<Space>d` | every file in the project; `Enter` opens it. A file with a diff opens in the review; one without opens **whole**, every line context, outside the review - readable, notable, and referenceable, which is what a file browser is for. `]f` or `<Space>f` returns to the review |
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
 | `zi` | show the files `[review] ignore` hides, and hide them again |
+| `c` `C` `dc` | write, edit, delete the note on this line |
+| `]c` `[c` | next and previous note, across the whole review |
+| `<C-s>` | write `.lgtm/review-N.md` and send one line naming it |
 | `}` `{` | paragraph - **not built.** What a paragraph is in a diff needs deciding first: blank-line delimited within the file, or the hunk, which `]h` already walks |
 | `]h` / `[h` | next / previous hunk, across the whole review |
 | `<Space>nh` / `<Space>ph` | next / previous hunk, leader aliases |
