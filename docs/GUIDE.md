@@ -296,6 +296,8 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 |---|---|
 | `<Tab>` | zen: hide the chrome |
 | `zw` | soft wrap long lines |
+| `\|` or `-` | side by side, or back to the flow view |
+| `H` `L` | side by side: focus the old or the new column |
 | `zi` | show the files `[review] ignore` hides |
 | `zo` `zc` | open a file too large to render inline, or fold it |
 | `<C-r>` | re-diff now |

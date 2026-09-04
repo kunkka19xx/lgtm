@@ -129,6 +129,14 @@ pub const Command = enum {
     /// row or is cut at the edge of the pane; which one a reader wants depends
     /// on whether they are reading prose or the shape of the code.
     toggle_wrap,
+    /// The two views: side by side, and the one-column flow. `[diff] layout`
+    /// decides by pane width until this is pressed; after it, the reader has.
+    toggle_split,
+    /// The other column of a split row. The cursor sits in the new file by
+    /// default, which is what a reference and a comment are almost always
+    /// about; these are how the old one is read, selected and copied.
+    focus_left,
+    focus_right,
     /// Open the `?` overlay, and close it again from inside.
     help,
     /// Open the file list.
@@ -463,6 +471,16 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR", .group = .view },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
+    .{ .chords = &.{c('|')}, .command = .toggle_split, .hint = null, .desc = "side by side, or back to the flow view", .group = .view },
+    // `|` is the divider it draws, and it is the obvious key - on a layout
+    // that has it without a dead key. `-` is the second one for the layouts
+    // that do not, and it is free everywhere else in the map.
+    .{ .chords = &.{c('-')}, .command = .toggle_split, .hint = null, .group = .view },
+    // Free in the review: `H` and `L` page the lists, and a list is its own
+    // mode. Vim's high/low-of-screen are the nearest thing they displace, and
+    // `gg`, `G` and `zz` already cover that ground.
+    .{ .chords = &.{c('H')}, .command = .focus_left, .hint = null, .desc = "focus the old or the new column, side by side", .group = .view },
+    .{ .chords = &.{c('L')}, .command = .focus_right, .hint = null, .desc = "focus the old or the new column, side by side", .group = .view },
     .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .turns },
     .{ .chords = &.{ c(']'), c('t') }, .command = .next_turn, .desc = "next turn, ending at the working tree", .hint = null, .group = .turns },
     .{ .chords = &.{ c('['), c('t') }, .command = .prev_turn, .desc = "previous turn - what the agent had written by then", .hint = null, .group = .turns },

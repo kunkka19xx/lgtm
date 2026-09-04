@@ -221,6 +221,18 @@ pub const Theme = struct {
     line_no: Style,
     add_sign: Style,
     del_sign: Style,
+    /// A whole changed row, washed, for `[diff] highlight = "line"`. The hue
+    /// mixed a fifth of the way over the theme's own background rather than a
+    /// colour per theme: a palette that publishes a green and a background
+    /// already says what its diff green should be, and guessing one by hand
+    /// for six themes is six chances to get someone else's theme wrong.
+    add_line: Style,
+    del_line: Style,
+    /// The side of a split row that has no line on it - the shape of what was
+    /// added or taken away, rather than a hole in the middle of it. Neutral,
+    /// because it is neither an addition nor a removal: it is the absence of
+    /// one.
+    filler: Style,
     hunk_id: Style,
     /// A comment in the gutter. Three states, three colours: still meant, already
     /// sent, and pointing at code that moved out from under it.
@@ -301,6 +313,9 @@ pub fn fromPalette(p: Palette) Theme {
         .line_no = .{ .fg = p.muted },
         .add_sign = .{ .fg = p.green, .bold = true },
         .del_sign = .{ .fg = p.red, .bold = true },
+        .add_line = .{ .bg = wash(p.green, p.on_fill, .add) },
+        .del_line = .{ .bg = wash(p.red, p.on_fill, .del) },
+        .filler = .{ .bg = wash(p.muted, p.on_fill, .filler) },
         .hunk_id = .{ .fg = p.yellow, .bold = true },
         .comment_open = .{ .fg = p.cyan, .bold = true },
         .comment_sent = .{ .fg = p.muted },
@@ -318,6 +333,44 @@ pub fn fromPalette(p: Palette) Theme {
         .prompt = .{ .fg = p.fg, .bold = true },
         .notice = .{ .fg = p.yellow },
     };
+}
+
+/// Which wash is being mixed. Only the fallback for a palette built from
+/// terminal indexes needs to know, because a 256-colour index cannot be mixed
+/// with anything - so those three come from the fixed 216-colour cube, which
+/// is the same on every terminal, rather than from the user's sixteen.
+///
+/// They are stronger than the mix an RGB palette gets, and deliberately so.
+/// The cube's channels step 0, 95, 135, 175, 215, 255, so there is no subtle
+/// dark green in it to pick; `#005f00` is as close as it comes, and it reads
+/// as a solid block rather than a tint. That turned out to be what the diff
+/// wants at a glance, which is why the softer RGB fallback that replaced it
+/// went back out again. `cursor_bg` already steps outside the sixteen for the
+/// same kind of reason.
+const Wash = enum { add, del, filler };
+
+/// `hue` a fifth of the way over `bg`.
+///
+/// A fifth reads as a block down the pane without swallowing the syntax
+/// highlighting drawn on top of it - the row still has to be *code* first.
+/// Both colours have to be RGB to mix at all; anything else takes the cube.
+fn wash(hue: Color, bg: Color, which: Wash) Color {
+    if (hue == .rgb and bg == .rgb) {
+        const h = hue.rgb;
+        const b = bg.rgb;
+        return .{ .rgb = .{ mix(h[0], b[0]), mix(h[1], b[1]), mix(h[2], b[2]) } };
+    }
+    return .{ .index = switch (which) {
+        .add => 22,
+        .del => 52,
+        .filler => 235,
+    } };
+}
+
+fn mix(hue: u8, bg: u8) u8 {
+    const h: i32 = hue;
+    const b: i32 = bg;
+    return @intCast(b + @divTrunc(h - b, 5));
 }
 
 /// The `terminal` palette, resolved. Named `default` because that is what
@@ -420,6 +473,8 @@ fn parseColour(word: []const u8) ?Color {
 const aliases: []const struct { from: []const u8, to: []const u8 } = &.{
     .{ .from = "added", .to = "add_sign" },
     .{ .from = "removed", .to = "del_sign" },
+    .{ .from = "added_line", .to = "add_line" },
+    .{ .from = "removed_line", .to = "del_line" },
     .{ .from = "context", .to = "text" },
     .{ .from = "line_number", .to = "line_no" },
     .{ .from = "hunk_header", .to = "hunk_id" },

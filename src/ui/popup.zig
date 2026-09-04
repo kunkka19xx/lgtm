@@ -736,7 +736,7 @@ const ComposeRows = struct {
             self.base = self.at;
             self.at += @intCast(line.len + @intFromBool(nl != null));
             if (nl == null) self.done = true;
-            self.inner = .init(line, self.width, self.method);
+            self.inner = .init(line, self.width, self.method, .flush);
         }
     }
 };

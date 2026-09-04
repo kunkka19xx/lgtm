@@ -11,7 +11,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
-const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
@@ -109,11 +108,27 @@ const Mark = struct {
     }
 };
 
+/// The wash a line earns from being a change, or null when the change colour
+/// stops at the gutter. A split row's absent side has no line at all and takes
+/// the neutral filler, which is what turns "nothing here" into the shape of
+/// what was added or taken away.
+fn tint(f: Frame, v: View, li: ?u32) ?vaxis.Color {
+    if (v.highlight != .line) return null;
+    const i = li orelse return f.theme.filler.bg;
+    if (i >= v.file.lines.len()) return null;
+    return switch (v.file.lines.kind[i]) {
+        .add => f.theme.add_line.bg,
+        .del => f.theme.del_line.bg,
+        .context => null,
+    };
+}
+
 /// Returns the screen rows the row took: one for chrome, and for a line as
 /// many as its text wrapped onto.
 fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.Error!i32 {
     switch (r) {
-        .line => |li| return drawLine(f, v, row, li, mark),
+        .line => |li| return drawLine(f, v, row, li, mark, .{}),
+        .pair => |pi| return drawPair(f, v, row, pi, mark),
         .note => |ni| return drawComment(f, v, row, ni),
         // Chrome is one screen row and never wraps, so it is drawn or it is
         // not; only a line and a note can straddle the top of the body.
@@ -137,7 +152,7 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
             break :blk;
         },
         .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
-        .line, .note => unreachable,
+        .line, .pair, .note => unreachable,
     }
     return 1;
 }
@@ -164,13 +179,13 @@ fn drawComment(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
     var rows: i32 = 0;
     var lines = std.mem.splitScalar(u8, n.body, '\n');
     while (lines.next()) |line| {
-        var it: wrap.Iterator = .init(line, width, f.method());
+        var it: wrap.Iterator = .init(line, width, f.method(), .flush);
         while (it.next()) |chunk| {
             if (onScreen(f, row + rows)) |at| {
                 // The marker only on the first row, so a wrapped note reads as
                 // one remark rather than as several.
                 if (rows == 0) f.put(at, col -| 2, f.glyphs.comment_mark, style);
-                f.put(at, col, chunk.slice(line), style);
+                f.put(at, col + chunk.col, chunk.slice(line), style);
             }
             rows += 1;
             if (row + rows >= f.win.height) break;
@@ -215,54 +230,200 @@ fn drawHunkHeader(f: Frame, v: View, row: u16, hi: u32) Allocator.Error!void {
     }
 }
 
-fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i32 {
+/// One split row: the old file's line on the left, the new file's on the
+/// right, a divider between them, and nothing at all on a side that has none.
+///
+/// Each column is drawn into a child window of its own, so a line too long for
+/// its half is clipped by the window rather than running into the other one.
+/// Always one screen row: the split view does not wrap, because two columns
+/// wrapping independently would give one body row two heights.
+fn drawPair(f: Frame, v: View, row: i32, pi: u32, mark: Mark) Allocator.Error!i32 {
+    if (pi >= v.rows.pairs.len) return 1;
+    const p = v.rows.pairs[pi];
+    const sp = rows_mod.Split.of(f.width());
+    // The cursor line and a linewise selection are facts about the whole row
+    // and win over both columns. The change wash is a fact about one line, so
+    // the two sides can differ - a removal beside its replacement is the
+    // ordinary case, and washing both the same would say they were the same.
+    const row_bg = mark.background(f.theme);
+    const left_bg = row_bg orelse tint(f, v, p.left);
+    const right_bg = row_bg orelse tint(f, v, p.right);
+    const lines = v.file.lines;
+    const col = rows_mod.gutter(v.file, .split);
+
+    // Both columns get the rows the taller of them needs, so a wrapped line on
+    // one side does not slide the other side down past it. Capped at what is
+    // left of the body, and counting from `row` so a pair scrolled halfway off
+    // the top still reports its whole height.
+    const rest: u16 = @intCast(@max(0, @as(i32, f.win.height) - row));
+    const height: i32 = if (v.wrap) wrap.pairHeight(
+        if (p.left) |li| lines.text[li] else null,
+        sp.left -| col,
+        if (p.right) |li| lines.text[li] else null,
+        sp.right_width -| col,
+        f.method(),
+        rest,
+    ) else 1;
+
+    // Washed first and on every row of the pair, so a wrapped one does not
+    // look like the two columns have come apart - and so a side with no line
+    // at all is still drawn, which is the whole point of the filler.
+    var r: i32 = 0;
+    while (r < height) : (r += 1) {
+        const at = onScreen(f, row + r) orelse continue;
+        fill(f, at, 0, sp.left, left_bg);
+        fill(f, at, sp.right, f.width(), right_bg);
+        f.put(at, sp.divider, f.glyphs.sep, withBg(f.theme.rule, row_bg));
+    }
+
+    // The selection and the cursor belong to the side the cursor is on, which
+    // is the side `Rows.lineAt` names - marking both would say the reader has
+    // selected text in a file they are not pointing at.
+    // The column the reader is in, or the other one when that column is a
+    // padding row: a cursor cannot stand on a side with nothing on it.
+    const active: rows_mod.Side = switch (v.side) {
+        .new => if (p.right != null) .new else .old,
+        .old => if (p.left != null) .old else .new,
+    };
+    if (p.left) |li| try drawSide(f, v, row, li, .old, sp, left_bg, height, if (active == .old) mark else null);
+    if (p.right) |li| try drawSide(f, v, row, li, .new, sp, right_bg, height, if (active == .new) mark else null);
+    return height;
+}
+
+/// Paints `[from, to)` of one screen row. A no-op without a colour, so every
+/// caller can hand it an optional and stop asking.
+fn fill(f: Frame, at: u16, from: u16, to: u16, bg: ?vaxis.Color) void {
+    const b = bg orelse return;
+    var c = from;
+    while (c < to) : (c += 1) {
+        f.win.writeCell(c, at, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
+    }
+}
+
+/// One column of a split row. A child window that is one column wide and as
+/// tall as the whole body, so the line below draws in that column's
+/// coordinates and a pair straddling the top of the body is clipped the same
+/// way an unwrapped one is.
+fn drawSide(
+    f: Frame,
+    v: View,
+    row: i32,
+    li: u32,
+    side: rows_mod.Side,
+    sp: rows_mod.Split,
+    bg: ?vaxis.Color,
+    height: i32,
+    mark: ?Mark,
+) Allocator.Error!void {
+    const geom = sp.column(side);
+    if (geom.width == 0) return;
+    const cf: Frame = .{
+        .win = f.win.child(.{ .x_off = geom.at, .width = geom.width }),
+        .arena = f.arena,
+        .theme = f.theme,
+        .glyphs = f.glyphs,
+    };
+    _ = try drawLine(cf, v, row, li, mark orelse .{ .row = 0 }, .{
+        .side = side,
+        .bg = bg,
+        .height = height,
+    });
+}
+
+/// What a caller that has already made some of a line's decisions is handing
+/// down. All defaulted, so the flowing view passes nothing.
+const LineOpts = struct {
+    /// Which file the text comes from. Null in the flow view, where the
+    /// line's own kind answers it; a split column is told, because a context
+    /// line is drawn twice - once from each buffer, at each file's own number.
+    side: ?rows_mod.Side = null,
+    /// The row's background, when the caller has washed it already.
+    bg: ?vaxis.Color = null,
+    /// Screen rows to occupy, when the caller has decided. A split pair takes
+    /// the taller of its two sides so the columns stay aligned.
+    height: ?i32 = null,
+};
+
+/// Draws one diff line and returns the screen rows it took.
+fn drawLine(
+    f: Frame,
+    v: View,
+    row: i32,
+    li: u32,
+    mark: Mark,
+    opts: LineOpts,
+) Allocator.Error!i32 {
     const lines = v.file.lines;
     if (li >= lines.len()) return 1;
     const kind = lines.kind[li];
     const t = f.theme;
     const g = f.glyphs;
 
-    const bg: ?vaxis.Color = mark.background(t);
+    // A column of a split row has already been washed across the whole width,
+    // so it is handed the colour rather than deciding it: only the full row
+    // knows whether the cursor is on it.
+    const side = opts.side;
+    const bg: ?vaxis.Color = if (side == null)
+        (mark.background(t) orelse tint(f, v, li))
+    else
+        opts.bg;
 
-    const sign: []const u8 = switch (kind) {
-        .add => g.add,
-        .del => g.del,
-        .context => g.context,
-    };
-    const sign_style = withBg(switch (kind) {
+    // Whether this line arrived after the mark. A fact about the line, so each
+    // column asks about its own: a removal is drawn on the old side and is
+    // just as new as the addition that replaced it.
+    const fresh = li < v.fresh.len and v.fresh[li];
+
+    // What the line is, as a colour. The number wears it in both views, and
+    // in the split view it is the only glyph-free channel there is - which is
+    // why the flow view keeps `+` and `-` rather than both views dropping
+    // them: a terminal without colour has to be able to read one of the two.
+    const kind_style = withBg(switch (kind) {
         .add => t.add_sign,
         .del => t.del_sign,
         .context => t.dim,
     }, bg);
 
-    const no = switch (kind) {
-        .del => lines.old_no[li],
-        else => lines.new_no[li],
+    const old = if (side) |sd| sd == .old else kind == .del;
+    const no = if (old) lines.old_no[li] else lines.new_no[li];
+    const col = rows_mod.gutter(v.file, if (side == null) .flow else .split);
+    // A split column narrower than its own gutter has nowhere to put the
+    // line, and drawing it would spill into the divider.
+    if (side != null and col >= f.width()) return 1;
+    // No trailing blanks: what fills the columns after the number is the row's
+    // own background, a note's dot, or nothing.
+    //
+    // The flow view leads with the sign and the blank the mark bar sits in;
+    // the split view leads with that blank alone. Both put the number last, so
+    // `col - 1` is the note's column in either.
+    const num_w = rows_mod.numWidth(v.file);
+    const sign: []const u8 = switch (kind) {
+        .add => g.add,
+        .del => g.del,
+        .context => g.context,
     };
-    const col = rows_mod.gutter(v.file);
-    const prefix = try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}  ", .{ sign, no, col - 4 });
+    const prefix = if (side == null)
+        try std.fmt.allocPrint(f.arena, "{s} {d: >[2]}", .{ sign, no, num_w })
+    else
+        try std.fmt.allocPrint(f.arena, "{d: >[1]}", .{ no, num_w });
 
     // How many screen rows this line needs. Capped at what is left of the
     // body - and a line starting above it needs the rows above counting too,
     // or a wrapped row scrolled halfway off the top would report the height of
     // the part still showing and the rows below it would all shift up.
     const rest: u16 = @intCast(@max(0, @as(i32, f.win.height) - row));
-    const height: i32 = if (v.wrap)
-        wrap.height(lines.text[li], f.width() -| col, f.method(), rest)
+    const height: i32 = opts.height orelse if (v.wrap)
+        wrap.height(lines.text[li], f.width() -| col, f.method(), rest, .follow)
     else
         1;
 
     // A highlighted row is filled first so it spans the full width, not just
     // the columns that happen to carry text - and every row of a wrapped line,
     // or the cursor would look like it stopped halfway down its own line.
-    if (bg) |b| {
+    if (side == null) {
         var r: i32 = 0;
         while (r < height) : (r += 1) {
             const at = onScreen(f, row + r) orelse continue;
-            var c: u16 = 0;
-            while (c < f.width()) : (c += 1) {
-                f.win.writeCell(c, at, .{ .char = .{ .grapheme = " " }, .style = .{ .bg = b } });
-            }
+            fill(f, at, 0, f.width(), bg);
         }
     }
 
@@ -270,19 +431,14 @@ fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i3
     // repeating them would read as a second line of the file - and a first row
     // scrolled off the top takes them with it.
     if (onScreen(f, row)) |at| {
-        f.put(at, 0, prefix, sign_style);
-        // A change newer than the mark, in the column between the sign and
-        // the line number - the one blank the gutter already has. It takes no
-        // width from the code and cannot collide with the comment mark, which
-        // lives at the other end of the gutter.
-        if (li < v.fresh.len and v.fresh[li] and col > 1) {
-            f.put(at, 1, g.fresh_mark, withBg(t.fresh, bg));
-        }
+        f.put(at, 0, prefix, kind_style);
+
         // A note is marked in the last gutter column, after the prefix has
-        // been drawn over it - the two spaces between the line number and the
-        // code are the only ones a marker can have without the code moving.
+        // been drawn over it - the column between the line number and the
+        // code is the only one a marker can have without the code moving.
+        var noted = false;
         const no_new = lines.new_no[li];
-        if (no_new != 0 and col > 0) {
+        if (!old and no_new != 0 and col > 0) {
             for (v.notes) |m| {
                 if (m.line != no_new) continue;
                 f.put(at, col - 1, g.comment_mark, withBg(switch (m.state) {
@@ -290,11 +446,21 @@ fn drawLine(f: Frame, v: View, row: i32, li: u32, mark: Mark) Allocator.Error!i3
                     .sent => t.comment_sent,
                     .stale => t.comment_stale,
                 }, bg));
+                noted = true;
                 break;
             }
         }
+
+        // A change newer than the mark. The flow view has a column of its own
+        // for it, between the sign and the number; the split view shares the
+        // note's, and a note wins there. A note is something the reader put
+        // where it is on purpose, and `]m` walks them to the mark anyway.
+        const mark_col: u16 = if (side == null) 1 else col -| 1;
+        if (fresh and col > 1 and !(side != null and noted)) {
+            f.put(at, mark_col, g.fresh_mark, withBg(t.fresh, bg));
+        }
     }
-    try drawCode(f, v, row, col, li, kind, bg, height, mark);
+    try drawCode(f, v, row, col, li, old, bg, height, mark);
 
     return height;
 }
@@ -310,7 +476,7 @@ fn drawCode(
     row: i32,
     col: u16,
     li: u32,
-    kind: hunk.LineKind,
+    old: bool,
     bg: ?vaxis.Color,
     height: i32,
     mark: Mark,
@@ -319,18 +485,9 @@ fn drawCode(
     const text = lines.text[li];
     const plain = withBg(f.theme.text, bg);
 
-    const src: ?buffer.Buffer = switch (kind) {
-        .del => v.head,
-        else => v.work,
-    };
-    const runs: []const lexer.Run = switch (kind) {
-        .del => v.head_runs,
-        else => v.work_runs,
-    };
-    const no = switch (kind) {
-        .del => lines.old_no[li],
-        else => lines.new_no[li],
-    };
+    const src: ?buffer.Buffer = if (old) v.head else v.work;
+    const runs: []const lexer.Run = if (old) v.head_runs else v.work_runs;
+    const no = if (old) lines.old_no[li] else lines.new_no[li];
 
     var segs: std.ArrayList(vaxis.Segment) = .empty;
 
@@ -373,7 +530,7 @@ fn drawCode(
     // rows drawn and the rows counted cannot disagree. Chunks above the body
     // are skipped rather than drawn: that is what a line scrolled halfway off
     // the top looks like.
-    var it: wrap.Iterator = .init(text, f.width() -| col, f.method());
+    var it: wrap.Iterator = .init(text, f.width() -| col, f.method(), .follow);
     var r = row;
     while (it.next()) |chunk| : (r += 1) {
         if (r >= row + height) break;
@@ -382,7 +539,7 @@ fn drawCode(
             continue;
         };
         const part = try sliceSegs(f.arena, segs.items, chunk);
-        _ = f.win.print(part, .{ .row_offset = at, .col_offset = col, .wrap = .none });
+        _ = f.win.print(part, .{ .row_offset = at, .col_offset = col + chunk.col, .wrap = .none });
     }
 }
 

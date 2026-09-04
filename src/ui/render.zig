@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// One frame of the unified diff view (mockup 2a): one status row, the diff
+// One frame of the diff view (mockup 2a): one status row, the diff
 // body, one mode row. No persistent file list - files are reached with `]f`,
 // which is what buys the body 22 of 26 rows instead of 17.
 //
@@ -34,6 +34,7 @@ pub const HelpView = frame_mod.HelpView;
 pub const ComposeView = frame_mod.ComposeView;
 pub const PresetEntry = frame_mod.PresetEntry;
 pub const Placement = frame_mod.Placement;
+pub const Highlight = frame_mod.Highlight;
 pub const CommentMark = frame_mod.CommentMark;
 pub const FileEntry = frame_mod.FileEntry;
 pub const HelpLayout = frame_mod.HelpLayout;

@@ -32,6 +32,7 @@ const anim = @import("anim.zig");
 const wrap = @import("wrap.zig");
 
 pub const Theme = theme_mod.Theme;
+pub const Side = rows_mod.Side;
 pub const Glyphs = theme_mod.Glyphs;
 
 /// Rows of chrome: status, rule, rule, mode.
@@ -195,6 +196,17 @@ pub const View = struct {
     /// clips, which is what a reader who wants the shape of the code back
     /// asks for with `zw`.
     wrap: bool = true,
+    /// Side by side: the old file in the left column, the new in the right,
+    /// with a divider between them, against the one-column flow view. The
+    /// rows are a different list under it, so this is a fact about `rows` and
+    /// not only about how they are drawn.
+    split: bool = false,
+    /// `[diff] highlight`: how far a change's colour reaches.
+    /// Which column of a split row the cursor is in. The body marks that one
+    /// and leaves the other alone: a cursor or a selection drawn on both would
+    /// say the reader is pointing at two lines at once.
+    side: rows_mod.Side = .new,
+    highlight: Highlight = .line,
     /// The `?` popup. Non-null floats a box over the body.
     help: ?HelpView = null,
     /// The `F` popup, the same way. Only one overlay is ever open, because
@@ -430,6 +442,15 @@ pub const ComposeView = struct {
 };
 
 pub const Placement = enum { bottom, top, centre };
+
+/// How far a change's colour reaches. `[diff] highlight`.
+///
+/// `line` washes the whole row, and is the default: it is what lets the mark
+/// be one thin bar instead of a sign and a bar, and side by side needs it -
+/// two columns of near-identical text with a tint on one of them is a far
+/// quicker read than comparing them character by character. `gutter` keeps the
+/// colour in the mark and leaves the code to the syntax highlighting.
+pub const Highlight = enum { gutter, line };
 
 /// One note, as the gutter needs it.
 pub const CommentMark = struct {

@@ -77,6 +77,12 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer app.deinit();
     app.nav = opts.cfg.nav;
     app.wrap = opts.cfg.ui.wrap;
+    app.layout = opts.cfg.diff.layout;
+    app.split_min_width = opts.cfg.diff.split_min_width;
+    app.highlight = switch (opts.cfg.diff.highlight) {
+        .gutter => .gutter,
+        .line => .line,
+    };
     app.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
     app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;

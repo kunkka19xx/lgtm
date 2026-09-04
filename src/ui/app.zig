@@ -315,6 +315,27 @@ pub const App = struct {
     /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
     /// the pane continues on the next screen row; off, it is cut at the edge.
     wrap: bool = true,
+    /// `[diff] layout`. `|` overrides it for the session by writing an
+    /// explicit value here, which is what "manual wins over auto" is.
+    layout: config.Layout = .auto,
+    /// `[diff] split_min_width`. Below it, `auto` reads flow: two columns
+    /// in a pane this narrow are each narrower than the code in them, and the
+    /// mode that is worse in the home environment must not appear there.
+    split_min_width: u16 = 100,
+    /// Which column of a split row the cursor is in, moved by `H` and `L`.
+    /// The new file by default: it is the code that is there now, and it is
+    /// what a reference, a comment and a yank are almost always about.
+    /// Meaningless in the flow view, where it is still remembered, so
+    /// switching back to side by side puts the reader where they left off.
+    side: rows_mod.Side = .new,
+    /// `[diff] highlight`. It changes no part of the row model and not a
+    /// single column of layout, which is why it is the renderer's business and
+    /// lives here only to be handed to it.
+    highlight: render.Highlight = .line,
+    /// The layout `rows` was actually built for. A resize can change what
+    /// `auto` resolves to, and the rows are a different list when it does -
+    /// so this is what says whether they still match.
+    split: bool = false,
     /// The pane width, from the last resize the loop reported. Scrolling has
     /// to count screen rows, and a wrapped row is more than one of them, so
     /// the state that decides where the cursor goes needs to know how wide
@@ -535,7 +556,13 @@ pub const App = struct {
                 }
             }
         }
-        self.rows = try rows_mod.buildWith(self.review.allocator(), f, at.items);
+        self.split = self.effectiveSplit();
+        self.rows = try rows_mod.buildWith(
+            self.review.allocator(),
+            f,
+            at.items,
+            if (self.split) .split else .flow,
+        );
         self.prev_hunks = f.hunks;
         self.fn_names = try self.review.enclosingNames(f);
         var placed = false;
@@ -576,12 +603,49 @@ pub const App = struct {
         if (self.mode == .visual) self.leaveVisual();
     }
 
+    /// Which column of `p` the reader is actually in: the one they asked for,
+    /// or the other when the one they asked for is a padding row. A side with
+    /// nothing on it is not somewhere the cursor can stand.
+    fn sideOn(self: *const App, p: rows_mod.Pair) rows_mod.Side {
+        return switch (self.side) {
+            .new => if (p.right != null) .new else .old,
+            .old => if (p.left != null) .old else .new,
+        };
+    }
+
+    /// The line on body row `row`, from the column the reader is in.
+    ///
+    /// `Rows.lineAt` answers structurally - the new side whenever there is one
+    /// - because a search, a re-anchor and a row lookup all want the row back
+    /// and none of them has a cursor. This is the reader's answer, and it is
+    /// what a reference, a yank and a comment are about.
+    fn lineAt(self: *const App, row: u32) ?u32 {
+        const p = self.rows.pairAt(row) orelse return self.rows.lineAt(row);
+        return switch (self.sideOn(p)) {
+            .old => p.left,
+            .new => p.right,
+        };
+    }
+
+    /// `H` and `L`: the other column of a split row.
+    ///
+    /// Silent in the flow view rather than refused. There is one column there
+    /// and nothing to say about it, and the preference is still worth keeping:
+    /// it is where the reader will be when they switch back.
+    fn focusSide(self: *App, side: rows_mod.Side) void {
+        if (self.side == side) return;
+        self.side = side;
+        // The column opposite is a different line of a different length.
+        self.clampCol();
+        self.placeCursor();
+    }
+
     /// The working-tree line under the cursor, 1-based, or 0 when there is
     /// none: chrome has no line, and a deleted line exists only in the old
     /// file, so neither has anything to carry into the next generation.
     fn cursorLine(self: *App) u32 {
         const f = self.current() orelse return 0;
-        const li = self.rows.lineAt(self.cursor) orelse return 0;
+        const li = self.lineAt(self.cursor) orelse return 0;
         if (li >= f.lines.new_no.len) return 0;
         return f.lines.new_no[li];
     }
@@ -636,6 +700,9 @@ pub const App = struct {
             .mode = self.mode,
             .zen = self.zen,
             .wrap = self.wrap,
+            .split = self.split,
+            .side = self.side,
+            .highlight = self.highlight,
             .selection = self.selection(),
             .prompt = if (self.prompt.open) .{
                 .prefix = self.prompt.kind.prefix(),
@@ -971,6 +1038,26 @@ pub const App = struct {
                 self.zen = !self.zen;
                 self.placeCursor();
             },
+            // Writes an explicit layout rather than flipping a bool: `auto`
+            // is a default, and a reader who has said which one they want has
+            // stopped wanting the pane to decide.
+            .toggle_split => {
+                self.layout = if (self.splitView()) .flow else .split;
+                self.relayout(body);
+                // What the reader asked for, plus why it did not happen when
+                // it did not: a key that reports "off" after being pressed to
+                // turn something on reads as a key that failed.
+                const on = self.layout == .split;
+                const why: []const u8 = if (!on or self.split)
+                    ""
+                else if (self.cols < rows_mod.min_split_width)
+                    " - this pane is too narrow for it"
+                else
+                    " - this file has nothing to put beside it";
+                self.notice.set("side by side {s}{s}", .{ if (on) "on" else "off", why });
+            },
+            .focus_left => self.focusSide(.old),
+            .focus_right => self.focusSide(.new),
             .toggle_wrap => {
                 self.wrap = !self.wrap;
                 self.placeCursor();
@@ -1548,7 +1635,7 @@ pub const App = struct {
 
         const start_file = self.file_index;
         var fi: u32 = start_file;
-        var from: ?u32 = self.rows.lineAt(self.cursor);
+        var from: ?u32 = self.lineAt(self.cursor);
         var wrapped = false;
 
         var step: usize = 0;
@@ -1582,6 +1669,198 @@ pub const App = struct {
 
         self.finder.failed = true;
         self.notice.set("pattern not found: {s}", .{pat.text});
+    }
+
+    test "auto splits when the pane is wide enough and folds back when it is not" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // 80 columns is the home environment: a split pane beside an agent, and
+        // the layout that is worse there must not appear there.
+        try testing.expect(!fx.app.splitView());
+        try testing.expect(!fx.app.split);
+
+        try fx.app.handle(.{ .resize = .{ .cols = 140, .rows = 40 } }, 36);
+        try testing.expect(fx.app.split);
+        try testing.expect(fx.app.rows.pairAt(fx.app.cursor) != null);
+
+        try fx.app.handle(.{ .resize = .{ .cols = 80, .rows = 40 } }, 36);
+        try testing.expect(!fx.app.split);
+        try testing.expect(fx.app.rows.pairAt(fx.app.cursor) == null);
+    }
+
+    test "a re-layout keeps the reader on the line they were reading" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // The last line of the file rather than the first, so a row index carried
+        // across unchanged would be a different line if the models disagreed.
+        fx.app.cursor = 3;
+        const line = fx.app.rows.lineAt(3).?;
+
+        try fx.app.handle(.{ .resize = .{ .cols = 140, .rows = 40 } }, 36);
+        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.cursor).?);
+
+        try fx.app.handle(.{ .resize = .{ .cols = 80, .rows = 40 } }, 36);
+        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.cursor).?);
+    }
+
+    /// The fixture's file is all context, which pairs each line against itself
+    /// and so cannot tell the two columns apart. This makes its middle line a
+    /// replacement - one removed, one added, in the shape git emits - and lays it
+    /// out side by side.
+    fn splitReplacement(fx: *Fixture) !void {
+        const l = &fx.files[0].lines;
+        l.kind[1] = .del;
+        l.kind[2] = .add;
+        l.old_no[1] = 2;
+        l.old_no[2] = 0;
+        l.new_no[1] = 0;
+        l.new_no[2] = 2;
+
+        fx.app.cols = 120;
+        fx.app.layout = .split;
+        fx.app.relayout(20);
+        try testing.expect(fx.app.split);
+    }
+
+    test "H and L put the cursor in the other column of a split row" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        try splitReplacement(fx);
+
+        // Row 0 is the header, row 1 the context line, row 2 the replacement -
+        // the one row where the two columns are different lines.
+        const p = fx.app.rows.pairAt(2).?;
+        try testing.expectEqual(@as(u32, 1), p.left.?);
+        try testing.expectEqual(@as(u32, 2), p.right.?);
+
+        fx.app.cursor = 2;
+        // The new file to begin with: it is the code that is there now, and it is
+        // what a reference and a comment are almost always about.
+        try testing.expectEqual(@as(u32, 2), fx.app.lineAt(2).?);
+        try fx.press("H");
+        try testing.expectEqual(@as(u32, 1), fx.app.lineAt(2).?);
+        try fx.press("L");
+        try testing.expectEqual(@as(u32, 2), fx.app.lineAt(2).?);
+
+        // A context row is the same line on both sides, so neither key moves it.
+        fx.app.cursor = 1;
+        try fx.press("H");
+        try testing.expectEqual(@as(u32, 0), fx.app.lineAt(1).?);
+    }
+
+    test "a yank takes the column the reader is standing in" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        try splitReplacement(fx);
+
+        const lines = fx.app.current().?.lines;
+        fx.app.cursor = 2;
+
+        try fx.press("Y");
+        try testing.expectEqualStrings(lines.text[2], fx.app.outgoing.items);
+
+        // The whole point of `H`: the removed text was unreachable before it, and
+        // copying it is most of what anyone wants the old column for.
+        try fx.press("H");
+        try fx.press("Y");
+        try testing.expectEqualStrings(lines.text[1], fx.app.outgoing.items);
+    }
+
+    test "a padding row keeps the cursor on the side that has a line" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // One line removed and nothing put in its place, so the new side of that
+        // row is blank. `L` cannot stand there, and must not blank the cursor.
+        var del = try Fixture.withDeletion(testing.allocator, 1);
+        defer del.deinit();
+        del.app.cols = 120;
+        del.app.layout = .split;
+        del.app.relayout(20);
+
+        const p = del.app.rows.pairAt(2).?;
+        try testing.expectEqual(@as(u32, 1), p.left.?);
+        try testing.expect(p.right == null);
+
+        del.app.cursor = 2;
+        try testing.expectEqual(@as(u32, 1), del.app.lineAt(2).?);
+        try del.press("L");
+        try testing.expectEqual(@as(u32, 1), del.app.lineAt(2).?);
+    }
+
+    test "the split key overrides auto, but not a pane too small to hold it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // 80 columns is under `auto`'s threshold and over the floor, so asking
+        // for it is granted: the reader has stopped wanting the pane to decide.
+        try fx.press("|");
+        try testing.expect(fx.app.split);
+        try testing.expectEqual(config.Layout.split, fx.app.layout);
+
+        // Widening past the threshold does not undo what they asked for.
+        try fx.app.handle(.{ .resize = .{ .cols = 140, .rows = 40 } }, 36);
+        try testing.expect(fx.app.split);
+
+        // Below the floor it is suspended rather than forgotten. Two columns of
+        // twenty-odd are not a layout, and the reader who shrank the pane wants
+        // the view that still works - but the one they named is still on record,
+        // so widening it again brings the split straight back.
+        try fx.app.handle(.{ .resize = .{ .cols = 48, .rows = 40 } }, 36);
+        try testing.expect(!fx.app.split);
+        try testing.expectEqual(config.Layout.split, fx.app.layout);
+        try fx.app.handle(.{ .resize = .{ .cols = 100, .rows = 40 } }, 36);
+        try testing.expect(fx.app.split);
+
+        try fx.press("|");
+        try testing.expect(!fx.app.split);
+        try testing.expectEqual(config.Layout.flow, fx.app.layout);
+    }
+
+    test "a split row is as tall as its taller column, and one when wrap is off" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // A line far wider than a column of a sixty-four-column pane, which is
+        // over the floor and so actually splits.
+        fx.files[0].lines.text[1] = "    const value = compute(alpha, beta, gamma, delta, epsilon);";
+        fx.app.cols = 64;
+        fx.app.layout = .split;
+        fx.app.relayout(8);
+        try testing.expect(fx.app.split);
+        try testing.expect(fx.app.wrap);
+
+        const sp = rows_mod.Split.of(fx.app.cols);
+        const col = rows_mod.gutter(fx.app.current().?, .split);
+        const lines = fx.app.current().?.lines;
+
+        var wrapped: u32 = 0;
+        var row: u32 = 0;
+        while (row < fx.app.rows.len()) : (row += 1) {
+            const p = fx.app.rows.pairAt(row) orelse continue;
+            const want = wrap_mod.pairHeight(
+                if (p.left) |li| lines.text[li] else null,
+                sp.left -| col,
+                if (p.right) |li| lines.text[li] else null,
+                sp.right_width -| col,
+                fx.app.width_method,
+                8,
+            );
+            // Both columns are given the same rows, so neither slides past the
+            // other - that is what makes a wrapped split readable at all.
+            try testing.expectEqual(want, fx.app.rowHeight(row, 8));
+            if (want > 1) wrapped += 1;
+        }
+        try testing.expect(wrapped > 0);
+
+        // `zw` still turns it off, and then a split row is one row like any other.
+        fx.app.wrap = false;
+        row = 0;
+        while (row < fx.app.rows.len()) : (row += 1) {
+            try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(row, 8));
+        }
     }
 
     // -- the bridge ----------------------------------------------------------
@@ -1641,7 +1920,7 @@ pub const App = struct {
         var last: u32 = 0;
         var row = lo_row;
         while (row <= hi_row) : (row += 1) {
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li >= f.lines.len()) continue;
             const n = f.lines.new_no[li];
             if (n == 0) continue;
@@ -1740,7 +2019,7 @@ pub const App = struct {
 
         var row = lo_row;
         while (row <= hi_row) : (row += 1) {
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li >= f.lines.len()) continue;
             try out.append(self.gpa, '\n');
             try out.append(self.gpa, switch (f.lines.kind[li]) {
@@ -1791,7 +2070,7 @@ pub const App = struct {
         var rows: u32 = 0;
         var row = lo;
         while (row <= hi) : (row += 1) {
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li >= f.lines.len()) continue;
             const text = f.lines.text[li];
 
@@ -1897,7 +2176,7 @@ pub const App = struct {
     /// reviewer says constantly.
     fn commentLine(self: *App) ?Spot2 {
         const f = self.current() orelse return null;
-        const li = self.rows.lineAt(self.cursor) orelse return null;
+        const li = self.lineAt(self.cursor) orelse return null;
         if (li >= f.lines.len()) return null;
         const no = f.lines.new_no[li];
         if (no != 0) return .{ .path = f.path(), .line = no };
@@ -2097,7 +2376,7 @@ pub const App = struct {
         const f = self.current() orelse return false;
         var row: u32 = 0;
         while (row < self.rows.len()) : (row += 1) {
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li < f.lines.len() and f.lines.new_no[li] == line) {
                 self.moveTo(row);
                 return true;
@@ -2581,7 +2860,7 @@ pub const App = struct {
         // particular line - so it is written once and returned from.
         const top: EditTarget = .{ .path = f.path(), .line = 0 };
 
-        const li = self.rows.lineAt(self.cursor) orelse return top;
+        const li = self.lineAt(self.cursor) orelse return top;
         if (li >= f.lines.len()) return top;
         if (f.lines.kind[li] != .del) return .{ .path = f.path(), .line = f.lines.new_no[li] };
 
@@ -2615,7 +2894,7 @@ pub const App = struct {
 
     fn textOfRow(self: *App, row: u32) []const u8 {
         const f = self.current() orelse return "";
-        const li = self.rows.lineAt(row) orelse return "";
+        const li = self.lineAt(row) orelse return "";
         if (li >= f.lines.len()) return "";
         return f.lines.text[li];
     }
@@ -2654,7 +2933,7 @@ pub const App = struct {
         var row = self.cursor;
         while (if (forward) row < last else row > 0) {
             row = if (forward) row + 1 else row - 1;
-            if (self.rows.lineAt(row) == null) continue;
+            if (self.lineAt(row) == null) continue;
             const next = self.textOfRow(row);
             self.cursor = row;
             self.setCol(if (forward) motion.firstNonBlank(next) else motion.lastWordStart(next, width));
@@ -2672,7 +2951,7 @@ pub const App = struct {
         var row = self.cursor;
         while (row < last) {
             row += 1;
-            if (self.rows.lineAt(row) == null) continue;
+            if (self.lineAt(row) == null) continue;
             const at = motion.firstWordEnd(self.textOfRow(row), width) orelse continue;
             self.cursor = row;
             self.setCol(at);
@@ -3381,7 +3660,7 @@ pub const App = struct {
         var i = start;
         while (i >= 0 and i < self.rows.len()) : (i += delta) {
             const row: u32 = @intCast(i);
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li < marks.len and marks[li]) return row;
         }
         return null;
@@ -3403,7 +3682,7 @@ pub const App = struct {
         var i = start;
         while (i >= 0 and i < self.rows.len()) : (i += delta) {
             const row: u32 = @intCast(i);
-            const li = self.rows.lineAt(row) orelse continue;
+            const li = self.lineAt(row) orelse continue;
             if (li < fresh.len and fresh[li]) return row;
         }
         return null;
@@ -3503,14 +3782,29 @@ pub const App = struct {
         // with what `body.zig` draws or the viewport drifts.
         if (row < self.rows.len()) {
             if (self.rows.items[row] == .note) return self.commentHeight(row, cap);
+            // A split row is as tall as its taller column, so the two stay
+            // aligned and neither is cut off at the divider.
+            if (self.rows.pairAt(row)) |p| {
+                const sp = rows_mod.Split.of(self.cols);
+                const col = rows_mod.gutter(f, .split);
+                return wrap_mod.pairHeight(
+                    if (p.left) |li| f.lines.text[li] else null,
+                    sp.left -| col,
+                    if (p.right) |li| f.lines.text[li] else null,
+                    sp.right_width -| col,
+                    self.width_method,
+                    cap,
+                );
+            }
         }
-        const li = self.rows.lineAt(row) orelse return 1;
+        const li = self.lineAt(row) orelse return 1;
         if (li >= f.lines.text.len) return 1;
         return wrap_mod.height(
             f.lines.text[li],
-            self.cols -| rows_mod.gutter(f),
+            self.cols -| rows_mod.gutter(f, .flow),
             self.width_method,
             cap,
+            .follow,
         );
     }
 
@@ -3525,7 +3819,7 @@ pub const App = struct {
         var rows: u16 = 0;
         var lines = std.mem.splitScalar(u8, marks[ni].body, '\n');
         while (lines.next()) |line| {
-            rows +|= wrap_mod.height(line, width, self.width_method, cap);
+            rows +|= wrap_mod.height(line, width, self.width_method, cap, .flush);
         }
         return @max(@min(rows, cap), 1);
     }
@@ -3635,6 +3929,57 @@ pub const App = struct {
         self.cursor_anim.place();
     }
 
+    /// Whether the reader has two columns, as far as the pane and the config
+    /// are concerned. A question and not a field because `auto` asks the pane,
+    /// which changes under a resize.
+    pub fn splitView(self: *const App) bool {
+        // The floor first, and it applies to a layout that was asked for as
+        // much as to one that was inferred. Below it there is no split to be
+        // had - only two columns too narrow to hold a line of code - and a
+        // reader who pressed `|` in a wide pane and then shrank it wants the
+        // view that still works, not the one they last named.
+        if (self.cols < rows_mod.min_split_width) return false;
+        return switch (self.layout) {
+            .flow => false,
+            .split => true,
+            .auto => self.cols >= self.split_min_width,
+        };
+    }
+
+    /// The same, once the file on screen has had its say.
+    ///
+    /// A file with no hunks is one being *read* rather than reviewed - a whole
+    /// file opened with `<Space>F`. Both of its sides are the same text, so
+    /// splitting would draw it twice and halve the code on screen to say
+    /// nothing.
+    fn effectiveSplit(self: *App) bool {
+        if (!self.splitView()) return false;
+        const f = self.current() orelse return false;
+        return f.hunks.len > 0;
+    }
+
+    /// Rebuilds the rows when the effective layout has changed, keeping the
+    /// reader where they were. The line under the cursor is the anchor, not
+    /// the row index: the two layouts number the same file differently, so a
+    /// preserved row number is a different line.
+    ///
+    /// The scroll offset follows the cursor rather than being carried on its
+    /// own, so the row the reader was looking at stays the same distance down
+    /// the pane instead of the viewport landing somewhere near it.
+    fn relayout(self: *App, body: u16) void {
+        if (self.effectiveSplit() == self.split) return;
+        const line = self.lineAt(self.cursor);
+        const offset = self.cursor -| self.scroll;
+        self.rebuildRows(.row) catch return;
+        if (line) |li| {
+            if (self.rows.rowForLine(li)) |r| self.cursor = r;
+        }
+        self.scroll = self.cursor -| offset;
+        self.clampCol();
+        self.clampScroll(body);
+        self.placeCursor();
+    }
+
     /// A position displaced by the animation: the row `up` screen rows above
     /// `from`, and how many of that row's screen rows are above the result.
     /// Negative `up` walks the other way.
@@ -3694,21 +4039,31 @@ pub const App = struct {
         var i = top.row;
         while (i < row) : (i += 1) y += self.rowHeight(i, body);
 
-        const gutter = rows_mod.gutter(f);
+        // Whichever column `lineAt` chose, and never outside it: a cursor
+        // standing in the other half would say the reader is pointing at a
+        // line they are not.
+        const half: ?rows_mod.Split.Column = if (self.rows.pairAt(row)) |p|
+            rows_mod.Split.of(self.cols).column(self.sideOn(p))
+        else
+            null;
+        const base: u16 = if (half) |h| h.at else 0;
+        const column: u16 = if (half) |h| h.width else self.cols;
+        const gutter = rows_mod.gutter(f, if (half == null) .flow else .split);
+
         // A hunk header or a rule has no line to find a column in, but the
         // cursor is still on it: `j` steps through chrome like any other row.
         // Parking it at the first text column keeps it visible and keeps it
         // moving - returning null here blinks it out for a frame and then
         // teleports it, which is what a held `j` looked like.
-        const li = self.rows.lineAt(row) orelse
+        const li = self.lineAt(row) orelse
             return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
         if (li >= f.lines.len()) return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
 
-        const avail = if (self.wrap) self.cols -| gutter else 0;
+        const avail = if (self.wrap) column -| gutter else 0;
         const cell = wrap_mod.locate(f.lines.text[li], avail, self.width_method, self.col);
         return .{
             .row = @floatFromInt(y + @as(i32, cell.row)),
-            .col = @floatFromInt(gutter + cell.col),
+            .col = @floatFromInt(base + @min(gutter + cell.col, column -| 1)),
         };
     }
 
@@ -3815,6 +4170,9 @@ pub const App = struct {
                 self.settleScroll();
                 self.placeCursor();
                 self.cols = size.cols;
+                // Before the clamp, because a `layout = "auto"` crossing its
+                // threshold changes how many rows there are to clamp against.
+                self.relayout(body);
                 self.clampScroll(body);
             },
             // The agent stopped writing, so this is a turn. Snapshotting here
@@ -4526,7 +4884,14 @@ test "the cursor travels for every motion, not only for a jump" {
     var guard: u32 = 0;
     while (fx.app.animating(body_rows) and guard < 200) : (guard += 1) fx.app.stepAnim(16, body_rows);
     try testing.expect(guard > 1);
-    try testing.expectEqual(fx.app.cursorCell(body_rows).?, fx.app.cursor_anim.at.?);
+    // Rounded, because that is the cell the renderer draws: the travel stops
+    // when it is within a fraction of the target rather than when the float
+    // lands on it exactly, so an exact comparison here was only ever passing
+    // for the distances that happened to divide evenly.
+    const want = fx.app.cursorCell(body_rows).?;
+    const got = fx.app.cursor_anim.at.?;
+    try testing.expectEqual(@round(want.row), @round(got.row));
+    try testing.expectEqual(@round(want.col), @round(got.col));
 }
 
 test "a row with no line still has a cell for the cursor to be on" {
@@ -4539,7 +4904,7 @@ test "a row with no line still has a cell for the cursor to be on" {
     fx.app.cursor = 0;
     const cell = fx.app.cursorCell(body_rows).?;
     try testing.expectEqual(@as(f32, 0), cell.row);
-    try testing.expectEqual(@as(f32, @floatFromInt(rows_mod.gutter(&fx.files[0]))), cell.col);
+    try testing.expectEqual(@as(f32, @floatFromInt(rows_mod.gutter(&fx.files[0], .flow))), cell.col);
 }
 
 test "the cursor keeps its place on screen while the text slides under it" {
@@ -4720,9 +5085,9 @@ test "a line wider than the pane is as many screen rows as it needs" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    // Rows: 0 header, 1..3 lines. The gutter is the sign, a space, a
+    // Rows: 0 header, 1..3 lines. The gutter is the sign, the mark's blank, a
     // two-digit number and two spaces.
-    try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0]));
+    try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0], .flow));
     fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
     fx.app.cols = 30;
 

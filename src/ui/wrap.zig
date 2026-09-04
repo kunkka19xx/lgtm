@@ -20,10 +20,22 @@ const vaxis = @import("vaxis");
 /// row measured here is the row vaxis draws (`Screen.width_method`).
 pub const Method = vaxis.gwidth.Method;
 
+/// Whether a continuation row starts under the line's own indentation or at
+/// the left edge of the text area.
+///
+/// `follow` is vim's `breakindent`, and it is for code: indentation there is
+/// structure, and a continuation thrown back to column zero reads as the start
+/// of a new statement. `flush` is for prose - a review note, the compose box -
+/// where leading spaces are whatever the writer happened to type.
+pub const Indent = enum { flush, follow };
+
 /// One screen row of a wrapped line, as a byte range of the line's text.
 pub const Chunk = struct {
     start: u32,
     end: u32,
+    /// Columns into the text area this row is drawn at: zero for the first,
+    /// the line's indent for the rest under `follow`.
+    col: u16 = 0,
 
     pub fn slice(self: Chunk, text: []const u8) []const u8 {
         return text[self.start..self.end];
@@ -40,20 +52,50 @@ pub const Iterator = struct {
     /// Every byte below 0x80, so a column is a byte and the grapheme walk can
     /// be skipped entirely. Overwhelmingly the common case for source.
     ascii: bool,
+    /// Columns a continuation row is indented by. Zero under `flush`, and
+    /// zero anyway for a line that starts at the left edge.
+    indent: u16 = 0,
     at: u32 = 0,
     done: bool = false,
 
-    pub fn init(text: []const u8, width: u16, method: Method) Iterator {
-        return .{
+    pub fn init(text: []const u8, width: u16, method: Method, indent: Indent) Iterator {
+        var it: Iterator = .{
             .text = text,
             .width = width,
             .method = method,
             .ascii = isAscii(text),
         };
+        if (indent == .follow) it.indent = it.leadingColumns();
+        return it;
+    }
+
+    /// Columns of leading whitespace, capped at a third of the width so a
+    /// deeply nested line still has most of the pane to wrap into.
+    ///
+    /// Measured with the same step the wrap itself uses, so a tab - which the
+    /// renderer draws as nothing - indents a continuation by nothing, and the
+    /// two cannot disagree. A line that is *nothing but* whitespace has no
+    /// continuation to indent.
+    fn leadingColumns(self: Iterator) u16 {
+        if (self.width == 0) return 0;
+        var col: u16 = 0;
+        var i: u32 = 0;
+        while (i < self.text.len and isSpace(self.text[i])) {
+            const step = self.stepAt(i);
+            col += step.cols;
+            i += step.len;
+        }
+        if (i >= self.text.len) return 0;
+        return @min(col, self.width / 3);
     }
 
     pub fn next(self: *Iterator) ?Chunk {
         if (self.done) return null;
+        // The first chunk is the one that has not consumed anything yet, and
+        // it is the only row drawn flush against the text area's own edge.
+        const first = self.at == 0;
+        const room = if (first) self.width else self.width -| self.indent;
+        const at_col: u16 = if (first) 0 else self.indent;
         var start = self.at;
         // A hard break can land on a space. Carrying it to the next row would
         // indent a continuation by a column that means nothing.
@@ -67,9 +109,9 @@ pub const Iterator = struct {
             // zero-row line would make the row model and the screen disagree.
             return if (start == 0) .{ .start = 0, .end = 0 } else null;
         }
-        if (self.width == 0) {
+        if (room == 0) {
             self.done = true;
-            return .{ .start = start, .end = @intCast(self.text.len) };
+            return .{ .start = start, .end = @intCast(self.text.len), .col = at_col };
         }
 
         var col: u16 = 0;
@@ -84,27 +126,27 @@ pub const Iterator = struct {
 
         while (i < self.text.len) {
             const step = self.stepAt(i);
-            if (col + step.cols > self.width) {
+            if (col + step.cols > room) {
                 // A space at the edge is the seam itself, not content that
                 // failed to fit: the row before it is full and ends there.
                 if (isSpace(self.text[i])) {
                     self.at = i + step.len;
                     // Mid-run, the row ended where the run began: trailing
                     // spaces belong to the seam too.
-                    return .{ .start = start, .end = if (prev_space) brk_end else i };
+                    return .{ .start = start, .end = if (prev_space) brk_end else i, .col = at_col };
                 }
                 if (have_brk) {
                     self.at = brk_next;
-                    return .{ .start = start, .end = brk_end };
+                    return .{ .start = start, .end = brk_end, .col = at_col };
                 }
                 // A single grapheme wider than the whole pane still has to be
                 // consumed, or this loops forever on a two-column window.
                 if (i == start) {
                     self.at = i + step.len;
-                    return .{ .start = start, .end = self.at };
+                    return .{ .start = start, .end = self.at, .col = at_col };
                 }
                 self.at = i;
-                return .{ .start = start, .end = i };
+                return .{ .start = start, .end = i, .col = at_col };
             }
 
             const space = isSpace(self.text[i]);
@@ -125,7 +167,7 @@ pub const Iterator = struct {
 
         self.at = i;
         self.done = true;
-        return .{ .start = start, .end = i };
+        return .{ .start = start, .end = i, .col = at_col };
     }
 
     const Step = struct { len: u32, cols: u16 };
@@ -154,7 +196,7 @@ pub const Iterator = struct {
 /// a character is not a character.
 pub fn fitFront(text: []const u8, cols: u16, method: Method) usize {
     if (cols == 0) return 0;
-    const it: Iterator = .init(text, cols, method);
+    const it: Iterator = .init(text, cols, method, .flush);
     var col: u16 = 0;
     var i: u32 = 0;
     while (i < text.len) {
@@ -176,7 +218,7 @@ pub fn fitBack(text: []const u8, cols: u16, method: Method) usize {
     const total = columns(text, method);
     if (total <= cols) return 0;
     const drop = total - cols;
-    const it: Iterator = .init(text, cols, method);
+    const it: Iterator = .init(text, cols, method, .flush);
     var col: u16 = 0;
     var i: u32 = 0;
     while (i < text.len) {
@@ -191,18 +233,38 @@ pub fn fitBack(text: []const u8, cols: u16, method: Method) usize {
 /// Screen rows `text` occupies in `width` columns, never more than `cap` and
 /// never fewer than one. The cap is the body height: nothing taller than the
 /// pane can be scrolled past, so counting further is work with no reader.
-pub fn height(text: []const u8, width: u16, method: Method, cap: u16) u16 {
+pub fn height(text: []const u8, width: u16, method: Method, cap: u16, indent: Indent) u16 {
     if (width == 0 or cap <= 1) return 1;
     // The line that fits, which is almost all of them.
     if (text.len <= width and isAscii(text)) return 1;
 
-    var it: Iterator = .init(text, width, method);
+    var it: Iterator = .init(text, width, method, indent);
     var n: u16 = 0;
     while (it.next()) |_| {
         n += 1;
         if (n >= cap) break;
     }
     return @max(n, 1);
+}
+
+/// Screen rows two texts drawn side by side occupy: the taller of them.
+///
+/// Both columns get the same number of rows so they stay aligned, with the
+/// shorter one leaving the rest blank - which is the whole reason a split view
+/// can wrap at all. An absent side is no rows, and a row with neither is still
+/// one, because the row model and the screen have to agree about where
+/// everything below it is.
+pub fn pairHeight(
+    left: ?[]const u8,
+    left_width: u16,
+    right: ?[]const u8,
+    right_width: u16,
+    method: Method,
+    cap: u16,
+) u16 {
+    const l = if (left) |t| height(t, left_width, method, cap, .follow) else 0;
+    const r = if (right) |t| height(t, right_width, method, cap, .follow) else 0;
+    return @max(@max(l, r), 1);
 }
 
 /// Where one byte offset of a line is drawn: which of the line's screen rows,
@@ -220,24 +282,24 @@ pub const Cell = struct {
 /// An offset inside a seam - a space the wrap dropped - belongs to the end of
 /// the row before it, which is where a cursor sitting on that space is drawn.
 pub fn locate(text: []const u8, width: u16, method: Method, offset: u32) Cell {
-    var it: Iterator = .init(text, width, method);
+    var it: Iterator = .init(text, width, method, .follow);
     var row: u16 = 0;
     var prev: Chunk = .{ .start = 0, .end = 0 };
     while (it.next()) |chunk| {
         // Skipped over: the offset is a space this row dropped, so it is drawn
         // at the end of the row before it.
         if (offset < chunk.start) {
-            return .{ .row = row -| 1, .col = columns(prev.slice(text), method) };
+            return .{ .row = row -| 1, .col = prev.col + columns(prev.slice(text), method) };
         }
         if (offset < chunk.end) {
-            return .{ .row = row, .col = columns(text[chunk.start..offset], method) };
+            return .{ .row = row, .col = chunk.col + columns(text[chunk.start..offset], method) };
         }
         prev = chunk;
         row += 1;
     }
     // Past the last byte: the cell just after the final row's text, which is
     // where an offset at the end of the line belongs.
-    return .{ .row = row -| 1, .col = columns(prev.slice(text), method) };
+    return .{ .row = row -| 1, .col = prev.col + columns(prev.slice(text), method) };
 }
 
 /// Display columns of a run of text, with the same ASCII shortcut the wrap
@@ -266,9 +328,102 @@ fn isAscii(text: []const u8) bool {
 
 const testing = std.testing;
 
+test "a continuation row starts under the line's own indentation" {
+    const gpa = testing.allocator;
+    const line = "    const value = compute(a, b, c, d, e, f, g, h);";
+
+    const got = try chunksIn(gpa, line, 24, .follow);
+    defer gpa.free(got);
+    try testing.expect(got.len > 1);
+
+    // The first row is flush against the text area; every row after it sits
+    // under the four spaces the line opened with.
+    try testing.expectEqual(@as(u16, 0), got[0].col);
+    for (got[1..]) |c| try testing.expectEqual(@as(u16, 4), c.col);
+
+    // And it is a real indent, not a label: the continuation rows have four
+    // columns less to wrap into, so there are more of them than flush would
+    // have produced.
+    const flat = try chunksIn(gpa, line, 24, .flush);
+    defer gpa.free(flat);
+    for (flat) |c| try testing.expectEqual(@as(u16, 0), c.col);
+    try testing.expect(got.len >= flat.len);
+    try testing.expectEqual(got.len, height(line, 24, .unicode, 40, .follow));
+}
+
+test "the indent is capped, and costs nothing where it means nothing" {
+    const gpa = testing.allocator;
+
+    // A deeply nested line keeps two thirds of the pane: an indent that ate
+    // the width would wrap the code into a column and read worse than the
+    // flush rows it was meant to improve on.
+    const deep = "                              x = one(two, three, four, five);";
+    const got = try chunksIn(gpa, deep, 30, .follow);
+    defer gpa.free(got);
+    try testing.expectEqual(@as(u16, 10), got[1].col);
+
+    // A line with no indent has no indent to follow.
+    const flat = try chunksIn(gpa, "aaaa bbbb cccc dddd eeee ffff", 10, .follow);
+    defer gpa.free(flat);
+    for (flat) |c| try testing.expectEqual(@as(u16, 0), c.col);
+
+    // A tab is drawn as nothing, so it indents a continuation by nothing -
+    // the wrap and the renderer have to agree about that or the rows drift.
+    const tabbed = try chunksIn(gpa, "\t\tcall(one, two, three, four, five);", 16, .follow);
+    defer gpa.free(tabbed);
+    for (tabbed) |c| try testing.expectEqual(@as(u16, 0), c.col);
+
+    // A line that is nothing but whitespace has no continuation at all.
+    const blank = try chunksIn(gpa, "        ", 10, .follow);
+    defer gpa.free(blank);
+    try testing.expectEqual(@as(usize, 1), blank.len);
+}
+
+test "the cursor lands on the indented column, not the one behind it" {
+    const line = "    value(a, b, c, d, e, f, g, h, i, j, k);";
+    const w: u16 = 20;
+
+    // The first byte of the second row: its column includes the indent the
+    // row is drawn at, or the cursor sits four columns left of its own text.
+    const gpa = testing.allocator;
+    const got = try chunksIn(gpa, line, w, .follow);
+    defer gpa.free(got);
+    try testing.expect(got.len > 1);
+
+    const cell = locate(line, w, .unicode, got[1].start);
+    try testing.expectEqual(@as(u16, 1), cell.row);
+    try testing.expectEqual(@as(u16, 4), cell.col);
+}
+
+test "a split row is as tall as its taller side" {
+    const m: Method = .unicode;
+    const short = "fn one() void {}";
+    const long = "const long = \"" ++ "y" ** 60 ++ "\";";
+
+    // Twenty columns: the short line fits, the long one does not, and the row
+    // takes the taller answer so the two columns stay aligned.
+    const tall = height(long, 20, m, 40, .follow);
+    try testing.expect(tall > 1);
+    try testing.expectEqual(tall, pairHeight(short, 20, long, 20, m, 40));
+    try testing.expectEqual(tall, pairHeight(long, 20, short, 20, m, 40));
+
+    // A side that is not there contributes no rows, and a row with neither
+    // side is still one row.
+    try testing.expectEqual(tall, pairHeight(null, 20, long, 20, m, 40));
+    try testing.expectEqual(@as(u16, 1), pairHeight(short, 20, null, 20, m, 40));
+    try testing.expectEqual(@as(u16, 1), pairHeight(null, 20, null, 20, m, 40));
+
+    // The cap is the body: nothing taller than the pane can be scrolled past.
+    try testing.expectEqual(@as(u16, 3), pairHeight(long, 20, long, 20, m, 3));
+}
+
 fn chunksOf(gpa: std.mem.Allocator, text: []const u8, width: u16) ![]Chunk {
+    return chunksIn(gpa, text, width, .flush);
+}
+
+fn chunksIn(gpa: std.mem.Allocator, text: []const u8, width: u16, indent: Indent) ![]Chunk {
     var out: std.ArrayList(Chunk) = .empty;
-    var it: Iterator = .init(text, width, .unicode);
+    var it: Iterator = .init(text, width, .unicode, indent);
     while (it.next()) |ch| try out.append(gpa, ch);
     return out.toOwnedSlice(gpa);
 }
@@ -287,7 +442,7 @@ test "a line that fits is one row" {
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("const x = 1;", got[0]);
-    try testing.expectEqual(@as(u16, 1), height("const x = 1;", 40, .unicode, 20));
+    try testing.expectEqual(@as(u16, 1), height("const x = 1;", 40, .unicode, 20, .flush));
 }
 
 test "wrapping breaks at the last space that fits and drops it" {
@@ -299,7 +454,7 @@ test "wrapping breaks at the last space that fits and drops it" {
     try testing.expectEqualStrings("the block is a", got[0]);
     try testing.expectEqualStrings("different", got[1]);
     try testing.expectEqualStrings("thing", got[2]);
-    try testing.expectEqual(@as(u16, 3), height("the block is a different thing", 14, .unicode, 20));
+    try testing.expectEqual(@as(u16, 3), height("the block is a different thing", 14, .unicode, 20, .flush));
 }
 
 test "a run of spaces is one seam, not an indent on the next row" {
@@ -358,7 +513,7 @@ test "an empty line is one row and terminates" {
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("", got[0]);
-    try testing.expectEqual(@as(u16, 1), height("", 20, .unicode, 20));
+    try testing.expectEqual(@as(u16, 1), height("", 20, .unicode, 20, .flush));
 }
 
 test "no room at all yields the line once rather than forever" {
@@ -366,7 +521,7 @@ test "no room at all yields the line once rather than forever" {
     const got = try rowsOf(gpa, "something", 0);
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
-    try testing.expectEqual(@as(u16, 1), height("something", 0, .unicode, 20));
+    try testing.expectEqual(@as(u16, 1), height("something", 0, .unicode, 20, .flush));
 }
 
 test "a wide glyph counts two columns and never stalls in a one-column pane" {
@@ -419,5 +574,5 @@ test "a wide glyph is measured in columns, not bytes" {
 test "the height cap stops counting rather than walking a generated line" {
     var buf: [4000]u8 = undefined;
     @memset(&buf, 'x');
-    try testing.expectEqual(@as(u16, 5), height(&buf, 40, .unicode, 5));
+    try testing.expectEqual(@as(u16, 5), height(&buf, 40, .unicode, 5, .flush));
 }

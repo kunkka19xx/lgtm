@@ -33,11 +33,71 @@ scrolloff = 3
 mark_on_submit = true
 ```
 
+## `[diff]`
+
+| Key | Default | |
+|---|---|---|
+| `layout` | `"auto"` | `"auto"`, `"flow"` or `"split"`. `flow` is the one-column diff; `split` is side by side. `auto` is responsive: side by side when the pane is wide enough, flow when it is not. `\|` or `-` switches views for the session, and switching beats `auto`. `"unified"` is accepted as a spelling of `"flow"` |
+| `highlight` | `"line"` | `"line"` washes the whole changed row; `"gutter"` keeps the colour in the sign and the line number and leaves the code to the syntax highlighting |
+| `split_min_width` | `100` | Below this many columns, `auto` reads flow. Each side needs a line number, a sign, a gutter and about forty columns of code, with a divider between them; under that, side by side wraps so hard it shows less than the flow view. Minimum 60, which is the floor below |
+
+```toml
+[diff]
+layout = "auto"
+highlight = "line"
+split_min_width = 100
+```
+
+The wash colours are mixed from the theme rather than written per theme: the
+hue a fifth of the way over the theme's own background, so a palette that
+publishes a green and a background already says what its diff green is. The
+default `terminal` palette is built from 256-colour indexes, which cannot be
+mixed with anything, so it takes three from the fixed colour cube instead -
+stronger than a mix, and deliberately so. Set `add_line`, `del_line` or
+`filler` under `[theme]` to override any of them. `filler` is the side of a
+split row that has no line on it: the shape of what was added or taken away,
+rather than a hole in the middle of it.
+
+`[ui] wrap` governs both views. A split row takes as many screen rows as its
+taller column needs, so the two sides stay aligned and neither is cut off at
+the divider; `zw` turns it off in the split view the same way it does in the
+flow view. Continuation rows follow the line's own indentation, capped at a
+third of the column so a deeply nested line still has most of it to wrap into;
+a review note wraps flush, because indentation in prose is whatever the writer
+happened to type. A file with no hunks - one opened whole with `<Space>F` - stays
+flow, because both of its sides would be the same text.
+
+**Below 60 columns there is no side by side at all**, whatever `layout` says
+and whatever `\|` was last pressed. That is a floor rather than a threshold:
+`split_min_width` is where `auto` stops *choosing* two columns, and 60 is where
+they stop being possible - a gutter of about five and twenty-four columns of
+code a side, plus the divider. Shrinking a pane past it falls back to flow and
+widening brings the split straight back, because the layout you asked for is
+suspended rather than forgotten.
+
+**The two views spend different gutters.** The flow view has the pane to
+itself and spends four columns: `+` or `-`, the column `]m`'s bar sits in, the
+number, and two after it - the first where a comment's dot goes, the second
+air the code reads better for.
+
+The split view has halved itself already and spends **one**: the number, and
+the single column between it and the code. That column is the separator, the
+comment's dot and the mark's bar at once, whichever the line has earned - and
+a comment wins it, because a comment is something you put there on purpose
+while `]m` will walk you to the mark anyway. The sign is gone because the
+number is green or red and the row is washed behind it; the air is gone
+because there is none to spare. The flow view keeps all four precisely because
+it can afford them, and because it is the one view a terminal without colour
+can still read.
+
+On an even-width pane the odd column goes to the new file, which is the side
+being reviewed.
+
 ## `[ui]`
 
 | Key | Default | |
 |---|---|---|
-| `wrap` | `true` | Soft wrap long lines. `zw` toggles it for the session |
+| `wrap` | `true` | Soft wrap long lines. `zw` toggles it for the session. A wrapped code line's continuation rows start under the line's own indentation, so a run-on reads as one statement rather than as the start of a new one |
 | `icons` | `"unicode"` | `"nerd"`, `"unicode"` or `"ascii"`. Only `nerd` has filetype icons; `ascii` exists for a terminal that would draw the rest as tofu |
 | `comments` | `"marker"` | `"marker"` is the gutter dot alone; `"inline"` folds the comment text under the line it belongs to |
 | `compose` | `"bottom"` | `"bottom"`, `"top"` or `"centre"` — where the compose box opens |
@@ -125,7 +185,7 @@ The slots:
 | Syntax | `text` `comment` `string` `number` `keyword` `type_name` `fn_name` `punct` |
 | Accents | `accent` `popup_border` |
 | Files | `file_plain` `file_added` `file_deleted` `file_modified` `file_renamed` `file_binary` |
-| Diff | `add_sign` `del_sign` `hunk_id` `line_no` `added_count` `removed_count` |
+| Diff | `add_sign` `del_sign` `add_line` `del_line` `filler` `hunk_id` `line_no` `added_count` `removed_count` |
 | Comments | `comment_open` `comment_sent` `comment_stale` |
 | The mark | `fresh` |
 | Chrome | `rule` `dim` `path` `hint` `notice` `prompt` `mode_badge` `turn_badge` |
@@ -180,7 +240,7 @@ way to check a spelling before committing it to a config file.
 **Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`
 `next_turn` `prev_turn` `turn_list` `restore_file` `undo_restore`
 
-**View** `toggle_zen` `toggle_wrap` `toggle_ignored` `expand_file`
+**View** `toggle_zen` `toggle_wrap` `toggle_split` `toggle_ignored` `expand_file`
 `collapse_file` `file_list` `file_browse` `help` `refresh` `open_editor`
 `visual_toggle` `visual_char_toggle` `visual_cancel` `command_line` `quit`
 

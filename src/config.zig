@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 
 const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
+const rows = @import("ui/rows.zig");
 const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
 const toml = @import("toml.zig");
@@ -56,6 +57,30 @@ pub const ComposeAt = enum { bottom, top, centre };
 /// `inline` draws the text under its line for readers who would rather have
 /// the remark in front of them than one keystroke away.
 pub const CommentStyle = enum { inline_, marker };
+
+/// `[diff] layout`. `auto` is responsive: side by side when the pane is wide
+/// enough for two readable columns, flow when it is not. The other two are the
+/// reader saying so themselves.
+///
+/// `flow` is the one-column diff every other tool calls unified, and
+/// `"unified"` is accepted for it: that is the name of the *format*, and
+/// someone will reach for it.
+pub const Layout = enum { auto, flow, split };
+
+/// `[diff] highlight`. How far a change's colour reaches: the gutter mark
+/// alone, or a wash over the whole row.
+pub const Highlight = enum { gutter, line };
+
+pub const Diff = struct {
+    layout: Layout = .auto,
+    highlight: Highlight = .line,
+    /// Below this many columns, `auto` reads flow. The number is the
+    /// arithmetic: each side needs a line number, a sign, a gutter and about
+    /// forty columns of code, and a divider sits between them. Under that,
+    /// side by side wraps so hard it shows less than the flow view it
+    /// replaced.
+    split_min_width: u16 = 100,
+};
 
 pub const Ui = struct {
     icons: Icons = .unicode,
@@ -104,6 +129,7 @@ pub const Nav = struct {
 pub const Config = struct {
     nav: Nav = .{},
     ui: Ui = .{},
+    diff: Diff = .{},
     /// The resolved theme: a bundled palette, then whatever slots the file
     /// overrode. Resolved here rather than carried as a name, so the app is
     /// handed styles and never has to know a theme could have failed to load.
@@ -137,7 +163,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, keys, theme, presets, review };
+const Section = enum { nav, ui, diff, keys, theme, presets, review };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -248,6 +274,35 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.nav.scrolloff = @intCast(n);
+                } else self.unknownKey(src, line, section, key);
+            },
+            .diff => {
+                if (std.mem.eql(u8, key, "layout")) {
+                    const t = self.wantString(src, line, key, value) orelse return;
+                    self.cfg.diff.layout = if (std.mem.eql(u8, t, "unified"))
+                        .flow
+                    else
+                        std.meta.stringToEnum(Layout, t) orelse {
+                            self.note(src, line, "diff.layout must be \"auto\", \"flow\" or \"split\", not \"{s}\"", .{t});
+                            return;
+                        };
+                } else if (std.mem.eql(u8, key, "highlight")) {
+                    const t = self.wantString(src, line, key, value) orelse return;
+                    self.cfg.diff.highlight = std.meta.stringToEnum(Highlight, t) orelse {
+                        self.note(src, line, "diff.highlight must be \"gutter\" or \"line\", not \"{s}\"", .{t});
+                        return;
+                    };
+                } else if (std.mem.eql(u8, key, "split_min_width")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    // The floor is `rows.min_split_width`, where two columns
+                    // stop holding a line of code at all: a threshold below it
+                    // could never be reached. Above 400 the setting has
+                    // stopped meaning anything, because no pane is that wide.
+                    if (n < rows.min_split_width or n > 400) {
+                        self.note(src, line, "diff.split_min_width must be between {d} and 400", .{rows.min_split_width});
+                        return;
+                    }
+                    self.cfg.diff.split_min_width = @intCast(n);
                 } else self.unknownKey(src, line, section, key);
             },
             .ui => {
@@ -968,6 +1023,44 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
     // line was trying to change.
     try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
     try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
+}
+
+test "diff.layout takes flow, split, and the format's own name for flow" {
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expectEqual(Layout.auto, d.cfg.diff.layout);
+    try testing.expectEqual(@as(u16, 100), d.cfg.diff.split_min_width);
+
+    var f = loadText(
+        \\[diff]
+        \\layout = "flow"
+        \\split_min_width = 120
+    );
+    defer f.deinit();
+    try testing.expectEqual(Layout.flow, f.cfg.diff.layout);
+    try testing.expectEqual(@as(u16, 120), f.cfg.diff.split_min_width);
+    try testing.expectEqual(@as(usize, 0), f.problems.items.len);
+
+    // "unified" is the name of the format and the name every other tool uses,
+    // so it reads as flow rather than as a typo.
+    var u = loadText(
+        \\[diff]
+        \\layout = "unified"
+    );
+    defer u.deinit();
+    try testing.expectEqual(Layout.flow, u.cfg.diff.layout);
+    try testing.expectEqual(@as(usize, 0), u.problems.items.len);
+
+    // A name that is neither costs that one key its value and nothing else.
+    var bad = loadText(
+        \\[diff]
+        \\layout = "sideways"
+        \\split_min_width = 9
+    );
+    defer bad.deinit();
+    try testing.expectEqual(Layout.auto, bad.cfg.diff.layout);
+    try testing.expectEqual(@as(u16, 100), bad.cfg.diff.split_min_width);
+    try testing.expectEqual(@as(usize, 2), bad.problems.items.len);
 }
 
 test "nav.mark_on_submit is on by default and can be turned off" {
