@@ -7,10 +7,14 @@
   outputs =
     { self, nixpkgs }:
     let
+      # No x86_64-darwin: nixpkgs 26.11 dropped it, and listing a system this
+      # flake's own nixpkgs refuses makes the flake fail to evaluate for it -
+      # `nix flake show` included. Intel Macs are still a supported target
+      # everywhere else; the release builds an x86_64-macos tarball and both
+      # install.sh and the Homebrew formula serve it.
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
@@ -73,7 +77,11 @@
           dontInstall = true;
           buildPhase = ''
             export ZIG_GLOBAL_CACHE_DIR="$out"
-            zig build --fetch
+            # `=all`, not the default `needed`: a lazy dependency is one that
+            # `needed` skips here and the real build then asks for, by which
+            # point there is no network. vaxis pulls uucode in exactly that
+            # way, so the default fetched a tree that could not be built from.
+            zig build --fetch=all
             # Zig writes a lock and timestamps into the cache; neither is
             # content and both would make the hash depend on when it ran.
             rm -rf "$out/tmp" "$out/h" 2>/dev/null || true
@@ -102,6 +110,11 @@
           buildInputs = [ pkgs.git ];
 
           dontConfigure = true;
+          # `dist` is already ReleaseSmall and stripped, and it is statically
+          # linked - so stripping it again is a no-op and patchelf has no
+          # `.dynamic` section to find, which it says at length.
+          dontStrip = true;
+          dontPatchELF = true;
 
           buildPhase = ''
             runHook preBuild
