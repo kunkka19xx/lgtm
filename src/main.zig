@@ -22,6 +22,7 @@ const usage =
     \\  --base <ref>     review against this ref instead of HEAD
     \\  --target <ref>   review this ref instead of the working tree (static)
     \\  --config <path>  read this file instead of the usual two
+    \\  --init           write a starter config and exit; --config picks where
     \\  --pane <id>      send here: a tmux pane (%3), a herdr pane (w1:p1),
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
@@ -61,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     var target: ?[]const u8 = null;
     var want_preview = false;
     var want_version = false;
+    var want_init = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
@@ -74,6 +76,8 @@ pub fn main(init: std.process.Init) !void {
             want_profile = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             want_once = true;
+        } else if (std.mem.eql(u8, arg, "--init")) {
+            want_init = true;
         } else if (std.mem.eql(u8, arg, "--theme-preview")) {
             want_preview = true;
         } else if (std.mem.eql(u8, arg, "--theme")) {
@@ -111,6 +115,12 @@ pub fn main(init: std.process.Init) !void {
             try w.flush();
             return;
         }
+    }
+
+    if (want_init) {
+        try writeStarter(gpa, io, init.environ_map, config_path, w);
+        try w.flush();
+        return;
     }
 
     try w.flush();
@@ -167,6 +177,40 @@ pub fn main(init: std.process.Init) !void {
 
     if (want_profile) try metrics.report(w);
     try w.flush();
+}
+
+/// `--init`. Writes the starter config to `--config <path>` if one was named,
+/// and to the global path otherwise.
+///
+/// Never overwrites. A config file is a thing the user wrote by hand, and the
+/// one command that would destroy it is the one they reach for when they are
+/// not sure whether they have one yet.
+fn writeStarter(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    environ: *const std.process.Environ.Map,
+    explicit: ?[]const u8,
+    w: *std.Io.Writer,
+) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+
+    const path = explicit orelse config.globalPath(arena.allocator(), environ) orelse {
+        try w.print("lgtm: no HOME or XDG_CONFIG_HOME, so there is nowhere to put it\n" ++
+            "try: lgtm --init --config <path>\n", .{});
+        return;
+    };
+
+    if (lib.fs.fileExists(io, path)) {
+        try w.print("lgtm: {s} already exists, leaving it alone\n", .{path});
+        return;
+    }
+
+    lib.fs.writeFile(io, path, config.starter) catch |err| {
+        try w.print("lgtm: cannot write {s}: {t}\n", .{ path, err });
+        return;
+    };
+    try w.print("wrote {s}\n\nEvery line is commented out, so nothing changed yet.\n", .{path});
 }
 
 test {

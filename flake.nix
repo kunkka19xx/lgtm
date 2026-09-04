@@ -21,7 +21,7 @@
       # Kept in step with build.zig.zon's `.version`, which is what the binary
       # itself prints. Nix cannot read a .zon at evaluation time, so this is the
       # one place the number is repeated - bump both together.
-      lgtmVersion = "0.0.0";
+      lgtmVersion = "0.1.0";
 
       # git and a bridge backend (tmux, wezterm or kitty) are runtime
       # dependencies, but they are assumed to be on the host already - mkShell

@@ -64,3 +64,83 @@ jobs:
           size=$(stat -c%s zig-out/bin/lgtm 2>/dev/null || stat -f%z zig-out/bin/lgtm)
           echo "stripped ReleaseSmall: $size bytes ($((size * 100 / 1048576))% of 1 MB)"
           test "$size" -lt 1048576
+
+  # The AUR rejects a push whose .SRCINFO disagrees with its PKGBUILD, and that
+  # rejection arrives at release time, on a machine most of us do not have. It
+  # is a pure function of the PKGBUILD, so regenerating it and diffing is the
+  # whole check. The runner is x86_64, so the official image is native here and
+  # none of the emulation trouble from a local arm64 run applies.
+  packaging:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      # pacman's own sandbox needs seccomp permissions the container does not
+      # have, and without this every database sync fails.
+      - name: pacman
+        run: pacman -Sy --noconfirm --disable-sandbox git
+
+      - uses: actions/checkout@v7
+
+      - name: .SRCINFO matches its PKGBUILD
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          # makepkg refuses to run as root: a PKGBUILD is arbitrary code.
+          useradd -m build
+          chown -R build packaging/aur
+          for p in lgtm-bin lgtm-git; do
+            su build -c "cd packaging/aur/$p && makepkg --printsrcinfo > .SRCINFO"
+          done
+          git diff --exit-code -- packaging/aur || {
+            echo "::error::.SRCINFO is stale - run 'make -C packaging/aur srcinfo'"
+            exit 1
+          }
+
+  # Six files repeat a version, because none of them can read a .zon: the
+  # comment in each says "bump them together", which is a thing to remember
+  # rather than a thing that is checked. This is the check. It is here rather
+  # than in the release workflow because a mismatch found at tag time is found
+  # after the tag exists.
+  versions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: one version, and one zig
+        run: |
+          zon=$(sed -n 's/^ *\.version = "\(.*\)",$/\1/p' build.zig.zon)
+          nix=$(sed -n 's/^ *lgtmVersion = "\(.*\)";$/\1/p' flake.nix)
+          echo "build.zig.zon $zon / flake.nix $nix"
+          test "$zon" = "$nix" || { echo "::error::flake.nix lgtmVersion is stale"; exit 1; }
+
+          pinned=$(cat .zigversion)
+          min=$(sed -n 's/^ *\.minimum_zig_version = "\(.*\)",$/\1/p' build.zig.zon)
+          flake=$(sed -n 's/^ *zigVersion = "\(.*\)";$/\1/p' flake.nix)
+          ci=$(sed -n 's/^ *version: \(0\..*\)$/\1/p' .github/workflows/ci.yml | head -1)
+          rel=$(sed -n 's/^ *version: \(0\..*\)$/\1/p' .github/workflows/release.yml | head -1)
+          # The AUR package spells its pin as a floor, `zig>=X`. The floor is
+          # still meant to be the pinned version, so it is compared as one.
+          aur=$(sed -n "s/^makedepends=.*zig>=\\([0-9.]*\\).*/\\1/p" packaging/aur/lgtm-git/PKGBUILD)
+          echo ".zigversion $pinned / zon $min / flake $flake / ci $ci / release $rel / aur $aur"
+          for v in "$min" "$flake" "$ci" "$rel" "$aur"; do
+            test "$pinned" = "$v" || {
+              echo "::error::the pinned zig version disagrees across these files"; exit 1; }
+          done
+
+  # The flake ships a package, not just a dev shell, so `nix run
+  # github:kunkka19xx/lgtm` is an advertised install path and has to be one
+  # that works. It cannot be checked by reading: zigDeps is a fixed-output
+  # derivation whose hash is filled in by hand, and a wrong one fails only when
+  # something actually builds. This is that something.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: "experimental-features = nix-command flakes"
+
+      - name: nix build
+        run: nix build --print-build-logs .#lgtm
+
+      - name: the binary it produced runs
+        run: ./result/bin/lgtm --version

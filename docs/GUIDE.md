@@ -23,6 +23,29 @@ scripts/install.sh --dir /opt/bin
 scripts/install.sh --uninstall
 ```
 
+On macOS, from the tap:
+
+```sh
+brew install kunkka19xx/tap/lgtm
+```
+
+On Arch, from the AUR — with whichever helper you use, or none:
+
+```sh
+paru -S lgtm-bin     # or: yay -S lgtm-bin
+git clone https://aur.archlinux.org/lgtm-bin.git && cd lgtm-bin && makepkg -si
+```
+
+`lgtm-bin` is the release binary and needs no toolchain. `lgtm-git` builds
+`main` instead and needs `zig`, which is in `extra` for both architectures.
+
+With Nix, the flake exposes the binary as a package:
+
+```sh
+nix run github:kunkka19xx/lgtm
+nix profile install github:kunkka19xx/lgtm
+```
+
 No Windows build: `io/input.zig` and `io/tty.zig` are POSIX throughout, so that
 needs a port rather than a manifest.
 
@@ -53,6 +76,21 @@ lgtm             # in any git repository
 
 In a directory that is not a repository, `lgtm` starts, says so, and lets you
 quit or talk to the agent. It never fails to start.
+
+### Configuring it
+
+There is nothing to configure to start: `lgtm` writes no config file and runs
+on compiled-in defaults. When you want to change one:
+
+```sh
+lgtm --init                              # ~/.config/lgtm/config.toml
+lgtm --init --config .lgtm/config.toml   # this repository's, meant to be committed
+```
+
+Every line in the file it writes is commented out and shows the default, so it
+changes nothing until you uncomment something — and a default improved in a
+later release still reaches you. `--init` never overwrites a file that is
+already there. [CONFIG.md](CONFIG.md) is the full reference.
 
 ---
 

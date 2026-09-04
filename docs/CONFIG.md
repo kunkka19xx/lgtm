@@ -7,6 +7,11 @@ Two files, merged key by key:
 .lgtm/config.toml              this repository's
 ```
 
+`lgtm --init` writes the first of these, and `lgtm --init --config
+.lgtm/config.toml` the second. Every line in what it writes is commented out
+and shows the default, so the file changes nothing until you uncomment
+something; it never overwrites a file that already exists.
+
 The repository's wins where they disagree. `.lgtm/` is ignored by the
 `.gitignore` `lgtm` writes there, except `config.toml` — so a project can commit
 its own settings without committing anyone's session state.

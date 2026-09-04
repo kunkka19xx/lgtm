@@ -49,6 +49,10 @@ macOS and Linux, arm64 and x86_64. No sudo: one static binary goes in
 same release, leaves a copy installed by anything else alone, and takes
 `--uninstall`.
 
+On macOS: `brew install kunkka19xx/tap/lgtm`. On Arch, from the AUR:
+`lgtm-bin` (the release binary) or `lgtm-git` (builds `main`), with any helper
+or `makepkg -si` from a clone. With Nix, `nix run github:kunkka19xx/lgtm`.
+
 Or build it, which needs [Zig](https://ziglang.org) (version pinned in
 `.zigversion`):
 
@@ -59,6 +63,9 @@ make clean-local    # remove it, restoring whatever it displaced
 
 You also need `git`. `tmux` is optional: without it, references go to the
 clipboard over OSC 52, which works over SSH.
+
+There is no config file to write: `lgtm` runs on defaults. `lgtm --init` writes
+a commented starter when you want to change one.
 
 ## The loop
 

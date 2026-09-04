@@ -699,6 +699,77 @@ pub fn globalPath(arena: Allocator, environ: *const std.process.Environ.Map) ?[]
     return std.fs.path.join(arena, &.{ home, ".config", "lgtm", "config.toml" }) catch null;
 }
 
+/// What `--init` writes.
+///
+/// Every line is commented out and shows the value it already has. Two reasons
+/// it is shaped that way rather than as a working file: a starter that sets
+/// keys freezes today's defaults into the user's file, so a default improved
+/// later never reaches the person who ran `--init` once; and a file that
+/// changes nothing is one a reader can uncomment a line at a time without
+/// first working out which lines were opinions.
+///
+/// Kept beside the defaults it quotes, so the two are edited in one place.
+pub const starter =
+    \\# lgtm - https://github.com/kunkka19xx/lgtm
+    \\#
+    \\# Every line below is commented out and shows the default. Uncomment only
+    \\# what you want to change; anything left alone follows lgtm's default,
+    \\# including when that default changes.
+    \\#
+    \\# This is the global file. A repository can carry its own settings in
+    \\# .lgtm/config.toml, which wins key by key and is meant to be committed -
+    \\# `lgtm --init --config .lgtm/config.toml` writes one there.
+    \\
+    \\# [nav]
+    \\# hunk_crosses_files = true  # ]h carries on into the next file
+    \\# scrolloff = 3             # rows kept between the cursor and the edge
+    \\# mark_on_submit = true     # <C-s> takes the mark as well as sending
+    \\
+    \\# [diff]
+    \\# layout = "auto"           # "auto", "flow" (one column), or "split"
+    \\# highlight = "line"        # "line" washes the row, "gutter" the sign
+    \\# split_min_width = 100     # under this many columns, "auto" reads flow
+    \\
+    \\# [ui]
+    \\# icons = "unicode"         # "unicode", "ascii", or "nerd" (patched font)
+    \\# comments = "marker"       # "marker" is the gutter dot, "inline" the text
+    \\# compose = "bottom"        # "bottom", "top", or "centre"
+    \\# wrap = true               # soft wrap; zw toggles it for the session
+    \\# scroll_ms = 250           # how long a jump travels; 0 is instant
+    \\# cursor_ms = 80            # the same for the cursor
+    \\
+    \\# [snapshot]
+    \\# keep = 36                 # turns kept before the oldest are pruned
+    \\
+    \\# [theme]
+    \\# name = "terminal"         # or catppuccin, tokyo-night, gruvbox,
+    \\#                           # dracula, rose-pine, kanagawa
+    \\# Any slot can be set on top of the palette:
+    \\# add_sign = "#00ff00 bold"
+    \\
+    \\# [review]
+    \\# Git pathspecs kept off the screen, for generated files that are tracked
+    \\# on purpose. The count stays on the status line and zi reveals them.
+    \\# ignore = ["package-lock.json", "dist/**"]
+    \\
+    \\# [presets]
+    \\# Questions the compose box inserts at the caret, on <C-i> and <Space>a.
+    \\# why  = "why this approach?"
+    \\# perf = "is this hot path allocating?"
+    \\# test = "add a test covering this"
+    \\
+    \\# [keys]
+    \\# Command name to key sequences, spelled the way ? prints them. An entry
+    \\# replaces the defaults for that command rather than adding to them.
+    \\# next_hunk = ["]h", "<Space>nh"]
+    \\
+    \\# [templates]
+    \\# Every sentence lgtm sends the agent, as data. Override one and the
+    \\# other twelve keep their defaults.
+    \\# ref_single = "look at {path} line {line}"
+    \\
+;
+
 /// Global then repo, merged in that order. `explicit` is `--config <path>`,
 /// which replaces both: a user asking for one file means that file, and a
 /// missing one is then worth reporting.
@@ -1200,4 +1271,37 @@ test "nav.mark_on_submit is on by default and can be turned off" {
     var d = loadText("");
     defer d.deinit();
     try testing.expect(d.cfg.nav.mark_on_submit);
+}
+
+test "every setting the starter names is a setting that exists" {
+    // The starter ships commented out, which is what makes it safe and also
+    // what would let it rot: a key renamed here goes on reading fine in a file
+    // nothing parses. So parse it - uncomment the lines that are settings
+    // rather than prose, and require the loader to find nothing wrong.
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+
+    var lines = std.mem.splitScalar(u8, starter, '\n');
+    while (lines.next()) |line| {
+        const bare = std.mem.trim(u8, line, " \t\r");
+        if (!std.mem.startsWith(u8, bare, "# ")) continue;
+        const body = bare[2..];
+        // A setting is `[section]` or `key = value`; everything else is prose.
+        const is_section = std.mem.startsWith(u8, body, "[");
+        const is_pair = std.mem.indexOfScalar(u8, body, '=') != null and
+            body.len > 0 and (std.ascii.isAlphabetic(body[0]) or body[0] == '"');
+        if (!is_section and !is_pair) continue;
+        try text.appendSlice(testing.allocator, body);
+        try text.append(testing.allocator, '\n');
+    }
+
+    var l = loadText(text.items);
+    defer l.deinit();
+
+    for (l.problems.items) |p| std.debug.print("starter: {s}\n", .{p.text});
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+
+    // And it is not passing by having matched nothing.
+    try testing.expect(std.mem.indexOf(u8, text.items, "scrolloff") != null);
+    try testing.expect(std.mem.indexOf(u8, text.items, "[theme]") != null);
 }
