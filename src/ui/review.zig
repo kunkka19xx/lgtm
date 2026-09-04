@@ -69,6 +69,11 @@ pub const Review = struct {
     /// How many changed files the patterns kept out, so the status line can
     /// say so. Nothing is ever hidden silently.
     hidden: u32 = 0,
+    /// There is no repository here. Held rather than returned, because it is
+    /// not a failure to report once and forget: the pane stays open on an
+    /// empty review, and the reader has to be told why every frame rather than
+    /// left looking at a wordmark wondering what happened.
+    no_repo: bool = false,
 
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
@@ -176,8 +181,20 @@ pub const Review = struct {
 
         const git_span = metrics.span(.git_subprocess);
         const skip: []const []const u8 = if (self.show_ignored) &.{} else self.ignore;
-        const parsed = try git.diffPathsIn(arena, self.io, null, &.{}, skip);
+        // Not a repository is a state to sit in, not an error to die from. The
+        // review is empty, the splash draws, and `?`, `:q` and the compose box
+        // all still work - which is the same shape as a clean tree, and for
+        // the same reason: a pane that crashed is a pane that cannot tell you
+        // what went wrong.
+        const parsed = git.diffPathsIn(arena, self.io, null, &.{}, skip) catch |err| switch (err) {
+            error.NotARepository => {
+                self.no_repo = true;
+                return 0;
+            },
+            else => return err,
+        };
         git_span.end();
+        self.no_repo = false;
         self.parsed = parsed;
 
         // What the patterns kept out, counted rather than assumed - which is

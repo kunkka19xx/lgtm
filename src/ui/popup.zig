@@ -627,9 +627,18 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         const more = try std.fmt.allocPrint(f.arena, "+{d} more", .{box.hidden});
         f.put(list_top + @as(u16, @intCast(box.per)), text_col, more, f.theme.dim);
     }
-    if (entries.len == 0) {
-        f.put(list_top, text_col, "no file matches", f.theme.dim);
-    }
+    if (entries.len == 0) f.put(list_top, text_col, emptyWhy(v.query), f.theme.dim);
+}
+
+/// What an empty list says, and why it is two sentences rather than one.
+///
+/// "no file matches" is about a filter. Blaming one that was never typed sends
+/// the reader looking for text they did not enter - which is what `<Space>F`
+/// did in a directory git knows nothing about. An empty list and a filter that
+/// excluded everything are different facts, and the same rule that keeps
+/// `+0 -0` off a file that did not change applies to them.
+pub fn emptyWhy(query: []const u8) []const u8 {
+    return if (query.len > 0) "no file matches" else "nothing to list";
 }
 
 /// Width of `+12 −4`, which the layout needs before anything is drawn.
@@ -932,3 +941,11 @@ const preset_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "<CR>", .desc = "insert" },
     .{ .keys = "<Esc>", .desc = "back" },
 };
+
+test "an empty list and a filtered-out one say different things" {
+    // Found by opening `<Space>F` in a directory git knows nothing about: the
+    // list was empty because there was nothing to list, and it blamed a filter
+    // nobody had typed.
+    try testing.expectEqualStrings("nothing to list", emptyWhy(""));
+    try testing.expectEqualStrings("no file matches", emptyWhy("zzz"));
+}

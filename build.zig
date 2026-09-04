@@ -166,6 +166,19 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_watch.addArgs(a);
     b.step("watch", "Watch a repository and print coalesced change events").dependOn(&run_watch.step);
 
+    // Takes a real snapshot and prints how to check it with stock git.
+    // `zig build snap -- [session] [turn] [message]`.
+    const snap_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/snap_demo.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    snap_mod.addImport("lgtm", lgtm_mod);
+    const snap_exe = b.addExecutable(.{ .name = "snap-demo", .root_module = snap_mod });
+    const run_snap = b.addRunArtifact(snap_exe);
+    if (b.args) |a| run_snap.addArgs(a);
+    b.step("snap", "Snapshot the working tree into refs/lgtm/ and say how to verify it").dependOn(&run_snap.step);
+
     // Points the lexer at a file and prints what it made of it, with timings.
     // `zig build lex -- <file> [line]`.
     const lex_mod = b.createModule(.{

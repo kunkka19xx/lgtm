@@ -357,5 +357,85 @@ footer rather than advertising a key nobody has. Checked with everything moved
 at once - `compose_presets` on `<C-p>`, `compose_mention` on `#`, `compose_cancel`
 on `<C-q>` - and the box, its footer and `?` all agreed.
 
+### 2026-09-04 - the snapshot store, step 1
+
+`snapshot/gitobj.zig`: git plumbing, argv in and object ids out, no policy and
+no UI. SNAPSHOTS.md 5.6 step 1.
+
+The design says the check that matters is made **from outside, with stock git**,
+and it was right to say so. Unit tests assert the argv - which subcommand, which
+flags, which ref namespace - and all ten passed while the code was still wrong
+in two ways that only a real repository could show.
+
+**`git read-tree --empty HEAD` is a contradiction.** `--empty` clears the index,
+`HEAD` fills it; together git refuses. The failure was swallowed by a `catch`
+that treated any read-tree failure as "repo with no commits, an empty index is
+fine", so every snapshot silently contained *only the changed files*. It looked
+like it worked. `git show <ref>:changed.zig` printed the file, because that file
+was one of the changed ones. A store that cannot restore an unchanged file is
+not a store, and nothing in the tool would ever have said so.
+
+**A double free on the failure path.** `errdefer r.deinit()` plus an explicit
+`r.deinit()` in the `exit_code != 0` branch. Only reachable when git fails,
+which no test did and the first real run did immediately.
+
+**And `.lgtm/` has to exist before git is handed a path inside it.** git creates
+the index file but not its directory, and says so as a `fatal:` about a lock
+file that names the wrong cause. `io/fs.zig` grew `ensureStateDir` - the same
+directory and the same self-ignore every other durable write already uses.
+
+Verified in a scratch repo with a staged change, an unstaged change and an
+untracked file, which is the state the hard boundaries are about:
+
+    status unchanged, .git/index untouched, HEAD did not move, no branch created
+    the snapshot holds the working-tree version, not the staged one
+    the tree is whole: HEAD's files plus the new ones, not just what changed
+
+**Asking "what about a project without git?" found two crashes that had nothing
+to do with snapshots.** In a directory that is not a repository, and in a
+repository with no commits yet, `git diff HEAD` fails, `GitFailed` propagated
+out of `main`, and lgtm printed a Zig stack trace and died. Both are hard rule
+8's territory even though neither is a config problem: a pane that crashed
+cannot tell you what went wrong.
+
+They want opposite answers, which is why one fix would have been wrong. **No
+repository** is the end of the road - the tool reads `git diff` for a living -
+so the review is empty and the wordmark screen says "not a git repository -
+nothing to review", with `?`, `:q` and the compose box all still working, the
+same as a clean tree. **No commits yet** is the opposite: everything is new.
+`--cached` diffs against the empty tree where `HEAD` will not resolve, the
+untracked scan already covers the rest, and lgtm now shows a freshly scaffolded
+project in full. That is the state a project is in right after an agent creates
+it, which is exactly when losing the work would hurt most - and snapshots work
+there too, because `commit-tree` with no parent is a perfectly good first turn.
+
+The extra `rev-parse --git-dir` that tells the two apart runs only after a diff
+has already failed, so the ordinary path pays nothing for it.
+
+The empty screen then grew two lines, and the second one is the interesting
+decision. "Run `git init`" is the obvious hint and it is wrong on its own:
+being in the wrong directory is a likelier reason to be reading that screen than
+having meant to review an uninitialised one, and someone who mistyped a `cd`
+would follow the advice and leave a repository behind in their downloads folder.
+So the screen shows **the directory** first, elided from the head so the last
+component survives, and then offers both readings - `cd to a repository, or git
+init here`. The path is what settles which applies, and it settles it without
+the tool having guessed.
+
+Both lines are counted in the row budget `place()` gets, so a pane too short to
+hold them drops the wordmark rather than drawing over its own byline. On a pane
+too small for any of it, the one line that survives is what is wrong, not the
+help - checked at 80x13, 60x20 and 40x8.
+
+Also fixed while in there: `<Space>F` in a non-repo said "no file matches" with
+no filter typed, blaming a filter nobody had entered. `nothing to list` and `no
+file matches` are different facts, and `popup.emptyWhy` is now a pure function
+that says which.
+
+The harness that runs it is `zig build snap`. It asserts nothing on purpose - a
+harness checking the code that wrote it would be testing agreement rather than
+correctness - it takes a snapshot and prints the four git commands to check it
+with.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

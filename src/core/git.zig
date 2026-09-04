@@ -17,7 +17,25 @@ pub const diff = @import("diff.zig");
 /// than allowed to exhaust memory.
 pub const max_diff_bytes = 64 << 20;
 
-pub const Error = proc.RunError || diff.ParseError || error{GitFailed};
+pub const Error = proc.RunError || diff.ParseError || error{ GitFailed, NotARepository };
+
+/// Whether there is a repository here at all.
+///
+/// Asked only when a diff has already failed, so the ordinary run never pays
+/// for it. Distinguishing "no repository" from "no commits yet" matters because
+/// they want opposite answers: the first has nothing this tool can ever show,
+/// the second has everything, all of it new.
+fn insideRepo(gpa: Allocator, io: std.Io, repo: ?[]const u8) bool {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    argv.append(gpa, "git") catch return false;
+    if (repo) |r| argv.appendSlice(gpa, &.{ "-C", r }) catch return false;
+    argv.appendSlice(gpa, &.{ "rev-parse", "--git-dir" }) catch return false;
+
+    const out = proc.run(gpa, io, argv.items, 1 << 12) catch return false;
+    defer out.deinit(gpa);
+    return out.exit_code == 0;
+}
 
 /// Diffs the working tree against HEAD, staged and unstaged both.
 ///
@@ -53,14 +71,26 @@ pub fn diffPathsIn(
     paths: []const []const u8,
     ignore: []const []const u8,
 ) Error!Parsed {
+    return diffBase(gpa, io, repo, paths, ignore, "HEAD");
+}
+
+fn diffBase(
+    gpa: Allocator,
+    io: std.Io,
+    repo: ?[]const u8,
+    paths: []const []const u8,
+    ignore: []const []const u8,
+    base: []const u8,
+) Error!Parsed {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
 
     try argv.append(gpa, "git");
     if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+    // `HEAD` normally, `--cached` in a repository whose first commit has not
+    // happened yet - see the retry below.
+    try argv.appendSlice(gpa, &.{ "diff", base });
     try argv.appendSlice(gpa, &.{
-        "diff",
-        "HEAD",
         // Stable output regardless of the user's config.
         "--no-color",
         "--no-ext-diff",
@@ -82,8 +112,28 @@ pub fn diffPathsIn(
     errdefer out.deinit(gpa);
 
     // git diff exits 0 with no changes and 1 only when --exit-code is set, so
-    // any non-zero status here is a real failure.
-    if (out.exit_code != 0) return error.GitFailed;
+    // any non-zero status here is a real failure - and there are two of them,
+    // which used to be one crash.
+    //
+    // No repository at all is the end of the road: this tool is a reader of
+    // `git diff` and there is nothing for it to read. It is still not an error
+    // worth dying on (hard rule 8's spirit, and SNAPSHOTS.md 3.1 rule 6), so it
+    // is named rather than lumped in with a real failure, and the caller shows
+    // an empty review that says why.
+    //
+    // A repository whose first commit has not happened yet is the opposite:
+    // everything in it is new, which is exactly what a reader wants to see when
+    // an agent has just scaffolded a project. `HEAD` does not resolve, but
+    // `--cached` diffs against the empty tree, and `untracked` below already
+    // synthesises the rest. So the answer is a retry, not a refusal.
+    if (out.exit_code != 0) {
+        if (!insideRepo(gpa, io, repo)) return error.NotARepository;
+        if (std.mem.eql(u8, base, "HEAD")) {
+            out.deinit(gpa);
+            return diffBase(gpa, io, repo, paths, ignore, "--cached");
+        }
+        return error.GitFailed;
+    }
 
     var parsed = try diff.parse(gpa, out.stdout);
     errdefer parsed.deinit(gpa);

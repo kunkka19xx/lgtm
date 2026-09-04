@@ -25,6 +25,7 @@ const build_options = @import("build_options");
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
 const keymap = @import("keymap.zig");
+const path_mod = @import("path.zig");
 const theme_mod = @import("theme.zig");
 const keytext = @import("keytext.zig");
 const preview = @import("preview.zig");
@@ -80,7 +81,31 @@ pub fn place(win_w: u16, win_h: u16, art_w: u16, art_h: u16, extra: u16) ?Place 
     return .{ .top = (win_h - rows) / 2, .left = (win_w - art_w) / 2 };
 }
 
-pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
+/// What the empty screen is empty *for*. A clean tree and a directory that is
+/// not a repository both draw nothing, and they are not the same thing to be
+/// looking at: one means the agent has not written yet, the other means it
+/// never will here.
+pub const clean = "no changes against HEAD";
+pub const no_repo = "not a git repository";
+
+/// What to do about it, and deliberately not just "run git init".
+///
+/// Being in the wrong directory is the likelier reason to be reading this than
+/// having meant to review an uninitialised one, and telling someone to `git
+/// init` in the directory they landed in by accident is advice that leaves a
+/// repository behind in it. The line offers both readings and presumes
+/// neither; the path above it is what settles which one applies.
+pub const no_repo_hint = "cd to a repository, or git init here";
+
+pub fn draw(
+    f: Frame,
+    bindings: []const keymap.Binding,
+    state: []const u8,
+    /// Where the reader is, when saying so helps. Null on a clean tree, where
+    /// the directory is not in question and a path would be noise.
+    where: ?[]const u8,
+    hint: ?[]const u8,
+) Allocator.Error!void {
     const art = f.glyphs.wordmark;
 
     // Display width, never byte length: the block-element rows are three
@@ -92,8 +117,15 @@ pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
     // all: half of it clipped at the edge reads as a different claim.
     const tag = f.win.gwidth(tagline) <= f.width();
 
-    const at = place(f.width(), f.win.height, art_w, @intCast(art.len), @intFromBool(tag)) orelse {
-        f.put(0, 0, " lgtm: no changes against HEAD", f.theme.dim);
+    // The extra rows the two optional lines need, so a short pane drops the
+    // wordmark rather than drawing over its own byline.
+    const extra: u16 = @intFromBool(tag) +
+        @as(u16, @intFromBool(where != null)) + @as(u16, @intFromBool(hint != null));
+    const at = place(f.width(), f.win.height, art_w, @intCast(art.len), extra) orelse {
+        // One line is all there is room for, so it is the one that says what
+        // is wrong. The path and the hint are help, and help is what a pane
+        // this small has no room for.
+        f.put(0, 0, try std.fmt.allocPrint(f.arena, " lgtm: {s}", .{state}), f.theme.dim);
         return;
     };
 
@@ -118,7 +150,20 @@ pub fn draw(f: Frame, bindings: []const keymap.Binding) Allocator.Error!void {
     f.putLink(row, col + lead_w, author, f.theme.accent, author_url);
 
     row += 2;
-    _ = try centre(f, row, f.theme.text, "no changes against HEAD", .{});
+    _ = try centre(f, row, f.theme.text, "{s}", .{state});
+
+    // The directory, elided from the head so the last component survives -
+    // which is the part that answers "am I where I meant to be" (`ui/path.zig`
+    // makes the same argument for the file list).
+    if (where) |dir| {
+        row += 1;
+        const shown = try path_mod.elide(f.arena, dir, f.width() -| 4, f.glyphs.ellipsis, f.method());
+        _ = try centre(f, row, f.theme.dim, "{s}", .{shown});
+    }
+    if (hint) |h| {
+        row += 1;
+        _ = try centre(f, row, f.theme.dim, "{s}", .{h});
+    }
 
     // The key rather than a `?`: a remapped keymap has to document itself
     // (FEATURES.md 4.7), and this screen is the only place a reader who has
@@ -443,4 +488,38 @@ test "the ascii wordmark fits a pane the unicode one does not" {
     // only tofu-free, it is the one that still fits a narrow split.
     try testing.expect(place(30, 24, 40, 6, 0) == null);
     try testing.expect(place(30, 24, 26, 5, 0) != null);
+}
+
+test "the extra lines are budgeted, so a short pane drops the picture not the point" {
+    // `place` gets the row count including the optional lines. Passing the old
+    // fixed `extra` would have drawn the path and the hint over the byline on
+    // a pane one or two rows short of holding them.
+    const art_h: u16 = 6;
+    const art_w: u16 = 37;
+    const with_two = place(80, 20, art_w, art_h, 3);
+    const with_none = place(80, 20, art_w, art_h, 1);
+    try testing.expect(with_two != null and with_none != null);
+    // The block starts higher when it is taller, and there is a height where
+    // the taller one no longer fits and the shorter one still does.
+    try testing.expect(with_two.?.top < with_none.?.top);
+    try testing.expect(place(80, 13, art_w, art_h, 3) == null);
+    try testing.expect(place(80, 13, art_w, art_h, 1) != null);
+}
+
+test "the empty screen says which kind of empty it is" {
+    // A clean tree and a directory with no repository both draw nothing, and
+    // telling them apart is the whole value of the line: one means the agent
+    // has not written yet, the other means it never will here. lgtm used to
+    // answer the second with a Zig stack trace.
+    try testing.expect(!std.mem.eql(u8, clean, no_repo));
+    try testing.expect(std.mem.indexOf(u8, no_repo, "git") != null);
+    // Both have to survive the one-line fallback on a pane too small for the
+    // wordmark, which prefixes them with " lgtm: ".
+    try testing.expect(clean.len + 8 < 80);
+    try testing.expect(no_repo.len + 8 < 80);
+    // The hint offers both readings rather than presuming the reader meant to
+    // initialise the directory they are standing in - which, told only to run
+    // `git init`, is what someone in the wrong directory would do.
+    try testing.expect(std.mem.indexOf(u8, no_repo_hint, "cd") != null);
+    try testing.expect(std.mem.indexOf(u8, no_repo_hint, "git init") != null);
 }

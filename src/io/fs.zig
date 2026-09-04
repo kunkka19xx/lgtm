@@ -77,12 +77,33 @@ const self_ignore =
 pub fn writeStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
     std.debug.assert(std.mem.startsWith(u8, path, state_dir ++ "/"));
 
+    try ensureStateDir(io);
+    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
+}
+
+/// The working directory, resolved, or null when it cannot be had.
+///
+/// For the one screen that has to say *where* the reader is: told there is no
+/// repository here, the first thing worth knowing is which "here" is meant.
+/// Being in the wrong directory is a likelier explanation than having meant to
+/// review an uninitialised one, and only the path can tell those apart.
+pub fn cwdPath(io: Io, buf: []u8) ?[]const u8 {
+    const n = Dir.cwd().realPathFile(io, ".", buf) catch return null;
+    return buf[0..n];
+}
+
+/// Creates `.lgtm/` and its self-ignore, without writing anything into it.
+///
+/// `writeStateFile` does this on the way to writing a file, which is enough for
+/// everything that keeps its state in one. The snapshot store does not: it
+/// hands git a path and lets *git* create the file there, so the directory has
+/// to exist first and there is no content to write in order to make it.
+pub fn ensureStateDir(io: Io) WriteError!void {
     Dir.cwd().createDirPath(io, state_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => |e| return e,
     };
     ensureSelfIgnore(io);
-    try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
 /// Puts the self-ignore in place if it is not there already.

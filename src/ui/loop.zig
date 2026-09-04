@@ -410,7 +410,18 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
-        try splash.draw(frameOf(app, win, arena), app.km.bindings);
+        // Told there is no repository, the first thing worth knowing is which
+        // directory is meant - a reader in the wrong one finds out instantly,
+        // and a reader in the right one draws the other conclusion themselves.
+        var cwd_buf: [4096]u8 = undefined;
+        const where: ?[]const u8 = if (app.review.no_repo) fs.cwdPath(app.io, &cwd_buf) else null;
+        try splash.draw(
+            frameOf(app, win, arena),
+            app.km.bindings,
+            if (app.review.no_repo) splash.no_repo else splash.clean,
+            where,
+            if (app.review.no_repo) splash.no_repo_hint else null,
+        );
         // An empty review is exactly when a reader is most likely to want the
         // key list - there is nothing on screen to learn the keys from.
         // Both overlays float over the empty screen too: a review with nothing

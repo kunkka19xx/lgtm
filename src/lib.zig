@@ -18,6 +18,7 @@ pub const edit = @import("text/edit.zig");
 
 pub const anchor = @import("core/anchor.zig");
 pub const checkpoint = @import("core/checkpoint.zig");
+pub const gitobj = @import("snapshot/gitobj.zig");
 pub const comments = @import("core/comments.zig");
 pub const review = @import("core/review.zig");
 pub const event = @import("core/event.zig");
@@ -38,6 +39,7 @@ test {
     _ = edit;
     _ = anchor;
     _ = checkpoint;
+    _ = gitobj;
     _ = comments;
     _ = review;
     _ = event;

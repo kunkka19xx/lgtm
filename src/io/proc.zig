@@ -37,6 +37,38 @@ pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) 
     };
 }
 
+/// As `run`, with the child's whole environment replaced.
+///
+/// Replaced rather than extended, because that is what `std.process` offers -
+/// so the caller passes the parent's map with its own keys added, and a caller
+/// that forgets loses `PATH` for everything but `argv[0]`. The one user is the
+/// snapshot store, which needs `GIT_INDEX_FILE` and has no other way to set it:
+/// git reads it from the environment and there is no flag for it, which is the
+/// whole reason this function exists (SNAPSHOTS.md 3.1 rule 1 - never write the
+/// user's own `.git/index`).
+pub fn runEnv(
+    gpa: Allocator,
+    io: Io,
+    argv: []const []const u8,
+    max_output: usize,
+    environ: *const std.process.Environ.Map,
+) RunError!Output {
+    const result = try std.process.run(gpa, io, .{
+        .argv = argv,
+        .environ_map = environ,
+        .stdout_limit = .limited(max_output),
+        .stderr_limit = .limited(64 << 10),
+    });
+    return .{
+        .stdout = result.stdout,
+        .stderr = result.stderr,
+        .exit_code = switch (result.term) {
+            .exited => |code| code,
+            else => 1,
+        },
+    };
+}
+
 test "run captures stdout" {
     const testing = std.testing;
     // The real binary gets its environ from `std.process.Init`; a test has to
@@ -71,10 +103,10 @@ test "runInherit waits for the child and reports its status" {
     var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
     defer threaded.deinit();
 
-    try testing.expectEqual(@as(u8, 0), try runInherit(threaded.io(), &.{ "true" }));
+    try testing.expectEqual(@as(u8, 0), try runInherit(threaded.io(), &.{"true"}));
     // A non-zero exit must come back as itself: an editor that failed to open
     // is something the status line should be able to say.
-    try testing.expect(try runInherit(threaded.io(), &.{ "false" }) != 0);
+    try testing.expect(try runInherit(threaded.io(), &.{"false"}) != 0);
 }
 
 /// Runs argv, writes `stdin_data` to its standard input, and collects stdout.
