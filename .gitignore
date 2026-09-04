@@ -11,3 +11,4 @@ CLAUDE.md
 docs/*.md
 !docs/GUIDE.md
 !docs/CONFIG.md
+result

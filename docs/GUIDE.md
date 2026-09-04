@@ -11,7 +11,10 @@ you need to use it; [CONFIG.md](CONFIG.md) is the full settings reference.
 curl -fsSL https://raw.githubusercontent.com/kunkka19xx/lgtm/main/scripts/install.sh | sh
 ```
 
-macOS and Linux, arm64 and x86_64. The script needs no sudo — one static binary
+Any Linux distribution, and macOS; arm64 and x86_64. The Linux build is
+statically linked, so there is no libc to match and no distribution to be right
+about — this is the path on Debian, Ubuntu, Fedora, Alpine, openSUSE and
+anything else without an entry below. The script needs no sudo — one binary
 goes in `~/.local/bin` — and it will not install over a copy something else
 manages. It verifies every download against the `SHA256SUMS` published in the
 same release and stops on a mismatch.
@@ -39,12 +42,18 @@ git clone https://aur.archlinux.org/lgtm-bin.git && cd lgtm-bin && makepkg -si
 `lgtm-bin` is the release binary and needs no toolchain. `lgtm-git` builds
 `main` instead and needs `zig`, which is in `extra` for both architectures.
 
-With Nix, the flake exposes the binary as a package:
+With Nix, the flake exposes the binary as a package, not just a dev shell:
 
 ```sh
-nix run github:kunkka19xx/lgtm
-nix profile install github:kunkka19xx/lgtm
+nix run github:kunkka19xx/lgtm          # run it once, install nothing
+nix profile add github:kunkka19xx/lgtm  # keep it on PATH
 ```
+
+`nix run` builds into the store and runs it — nothing joins your profile or your
+PATH, and the next `nix-collect-garbage` reclaims the build, so trying it costs
+nothing. `nix profile add` is the one that persists; `nix profile remove lgtm`
+undoes it. Both need flakes enabled. (`nix profile install` is the old spelling
+of `add`, and warns.)
 
 No Windows build: `io/input.zig` and `io/tty.zig` are POSIX throughout, so that
 needs a port rather than a manifest.
