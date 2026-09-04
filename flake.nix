@@ -93,7 +93,7 @@
           # with a permissive setting: an unpinned dependency tree is the one
           # thing a reproducible build cannot have. Change build.zig.zon and
           # this changes; nix reports the new one and refuses to continue.
-          outputHash = "sha256-k0J10N4QnJ9j2MhPZLbh7lqxDj05nYCt/9pzzfKjVvk=";
+          outputHash = "sha256-fjR4UcRQJ3dVcGLt0/Z38qCfrbfZJx/+W9DjLgWhYXA=";
         };
 
       lgtmPackage =

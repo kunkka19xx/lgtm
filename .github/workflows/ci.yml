@@ -139,6 +139,13 @@ jobs:
         with:
           extra_nix_config: "experimental-features = nix-command flakes"
 
+      # Evaluation only, and for every system the flake claims - not just this
+      # runner's. A system listed in `systems` that its own nixpkgs no longer
+      # supports fails here and nowhere else: `nix build` on x86_64-linux is
+      # perfectly happy while an Intel Mac gets an evaluation error.
+      - name: the flake evaluates for every system it claims
+        run: nix flake show --all-systems > /dev/null
+
       - name: nix build
         run: nix build --print-build-logs .#lgtm
 
