@@ -33,10 +33,12 @@ help:
 	@printf "  make lint      namcap both PKGBUILDs\n"
 	@printf "  make build     run lgtm-git's build() and check() for real\n"
 
+# No `pacman -Sy` here on purpose: `--printsrcinfo` only parses the PKGBUILD,
+# so a package database it never reads is a minute of latency for nothing.
+# `lint` and `build` install things and still need theirs.
 srcinfo:
 	$(DOCKER) -v "$(CURDIR):/pkg" $(IMAGE) bash -lc '\
 	  set -eu; \
-	  pacman -Sy --noconfirm --disable-sandbox >/dev/null 2>&1; \
 	  useradd -m build; chown -R build /pkg; \
 	  for p in lgtm-bin lgtm-git; do \
 	    su build -c "cd /pkg/$$p && makepkg --printsrcinfo > .SRCINFO"; \
