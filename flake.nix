@@ -53,46 +53,6 @@
             ];
           runScript = "bash";
         };
-    in
-    {
-      devShells = forAllSystems (
-        pkgs:
-        {
-          default = pkgs.mkShell {
-            name = "lgtm";
-
-            packages = toolchain pkgs;
-
-            # `zig build` fetches libvaxis over the network into zig's global
-            # cache on first run, so this shell is not hermetic by design.
-            shellHook = ''
-              wanted=$(cat .zigversion 2>/dev/null || echo ${zigVersion})
-              actual=$(zig version)
-              if [ "$actual" != "$wanted" ]; then
-                echo "warning: .zigversion wants $wanted but this shell provides $actual"
-                echo "         update zigVersion/zig_0_16 in flake.nix, or .zigversion"
-              fi
-
-              echo "lgtm dev shell - zig $actual, zls $(zls --version 2>/dev/null || echo '?')"
-              echo "  zig build test     unit tests"
-              echo "  zig build check    tests + SPDX header check"
-              echo "  zig build anchor   re-anchoring harness (phase 1 gate)"
-              echo "  zig build run      the binary"
-            ''
-            + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
-              echo "  note: the subprocess tests need an FHS /bin - run them under"
-              echo "        'nix develop .#fhs' or 'nix run .#fhs -- -c \"zig build check\"'"
-            '';
-          };
-        }
-        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
-          # Interactive use: `nix develop .#fhs`. Non-interactive callers (CI,
-          # scripts) want `nix run .#fhs -- -c "zig build check"` instead, since
-          # `nix develop --command` bypasses the hook that enters the FHS mount
-          # namespace.
-          fhs = (fhsShell pkgs).env;
-        }
-      );
 
       # The three dependencies from build.zig.zon, fetched into a Zig cache.
       #
@@ -168,6 +128,46 @@
             platforms = systems;
           };
         };
+    in
+    {
+      devShells = forAllSystems (
+        pkgs:
+        {
+          default = pkgs.mkShell {
+            name = "lgtm";
+
+            packages = toolchain pkgs;
+
+            # `zig build` fetches libvaxis over the network into zig's global
+            # cache on first run, so this shell is not hermetic by design.
+            shellHook = ''
+              wanted=$(cat .zigversion 2>/dev/null || echo ${zigVersion})
+              actual=$(zig version)
+              if [ "$actual" != "$wanted" ]; then
+                echo "warning: .zigversion wants $wanted but this shell provides $actual"
+                echo "         update zigVersion/zig_0_16 in flake.nix, or .zigversion"
+              fi
+
+              echo "lgtm dev shell - zig $actual, zls $(zls --version 2>/dev/null || echo '?')"
+              echo "  zig build test     unit tests"
+              echo "  zig build check    tests + SPDX header check"
+              echo "  zig build anchor   re-anchoring harness (phase 1 gate)"
+              echo "  zig build run      the binary"
+            ''
+            + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+              echo "  note: the subprocess tests need an FHS /bin - run them under"
+              echo "        'nix develop .#fhs' or 'nix run .#fhs -- -c \"zig build check\"'"
+            '';
+          };
+        }
+        // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+          # Interactive use: `nix develop .#fhs`. Non-interactive callers (CI,
+          # scripts) want `nix run .#fhs -- -c "zig build check"` instead, since
+          # `nix develop --command` bypasses the hook that enters the FHS mount
+          # namespace.
+          fhs = (fhsShell pkgs).env;
+        }
+      );
 
       packages = forAllSystems (
         pkgs:
