@@ -47,6 +47,27 @@ fn classIn(b: u8, width: Width) Class {
     return c;
 }
 
+/// The word under `at`, or the next one on the line when `at` is not on one.
+///
+/// What `*` looks for. Vim's rule exactly, including the fallback: a cursor
+/// resting on the `(` of `login(user)` searches `user` rather than refusing,
+/// because that is plainly what the reader was pointing at.
+///
+/// Word class only, never punctuation. `*` on `=>` would search for an
+/// operator that occurs on half the lines in the review, which is not a
+/// search, it is a highlight of the language.
+pub fn wordAt(text: []const u8, at: u32) ?[]const u8 {
+    var i: usize = @min(at, text.len);
+    while (i < text.len and Class.of(text[i]) != .word) i += 1;
+    if (i == text.len) return null;
+
+    var lo = i;
+    while (lo > 0 and Class.of(text[lo - 1]) == .word) lo -= 1;
+    var hi = i;
+    while (hi < text.len and Class.of(text[hi]) == .word) hi += 1;
+    return text[lo..hi];
+}
+
 /// Start of the grapheme after the one at `at`, or null at the end of the
 /// line. Graphemes rather than bytes: `l` on a line of CJK moves one glyph,
 /// and landing mid-sequence would put the cursor on a cell that is not there.
@@ -378,4 +399,30 @@ test "a reversed find is the same find the other way" {
     try testing.expect(!back.forward);
     try testing.expect(back.till);
     try testing.expectEqual(@as(u21, 'x'), back.target);
+}
+
+test "the word under the cursor is what * would search for" {
+    const line = "    const id = user_id + width;";
+
+    // Anywhere inside a word gives the whole word, not the tail from here.
+    try testing.expectEqualStrings("const", wordAt(line, 4).?);
+    try testing.expectEqualStrings("const", wordAt(line, 7).?);
+    try testing.expectEqualStrings("const", wordAt(line, 8).?);
+
+    // Underscores are part of a name, or `*` on an identifier would search a
+    // fragment of one.
+    try testing.expectEqualStrings("user_id", wordAt(line, 15).?);
+    try testing.expectEqualStrings("user_id", wordAt(line, 19).?);
+
+    // On punctuation or a blank, take the next word rather than refusing:
+    // pointing at `=` plainly means the thing after it.
+    try testing.expectEqualStrings("user_id", wordAt(line, 13).?);
+    try testing.expectEqualStrings("width", wordAt(line, 23).?);
+
+    // A line with nothing left to find, and one with nothing at all.
+    try testing.expect(wordAt("x = 1;", 5) == null);
+    try testing.expect(wordAt("  ", 0) == null);
+    try testing.expect(wordAt("", 0) == null);
+    // Past the end is a miss, not a read past the buffer.
+    try testing.expect(wordAt("ab", 99) == null);
 }

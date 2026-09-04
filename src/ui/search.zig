@@ -12,8 +12,23 @@
 
 const std = @import("std");
 const hunk = @import("../core/hunk.zig");
+const motion = @import("motion.zig");
 
 pub const max_bytes = 256;
+
+/// What to look for, and how strictly.
+///
+/// `whole` is `*`'s rule: the match must have a non-word byte on each side, so
+/// `*` on `id` does not stop on every `width` in the review. `/` leaves it
+/// false, because a reader typing a fragment means the fragment.
+pub const Pattern = struct {
+    text: []const u8 = "",
+    whole: bool = false,
+
+    pub fn empty(self: Pattern) bool {
+        return self.text.len == 0;
+    }
+};
 
 pub const Direction = enum {
     forward,
@@ -45,28 +60,49 @@ pub fn caseSensitive(query: []const u8) bool {
     return false;
 }
 
-/// Where `needle` first occurs in `haystack`, or null.
-///
-/// The offset rather than a bool, because every caller wants it: `n` puts the
-/// cursor on the match, and the renderer highlights it. Returning `bool` here
-/// meant the scan was run twice and the answer thrown away once - and the
-/// cursor landed on whatever column the last vertical motion had asked for,
-/// which on a long line is nowhere near the text that matched.
-pub fn indexOf(haystack: []const u8, needle: []const u8, sensitive: bool) ?u32 {
-    if (needle.len == 0 or needle.len > haystack.len) return null;
-    if (sensitive) {
-        const at = std.mem.indexOf(u8, haystack, needle) orelse return null;
-        return @intCast(at);
+/// Whether `needle` sits at `at`, without allocating a lowercased copy.
+fn matchAt(line: []const u8, at: usize, needle: []const u8, sensitive: bool) bool {
+    if (at + needle.len > line.len) return false;
+    if (sensitive) return std.mem.eql(u8, line[at..][0..needle.len], needle);
+    for (needle, 0..) |c, j| {
+        if (std.ascii.toLower(line[at + j]) != std.ascii.toLower(c)) return false;
     }
+    return true;
+}
 
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
-        } else return @intCast(i);
+/// Whether a match of `n` bytes at `at` has a non-word byte on each side.
+///
+/// The end of the line counts as a boundary; the end of a *slice* of one does
+/// not, which is why every caller passes the whole line.
+fn bounded(line: []const u8, at: usize, n: usize) bool {
+    if (at > 0 and motion.Class.of(line[at - 1]) == .word) return false;
+    const end = at + n;
+    return end >= line.len or motion.Class.of(line[end]) != .word;
+}
+
+/// Where `pat` next occurs in `line`, at or after `from`.
+///
+/// The whole line and an offset, rather than a slice starting at the offset,
+/// because a whole-word match is defined by the bytes *around* it: handing
+/// this a slice would make the cut itself look like a word boundary and match
+/// `id` inside `width`.
+///
+/// The offset comes back rather than a bool, because every caller wants it:
+/// `n` puts the cursor on the match, and the renderer highlights it.
+pub fn indexOfIn(line: []const u8, from: usize, pat: Pattern, sensitive: bool) ?u32 {
+    if (pat.text.len == 0 or from > line.len) return null;
+    var i: usize = from;
+    while (i + pat.text.len <= line.len) : (i += 1) {
+        if (!matchAt(line, i, pat.text, sensitive)) continue;
+        if (pat.whole and !bounded(line, i, pat.text.len)) continue;
+        return @intCast(i);
     }
     return null;
+}
+
+/// Plain substring, from the start: what `/` does.
+pub fn indexOf(haystack: []const u8, needle: []const u8, sensitive: bool) ?u32 {
+    return indexOfIn(haystack, 0, .{ .text = needle }, sensitive);
 }
 
 pub fn contains(haystack: []const u8, needle: []const u8, sensitive: bool) bool {
@@ -83,23 +119,23 @@ pub const Hit = struct { line: u32, col: u32 };
 /// going backward. That is how a search continues into the *next* file, where
 /// there is no cursor to start after. A non-null `from` is exclusive, so `n`
 /// advances instead of finding the line it is already sitting on.
-pub fn findLine(lines: hunk.DiffLines, from: ?u32, dir: Direction, query: []const u8) ?Hit {
+pub fn findLine(lines: hunk.DiffLines, from: ?u32, dir: Direction, pat: Pattern) ?Hit {
     const n: u32 = @intCast(lines.len());
-    if (n == 0 or query.len == 0) return null;
-    const sensitive = caseSensitive(query);
+    if (n == 0 or pat.empty()) return null;
+    const sensitive = caseSensitive(pat.text);
 
     switch (dir) {
         .forward => {
             var i: u32 = if (from) |f| f + 1 else 0;
             while (i < n) : (i += 1) {
-                if (indexOf(lines.text[i], query, sensitive)) |at| return .{ .line = i, .col = at };
+                if (indexOfIn(lines.text[i], 0, pat, sensitive)) |at| return .{ .line = i, .col = at };
             }
         },
         .backward => {
             var i: u32 = if (from) |f| f else n;
             while (i > 0) {
                 i -= 1;
-                if (indexOf(lines.text[i], query, sensitive)) |at| return .{ .line = i, .col = at };
+                if (indexOfIn(lines.text[i], 0, pat, sensitive)) |at| return .{ .line = i, .col = at };
             }
         },
     }
@@ -114,6 +150,10 @@ pub const State = struct {
     len: usize = 0,
     /// The direction `/` or `?` established. `n` repeats it, `N` flips it.
     dir: Direction = .forward,
+    /// Set by `*`, cleared by `/`. It travels with the query because `n` and
+    /// the highlight must agree with the search that set them: a strict search
+    /// painting loose matches would show hits `n` refuses to visit.
+    whole: bool = false,
     /// Set when the last search wrapped past the end of the review. Shown once
     /// and cleared on the next motion - the same contract as vim's message.
     wrapped: bool = false,
@@ -130,14 +170,31 @@ pub const State = struct {
         self.len = @min(text.len, self.buf.len);
         @memcpy(self.buf[0..self.len], text[0..self.len]);
         self.dir = dir;
+        self.whole = false;
         self.wrapped = false;
         self.failed = false;
         self.hidden = false;
     }
 
+    /// `*` and `#`: the word under the cursor, matched whole.
+    pub fn setWord(self: *State, word: []const u8, dir: Direction) void {
+        self.set(word, dir);
+        self.whole = true;
+    }
+
     /// The pattern, for repeating a search. Survives `:noh`.
     pub fn query(self: *const State) []const u8 {
         return self.buf[0..self.len];
+    }
+
+    /// The query and its strictness, which is what a search step needs.
+    pub fn pattern(self: *const State) Pattern {
+        return .{ .text = self.query(), .whole = self.whole };
+    }
+
+    /// The same for the renderer, which paints nothing after `:noh`.
+    pub fn shownPattern(self: *const State) Pattern {
+        return .{ .text = self.shown(), .whole = self.whole };
     }
 
     /// The pattern the renderer should highlight, which is nothing after
@@ -226,19 +283,19 @@ test "a hit carries where in the line it matched, not just which line" {
     var lines = try linesOf(gpa, &.{ "fn a() void {}", "    const token = validateToken(x);" });
     defer lines.deinit(gpa);
 
-    const hit = findLine(lines, null, .forward, "token").?;
+    const hit = findLine(lines, null, .forward, .{ .text = "token" }).?;
     try testing.expectEqual(@as(u32, 1), hit.line);
     try testing.expectEqual(@as(u32, 10), hit.col);
     try testing.expectEqualStrings("token", lines.text[hit.line][hit.col..][0..5]);
 
     // Smart case picks the later occurrence when a capital pins it, and the
     // column has to follow the match rather than the line.
-    const strict = findLine(lines, null, .forward, "Token").?;
+    const strict = findLine(lines, null, .forward, .{ .text = "Token" }).?;
     try testing.expectEqual(@as(u32, 26), strict.col);
     try testing.expectEqualStrings("Token", lines.text[strict.line][strict.col..][0..5]);
 
     // A match at the very start is column zero, not "no column".
-    const first = findLine(lines, null, .forward, "fn ").?;
+    const first = findLine(lines, null, .forward, .{ .text = "fn " }).?;
     try testing.expectEqual(@as(u32, 0), first.line);
     try testing.expectEqual(@as(u32, 0), first.col);
 }
@@ -271,10 +328,10 @@ test "forward search starts after the cursor, and from the top when there is non
     defer lines.deinit(gpa);
 
     // No cursor: a file the search has just entered starts at its first line.
-    try testing.expectEqual(@as(u32, 0), findLine(lines, null, .forward, "let a").?.line);
+    try testing.expectEqual(@as(u32, 0), findLine(lines, null, .forward, .{ .text = "let a" }).?.line);
     // With a cursor, `n` must advance rather than re-find the current line.
-    try testing.expectEqual(@as(u32, 2), findLine(lines, 0, .forward, "let a").?.line);
-    try testing.expect(findLine(lines, 2, .forward, "let a") == null);
+    try testing.expectEqual(@as(u32, 2), findLine(lines, 0, .forward, .{ .text = "let a" }).?.line);
+    try testing.expect(findLine(lines, 2, .forward, .{ .text = "let a" }) == null);
 }
 
 test "backward search starts before the cursor, and from the bottom when there is none" {
@@ -282,21 +339,21 @@ test "backward search starts before the cursor, and from the bottom when there i
     var lines = try linesOf(gpa, &.{ "one", "two", "one" });
     defer lines.deinit(gpa);
 
-    try testing.expectEqual(@as(u32, 2), findLine(lines, null, .backward, "one").?.line);
-    try testing.expectEqual(@as(u32, 0), findLine(lines, 2, .backward, "one").?.line);
-    try testing.expect(findLine(lines, 0, .backward, "one") == null);
+    try testing.expectEqual(@as(u32, 2), findLine(lines, null, .backward, .{ .text = "one" }).?.line);
+    try testing.expectEqual(@as(u32, 0), findLine(lines, 2, .backward, .{ .text = "one" }).?.line);
+    try testing.expect(findLine(lines, 0, .backward, .{ .text = "one" }) == null);
 }
 
 test "an empty file or an empty query finds nothing rather than trapping" {
     const gpa = testing.allocator;
     var empty = try linesOf(gpa, &.{});
     defer empty.deinit(gpa);
-    try testing.expect(findLine(empty, null, .forward, "x") == null);
-    try testing.expect(findLine(empty, null, .backward, "x") == null);
+    try testing.expect(findLine(empty, null, .forward, .{ .text = "x" }) == null);
+    try testing.expect(findLine(empty, null, .backward, .{ .text = "x" }) == null);
 
     var some = try linesOf(gpa, &.{"x"});
     defer some.deinit(gpa);
-    try testing.expect(findLine(some, null, .forward, "") == null);
+    try testing.expect(findLine(some, null, .forward, .{ .text = "" }) == null);
 }
 
 test "state keeps the query and truncates rather than overrunning" {
@@ -316,4 +373,83 @@ test "state keeps the query and truncates rather than overrunning" {
 test "N flips the direction without losing it" {
     try testing.expectEqual(Direction.backward, Direction.forward.flip());
     try testing.expectEqual(Direction.forward, Direction.backward.flip());
+}
+
+test "whole-word matching is what makes * usable rather than noise" {
+    // The case the feature exists for: `*` on `id` must not stop on `width`,
+    // `valid` or `ident`, or it finds forty lines and helps with none.
+    const loose: Pattern = .{ .text = "id" };
+    const whole: Pattern = .{ .text = "id", .whole = true };
+
+    try testing.expect(indexOfIn("const width = 3;", 0, loose, false) != null);
+    try testing.expect(indexOfIn("const width = 3;", 0, whole, false) == null);
+    try testing.expect(indexOfIn("if (!valid) return;", 0, whole, false) == null);
+    try testing.expect(indexOfIn("const ident = x;", 0, whole, false) == null);
+    try testing.expect(indexOfIn("user_id = 1;", 0, whole, false) == null);
+
+    // And must still find the real ones, including at both edges of the line.
+    try testing.expectEqual(@as(u32, 6), indexOfIn("const id = 1;", 0, whole, false).?);
+    try testing.expectEqual(@as(u32, 0), indexOfIn("id", 0, whole, false).?);
+    try testing.expectEqual(@as(u32, 4), indexOfIn("get(id)", 0, whole, false).?);
+    try testing.expectEqual(@as(u32, 0), indexOfIn("id.x", 0, whole, false).?);
+    try testing.expectEqual(@as(u32, 2), indexOfIn("x.id", 0, whole, false).?);
+}
+
+test "a whole-word search skips a near miss and keeps looking on the same line" {
+    // The scan must not stop at the first substring hit and call the line
+    // clean: `width` comes before `id` here, and both are on one line.
+    const whole: Pattern = .{ .text = "id", .whole = true };
+    try testing.expectEqual(@as(u32, 11), indexOfIn("width = 3; id = 4;", 0, whole, false).?);
+}
+
+test "a whole-word match is decided by the whole line, not by where the scan began" {
+    // Why `indexOfIn` takes a line and an offset instead of a slice: starting
+    // the scan mid-identifier must not make the cut look like a boundary.
+    const whole: Pattern = .{ .text = "id", .whole = true };
+    const line = "xid;";
+    // Scanning from 1 lands on `id` immediately, but the `x` before it is
+    // still there and still a word byte, so this is not a match.
+    try testing.expect(indexOfIn(line, 1, whole, false) == null);
+    // The same bytes, sliced at the same point, say yes - because the cut has
+    // thrown away the only evidence. That is the bug being avoided.
+    try testing.expect(indexOfIn(line[1..], 0, whole, false) != null);
+}
+
+test "* follows smart case like every other search" {
+    const whole: Pattern = .{ .text = "id", .whole = true };
+    const cap: Pattern = .{ .text = "ID", .whole = true };
+    try testing.expect(indexOfIn("const ID = 1;", 0, whole, false) != null);
+    try testing.expect(indexOfIn("const id = 1;", 0, cap, true) == null);
+}
+
+test "the strictness travels with the query, and / clears it" {
+    // `n` and the highlight both read this. A `*` whose strictness was left
+    // behind by a later `/` would paint matches `n` refuses to visit.
+    var s: State = .{};
+    s.setWord("id", .forward);
+    try testing.expect(s.pattern().whole);
+    try testing.expect(s.shownPattern().whole);
+    try testing.expectEqualStrings("id", s.pattern().text);
+
+    s.set("id", .forward);
+    try testing.expect(!s.pattern().whole);
+
+    // `:noh` silences the paint without loosening the pattern.
+    s.setWord("id", .forward);
+    s.hide();
+    try testing.expectEqualStrings("", s.shownPattern().text);
+    try testing.expect(s.pattern().whole);
+}
+
+test "findLine honours whole-word across lines" {
+    const gpa = testing.allocator;
+    var lines = try linesOf(gpa, &.{ "const width = 3;", "const valid = x;", "const id = 4;" });
+    defer lines.deinit(gpa);
+
+    const hit = findLine(lines, null, .forward, .{ .text = "id", .whole = true }).?;
+    try testing.expectEqual(@as(u32, 2), hit.line);
+    try testing.expectEqual(@as(u32, 6), hit.col);
+
+    // Loose finds the first line instead, which is exactly the difference.
+    try testing.expectEqual(@as(u32, 0), findLine(lines, null, .forward, .{ .text = "id" }).?.line);
 }

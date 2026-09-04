@@ -700,11 +700,11 @@ pub const App = struct {
     /// A `:` prompt highlights nothing. Its text is a command, not a pattern,
     /// and painting `noh` across the diff while it is typed is exactly the
     /// noise this feature is supposed to reduce.
-    fn liveQuery(self: *App) []const u8 {
+    fn liveQuery(self: *App) search.Pattern {
         if (self.prompt.open and self.prompt.kind == .search_forward) {
-            return self.prompt.text();
+            return .{ .text = self.prompt.text() };
         }
-        return self.finder.shown();
+        return self.finder.shownPattern();
     }
 
     /// 1-based position of the cursor's hunk across the whole review.
@@ -789,6 +789,8 @@ pub const App = struct {
             .search_forward => self.openPrompt(.search_forward),
             .search_next => try self.searchStep(self.finder.dir),
             .search_prev => try self.searchStep(self.finder.dir.flip()),
+            .search_word => try self.searchWord(.forward),
+            .search_word_back => try self.searchWord(.backward),
             .command_line => self.openPrompt(.command),
             // The run loop owns the terminal and is the only thing that can
             // lend it out, so this is a request rather than an action.
@@ -1373,13 +1375,32 @@ pub const App = struct {
         self.notice.set("not an editor command: :{s}", .{cmd});
     }
 
+    /// `*` and `#`: search the review for the identifier under the cursor.
+    ///
+    /// The review's most common question - where else does this name appear,
+    /// now that it has changed - without typing the name. Matched whole, so
+    /// `*` on `id` walks the four places `id` is used rather than every
+    /// `width` and `valid` between them. `/` is still there for a fragment.
+    ///
+    /// The word is copied into the finder's fixed buffer, so it does not
+    /// outlive the diff arena it was read from.
+    fn searchWord(self: *App, dir: search.Direction) !void {
+        const word = motion.wordAt(self.cursorText(), self.col) orelse {
+            // The same courtesy `f` gets: a key that moved nothing says why.
+            self.notice.set("no word under the cursor", .{});
+            return;
+        };
+        self.finder.setWord(word, dir);
+        try self.searchStep(dir);
+    }
+
     /// One search step across the whole review, not just the current file: a
     /// reviewer who types `/token` means anywhere in the change. Files other
     /// than the current one have no rows built, so the scan runs over their
     /// `DiffLines` and only the file that hits gets laid out.
     fn searchStep(self: *App, dir: search.Direction) !void {
-        const q = self.finder.query();
-        if (q.len == 0) {
+        const pat = self.finder.pattern();
+        if (pat.empty()) {
             self.notice.set("no previous search", .{});
             return;
         }
@@ -1399,7 +1420,7 @@ pub const App = struct {
 
         var step: usize = 0;
         while (step <= fs.len) : (step += 1) {
-            if (search.findLine(fs[fi].lines, from, dir, q)) |hit| {
+            if (search.findLine(fs[fi].lines, from, dir, pat)) |hit| {
                 if (fi != self.file_index) {
                     self.file_index = fi;
                     try self.rebuildRows(.reset);
@@ -1427,7 +1448,7 @@ pub const App = struct {
         }
 
         self.finder.failed = true;
-        self.notice.set("pattern not found: {s}", .{q});
+        self.notice.set("pattern not found: {s}", .{pat.text});
     }
 
     // -- the bridge ----------------------------------------------------------
@@ -3162,6 +3183,10 @@ pub const App = struct {
     fn rememberWalk(self: *App, cmd: keymap.Command) void {
         switch (cmd) {
             .find_repeat, .find_reverse => {},
+            // `*` establishes a search; what `;` repeats is stepping it, not
+            // picking up whatever word the cursor has since landed on.
+            .search_word => self.last_walk = .search_next,
+            .search_word_back => self.last_walk = .search_prev,
             .find_char, .till_char, .find_char_back, .till_char_back => self.last_walk = null,
             else => if (cmd.opposite() != null) {
                 self.last_walk = cmd;
@@ -5371,28 +5396,28 @@ test "matches light up while the query is still being typed" {
     defer fx.deinit();
 
     // Nothing to paint before a search exists.
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
 
     // Mid-type, with no Enter yet: this is the whole feature.
     try fx.press("/co");
-    try testing.expectEqualStrings("co", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("co", fx.app.view(body_rows).?.query.text);
     try fx.press("n");
-    try testing.expectEqualStrings("con", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("con", fx.app.view(body_rows).?.query.text);
 
     // Cancelling puts the screen back the way it was, rather than leaving the
     // abandoned query painted across the diff.
     try fx.press("<Esc>");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
 
     // Submitting hands over to the stored query, and `:noh` still clears it.
     try fx.press("/co");
     try fx.press("ns");
     try fx.press("t");
     try fx.press("<CR>");
-    try testing.expectEqualStrings("const", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("const", fx.app.view(body_rows).?.query.text);
     try fx.press(":noh");
     try fx.press("<CR>");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
 }
 
 test "a command being typed is not painted across the diff" {
@@ -5402,7 +5427,7 @@ test "a command being typed is not painted across the diff" {
     // `:` text is a command, not a pattern. Highlighting it would paint `noh`
     // over the review while the reader types the thing that turns painting off.
     try fx.press(":noh");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query);
+    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
     try fx.press("<Esc>");
 }
 
@@ -6058,4 +6083,96 @@ test "every walk has an opposite, or ',' would be a dead key on it" {
         const back = w.opposite() orelse return error.TestExpectedOpposite;
         try testing.expectEqual(w, back.opposite().?);
     }
+}
+
+// -- `*` and `#` -----------------------------------------------------------
+
+test "* searches the review for the word under the cursor" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j"); // onto `    const x = 1;`
+    try fx.press("^"); // onto `const` itself
+    try fx.press("*");
+
+    try testing.expectEqualStrings("const", fx.app.finder.query());
+    // Strict, which is the difference between `*` and typing the word into `/`.
+    try testing.expect(fx.app.finder.whole);
+
+    // And it went somewhere: the `const` in the other file.
+    try fx.expectFile(1);
+    try fx.expectCursor(2);
+}
+
+test "* from punctuation takes the next word rather than refusing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    // Column 0 of `    const x = 1;` is a blank, not a word.
+    try fx.press("0");
+    try fx.press("*");
+    try testing.expectEqualStrings("const", fx.app.finder.query());
+}
+
+test "* on a line with no word says so instead of moving" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    try fx.press("j"); // `}`, which has nothing to search for
+    const before = fx.app.cursor;
+    try fx.press("*");
+
+    try fx.expectNotice("no word");
+    try testing.expectEqual(before, fx.app.cursor);
+    // And it left the previous search alone rather than clearing it.
+    try testing.expect(!fx.app.finder.active());
+}
+
+test "; after * steps the matches, not the word under the new cursor" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    try fx.press("^");
+    try fx.press("*");
+    try fx.expectFile(1);
+
+    // The trap this guards: repeating `*` itself would pick up whatever word
+    // the cursor has since landed on, and the search would wander.
+    try testing.expectEqual(keymap.Command.search_next, fx.app.last_walk.?);
+    try fx.press(";");
+    try testing.expectEqualStrings("const", fx.app.finder.query());
+    try fx.expectFile(0);
+}
+
+test "# searches backwards, and n keeps going that way" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    try fx.press("^");
+    try fx.press("#");
+
+    try testing.expectEqualStrings("const", fx.app.finder.query());
+    try testing.expectEqual(search.Direction.backward, fx.app.finder.dir);
+    try fx.expectFile(1);
+}
+
+test "a / after a * loosens the pattern again" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("j");
+    try fx.press("^");
+    try fx.press("*");
+    try testing.expect(fx.app.finder.whole);
+
+    // Strictness belongs to the search that set it. Left behind, it would
+    // silently narrow the next `/` the reader typed.
+    try fx.press("/");
+    try fx.typeIn("token");
+    try fx.press("<CR>");
+    try testing.expect(!fx.app.finder.whole);
 }

@@ -359,8 +359,8 @@ fn drawCode(
     if (mark.span(@intCast(text.len))) |sp| {
         segs = try shade(f.arena, segs, sp.lo, sp.hi, f.theme.selection.bg);
     }
-    if (v.query.len > 0) {
-        segs = try markMatches(f.arena, segs, v.query, f.theme.search_match);
+    if (!v.query.empty()) {
+        segs = try markMatches(f.arena, segs, text, v.query, f.theme.search_match);
     }
 
     if (height <= 1) {
@@ -447,29 +447,54 @@ fn shade(
     return out;
 }
 
-/// Splits segments so every occurrence of `query` gets `style`.
+/// Splits segments so every occurrence of `pat` gets `style`.
 ///
 /// Done on the segments rather than by overwriting cells afterwards, because a
 /// byte offset is not a column: a tab or a wide glyph earlier in the line
-/// would put the highlight somewhere else entirely. A match straddling two
-/// lexer runs comes out as two highlighted pieces, which reads the same.
+/// would put the highlight somewhere else entirely.
+///
+/// Matched against the whole `line` and clipped to each segment, not matched
+/// inside each segment. Two reasons, and the second is the one that bites: a
+/// whole-word match is decided by the bytes on either side of it, and a
+/// segment boundary is not a word boundary - `*` on `id` would light up the
+/// `id` in `width` the moment the lexer happened to split there. A match
+/// straddling two runs still comes out as two highlighted pieces, which reads
+/// the same.
 fn markMatches(
     arena: Allocator,
     segs: std.ArrayList(vaxis.Segment),
-    query: []const u8,
+    line: []const u8,
+    pat: search.Pattern,
     style: vaxis.Style,
 ) Allocator.Error!std.ArrayList(vaxis.Segment) {
-    const sensitive = search.caseSensitive(query);
+    const sensitive = search.caseSensitive(pat.text);
     var out: std.ArrayList(vaxis.Segment) = .empty;
 
+    var base: usize = 0;
     for (segs.items) |seg| {
-        var rest = seg.text;
-        while (search.indexOf(rest, query, sensitive)) |at| {
-            if (at > 0) try out.append(arena, .{ .text = rest[0..at], .style = seg.style });
-            try out.append(arena, .{ .text = rest[at..][0..query.len], .style = style });
-            rest = rest[at + query.len ..];
+        const seg_end = base + seg.text.len;
+        // Emitted up to here. Absolute, so a match that began in the previous
+        // segment does not get painted twice.
+        var cut = base;
+        // Back up far enough to catch a match that starts before this segment
+        // and reaches into it.
+        var at = base -| (pat.text.len -| 1);
+
+        while (search.indexOfIn(line, at, pat, sensitive)) |m| {
+            const start: usize = m;
+            if (start >= seg_end) break;
+            const end = start + pat.text.len;
+            at = end;
+            if (end <= base) continue;
+
+            const lo = @max(start, cut);
+            const hi = @min(end, seg_end);
+            if (lo > cut) try out.append(arena, .{ .text = line[cut..lo], .style = seg.style });
+            if (hi > lo) try out.append(arena, .{ .text = line[lo..hi], .style = style });
+            cut = hi;
         }
-        if (rest.len > 0) try out.append(arena, .{ .text = rest, .style = seg.style });
+        if (seg_end > cut) try out.append(arena, .{ .text = line[cut..seg_end], .style = seg.style });
+        base = seg_end;
     }
     return out;
 }
@@ -499,11 +524,14 @@ test "match highlighting splits segments without losing or duplicating bytes" {
     const plain: vaxis.Style = .{};
     const hit: vaxis.Style = .{ .bold = true };
 
+    // The segments concatenate to the line, which is the invariant the
+    // absolute-offset matching relies on.
+    const line = "let token = tokenise();";
     var segs: std.ArrayList(vaxis.Segment) = .empty;
-    try segs.append(arena, .{ .text = "let token = ", .style = plain });
-    try segs.append(arena, .{ .text = "tokenise();", .style = plain });
+    try segs.append(arena, .{ .text = line[0..12], .style = plain });
+    try segs.append(arena, .{ .text = line[12..], .style = plain });
 
-    const out = try markMatches(arena, segs, "token", hit);
+    const out = try markMatches(arena, segs, line, .{ .text = "token" }, hit);
 
     // Every byte survives, in order: a highlight that eats text is worse than
     // no highlight at all.
@@ -522,16 +550,17 @@ test "match highlighting follows smart case and leaves a clean line alone" {
     defer a.deinit();
     const arena = a.allocator();
 
+    const line = "TokenStore";
     var segs: std.ArrayList(vaxis.Segment) = .empty;
-    try segs.append(arena, .{ .text = "TokenStore", .style = .{} });
+    try segs.append(arena, .{ .text = line, .style = .{} });
 
     // Lowercase query: matches either case.
-    const loose = try markMatches(arena, segs, "token", .{ .bold = true });
+    const loose = try markMatches(arena, segs, line, .{ .text = "token" }, .{ .bold = true });
     try testing.expect(loose.items[0].style.bold);
 
     // A capital pins it, so this one does not match at all - and an unmatched
     // line comes back as the single segment it went in as.
-    const strict = try markMatches(arena, segs, "TOKEN", .{ .bold = true });
+    const strict = try markMatches(arena, segs, line, .{ .text = "TOKEN" }, .{ .bold = true });
     try testing.expectEqual(@as(usize, 1), strict.items.len);
     try testing.expect(!strict.items[0].style.bold);
     try testing.expectEqualStrings("TokenStore", strict.items[0].text);
@@ -555,4 +584,54 @@ test "run lookup finds only the runs overlapping a line" {
     try testing.expectEqual(@as(usize, 0), runsIn(&runs, 100, 200).len);
     // The first run is found without walking off the front.
     try testing.expectEqual(@as(usize, 1), runsIn(&runs, 0, 3).len);
+}
+
+test "a whole-word highlight is not fooled by a segment boundary" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // The lexer splitting `width` where it happens to split is not a word
+    // boundary. Matching per-segment would light up the `id` inside it, and
+    // the reader would see a hit that `n` then refuses to visit.
+    const line = "width id";
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = line[0..1], .style = .{} });
+    try segs.append(arena, .{ .text = line[1..5], .style = .{} });
+    try segs.append(arena, .{ .text = line[5..], .style = .{} });
+
+    const out = try markMatches(arena, segs, line, .{ .text = "id", .whole = true }, .{ .bold = true });
+
+    var joined: std.ArrayList(u8) = .empty;
+    var lit: std.ArrayList(u8) = .empty;
+    for (out.items) |seg| {
+        try joined.appendSlice(arena, seg.text);
+        if (seg.style.bold) try lit.appendSlice(arena, seg.text);
+    }
+    try testing.expectEqualStrings(line, joined.items);
+    try testing.expectEqualStrings("id", lit.items);
+}
+
+test "a match straddling two segments is painted whole" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // The bytes are split mid-match; every one of them still gets the style,
+    // and none of them gets it twice.
+    const line = "the token here";
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = line[0..6], .style = .{} });
+    try segs.append(arena, .{ .text = line[6..], .style = .{} });
+
+    const out = try markMatches(arena, segs, line, .{ .text = "token" }, .{ .bold = true });
+
+    var joined: std.ArrayList(u8) = .empty;
+    var lit: std.ArrayList(u8) = .empty;
+    for (out.items) |seg| {
+        try joined.appendSlice(arena, seg.text);
+        if (seg.style.bold) try lit.appendSlice(arena, seg.text);
+    }
+    try testing.expectEqualStrings(line, joined.items);
+    try testing.expectEqualStrings("token", lit.items);
 }

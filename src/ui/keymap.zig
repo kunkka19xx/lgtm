@@ -59,6 +59,9 @@ pub const Command = enum {
     search_forward,
     search_next,
     search_prev,
+    /// `*` and `#`: search for the word under the cursor, matched whole.
+    search_word,
+    search_word_back,
     open_editor,
     command_line,
     /// The bridge. `send_ref` inserts the reference into the agent's input
@@ -201,6 +204,8 @@ pub const Command = enum {
             .prev_hunk,
             .search_next,
             .search_prev,
+            .search_word,
+            .search_word_back,
             => true,
             else => false,
         };
@@ -433,6 +438,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
     .{ .chords = &.{c('N')}, .command = .search_prev, .desc = "next and previous match", .group = .find },
+    .{ .chords = &.{c('*')}, .command = .search_word, .desc = "search for the word under the cursor", .group = .find },
+    .{ .chords = &.{c('#')}, .command = .search_word_back, .desc = "search for the word under the cursor", .group = .find },
     .{ .chords = &.{c(event.code.escape)}, .command = .clear_search, .modes = Modes.normal_only, .desc = "clear the search highlight (:noh)", .group = .find },
     .{ .chords = &.{c('v')}, .command = .visual_char_toggle, .desc = "visual select, characters or lines", .group = .send },
     .{ .chords = &.{c('V')}, .command = .visual_toggle, .desc = "visual select, characters or lines", .group = .send },

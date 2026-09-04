@@ -74,6 +74,12 @@ wrap, and say so when they do.
 you type. `n` and `N` step; `<Esc>` or `:noh` clears the highlight and keeps the
 pattern.
 
+`*` searches for the identifier under the cursor, and `#` does it backwards.
+This is the review's most common question, now that a name has changed: where
+else does it appear? It costs one key. Matched whole, so `*` on `id`
+walks the places `id` is used rather than stopping in every `width`, `valid` and
+`ident` between them. `/` is still there when you mean a fragment.
+
 ### 2. Point at something
 
 `Enter` opens the compose box holding a reference to the line under the cursor:
@@ -237,6 +243,7 @@ documents itself. What follows is the defaults.
 | `]t` `[t` | next and previous turn |
 | `]w` `[w` | next and previous weakened test |
 | `/` `n` `N` | search the review, then step |
+| `*` `#` | search for the word under the cursor, forwards or back |
 | `<Space>f` | the changed files |
 | `<Space>F` | every file in the project |
 

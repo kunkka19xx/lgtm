@@ -165,7 +165,7 @@ status line rather than picking a winner.
 
 **Jumping** `next_hunk` `prev_hunk` `next_file` `prev_file` `next_comment`
 `prev_comment` `next_risk` `prev_risk` `search_forward` `search_next`
-`search_prev` `clear_search`
+`search_prev` `search_word` `search_word_back` `clear_search`
 
 **The agent** `send_ref` `compose_ask` `copy_text` `copy_text_lines` `copy_ref`
 `copy_ref_lines` `submit_review`

@@ -24,6 +24,7 @@ const event = @import("../core/event.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
+const search = @import("search.zig");
 const keymap = @import("keymap.zig");
 const rows_mod = @import("rows.zig");
 const theme_mod = @import("theme.zig");
@@ -178,7 +179,7 @@ pub const View = struct {
     notice: []const u8 = "",
     /// The live search query, so hits stay highlighted after `/` closes -
     /// which is what makes `n` legible without re-reading the line.
-    query: []const u8 = "",
+    query: search.Pattern = .{},
     /// Chrome hidden, body full-height.
     zen: bool = false,
     /// Soft wrap: a line wider than the pane continues on the next screen row
