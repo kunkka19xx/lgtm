@@ -2838,6 +2838,21 @@ pub const App = struct {
         return out.toOwnedSlice(arena) catch &.{};
     }
 
+    /// The ref a turn is diffed against: the turn before it, or HEAD for the
+    /// baseline, which has nothing before it and whose meaning is exactly "what
+    /// was uncommitted before the agent ran".
+    fn baseRefFor(self: *App, turn: u32, buf: []u8) []const u8 {
+        if (turn == 0) return "HEAD";
+        const store = if (self.snap) |*s| s else return "HEAD";
+        const ref = gitobj.refFor(buf[0 .. buf.len - 1], store.state.name(), turn) catch return "HEAD";
+        // `^` rather than turn - 1: git knows what this commit's parent is, and
+        // asking it avoids assuming the numbering is dense. A session whose
+        // first turn has no baseline before it has no parent at all, and
+        // `regenerate` falls back to HEAD when the diff refuses.
+        buf[ref.len] = '^';
+        return buf[0 .. ref.len + 1];
+    }
+
     /// Shows one turn by number, or the working tree for the sentinel.
     ///
     /// The same two states `]t` walks between, reached by choosing rather than
@@ -2856,7 +2871,8 @@ pub const App = struct {
 
         var buf: [128]u8 = undefined;
         const ref = gitobj.refFor(&buf, store.state.name(), turn) catch return;
-        self.review.showTurn(turn, ref);
+        var base_buf: [128]u8 = undefined;
+        self.review.showTurn(turn, ref, self.baseRefFor(turn, &base_buf));
         try self.rediff();
         self.clampScroll(body);
         if (self.review.viewing == null) {
@@ -2963,7 +2979,8 @@ pub const App = struct {
             self.notice.set("cannot name that turn", .{});
             return;
         };
-        self.review.showTurn(turn, ref);
+        var base_buf: [128]u8 = undefined;
+        self.review.showTurn(turn, ref, self.baseRefFor(turn, &base_buf));
         try self.rediff();
         self.clampScroll(body);
         if (self.review.viewing == null) {
@@ -3025,8 +3042,9 @@ pub const App = struct {
     pub fn takeBaseline(self: *App) void {
         var store = &(if (self.snap) |*s| s else return).*;
         const fs = self.files();
-        if (fs.len == 0) return;
-
+        // No early return on a clean tree. The baseline is what gives the
+        // first turn a parent to be diffed from, and without one it opens
+        // empty - which is what a clean start used to do.
         var paths = self.gpa.alloc([]const u8, fs.len) catch return;
         defer self.gpa.free(paths);
         for (fs, 0..) |*f, i| paths[i] = f.path();
@@ -5711,7 +5729,7 @@ test "walking turns says why when there are none to walk" {
 test "a turn is read only, and the refusal names the way back" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.review.showTurn(4, "refs/lgtm/s1/4");
+    fx.app.review.showTurn(4, "refs/lgtm/s1/4", "refs/lgtm/s1/3");
 
     // A comment written against a historical turn would anchor to a line that
     // may not be there any more, or silently retarget to whatever now occupies
@@ -5732,7 +5750,7 @@ test "a turn is read only, and the refusal names the way back" {
 test "the watcher cannot drag a reader out of the past" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.review.showTurn(2, "refs/lgtm/s1/2");
+    fx.app.review.showTurn(2, "refs/lgtm/s1/2", "refs/lgtm/s1/1");
 
     // A re-diff here would throw the reader back to the present mid-sentence.
     // The event still has to free what it owns, which is why this is a return
@@ -5748,7 +5766,7 @@ test "showing a turn and returning are the two states, and nothing between" {
     defer fx.deinit();
 
     try testing.expect(fx.app.review.viewRef() == null);
-    fx.app.review.showTurn(7, "refs/lgtm/s1/7");
+    fx.app.review.showTurn(7, "refs/lgtm/s1/7", "refs/lgtm/s1/6");
     try testing.expectEqualStrings("refs/lgtm/s1/7", fx.app.review.viewRef().?);
     try testing.expectEqual(@as(u32, 7), fx.app.review.viewing.?);
 

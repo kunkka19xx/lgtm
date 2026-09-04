@@ -75,7 +75,18 @@ pub fn diffPathsIn(
 
 /// The review as it stood at a snapshot, rather than as it stands now.
 ///
-/// `git diff HEAD <ref>`: the same left-hand side, a different right-hand one.
+/// `git diff <base> <ref>`, where the base is the *previous turn* rather than
+/// HEAD.
+///
+/// Against HEAD it showed every commit made since the turn was taken: open turn
+/// 1 after three commits and 75 files came back, all of them the commits'. What
+/// a reader means by "show me that turn" is what the agent did in it, which is
+/// the diff from the turn before - and it is then the same number the list's
+/// row promised, instead of a different one.
+///
+/// The baseline is the exception and keeps HEAD as its base: it has no previous
+/// turn, and what it means is the uncommitted work that existed before the
+/// agent ran at all.
 /// That is what makes a turn a *diff source* rather than a second kind of view
 /// - hunks, change ids, syntax, search and the gutter all
 /// work on it because none of them ever knew where the diff came from.
@@ -89,9 +100,10 @@ pub fn diffAt(
     io: std.Io,
     repo: ?[]const u8,
     ignore: []const []const u8,
+    base: []const u8,
     ref: []const u8,
 ) Error!Parsed {
-    return diffBase(gpa, io, repo, &.{}, ignore, "HEAD", ref);
+    return diffBase(gpa, io, repo, &.{}, ignore, base, ref);
 }
 
 fn diffBase(

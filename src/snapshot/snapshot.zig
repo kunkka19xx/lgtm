@@ -313,6 +313,30 @@ pub const Store = struct {
     /// nothing has been taken yet. Returns the turn number, or null when
     /// snapshots are off or nothing changed.
     ///
+    /// The commit message: a subject, then the paths this turn staged.
+    ///
+    /// The list needs to know which files a turn is *about*, and the tree diff
+    /// cannot tell it. A snapshot is `read-tree HEAD` plus the changed paths,
+    /// so when HEAD moves - a commit - the base moves with it and the diff
+    /// between two consecutive turns reports everything that commit touched as
+    /// though the agent had done it. Recording the paths here is the only
+    /// place that knows the truth, and it costs a longer message.
+    ///
+    /// Newline-separated, because a commit message cannot hold a NUL. A path
+    /// containing a newline is therefore not matched and simply drops out of
+    /// the row's counts, which understates a turn rather than inventing one.
+    fn messageFor(gpa: Allocator, subject: []const u8, paths: []const []const u8) Allocator.Error![]u8 {
+        var out: std.ArrayList(u8) = .empty;
+        errdefer out.deinit(gpa);
+        try out.appendSlice(gpa, subject);
+        try out.appendSlice(gpa, "\n");
+        for (paths) |p| {
+            try out.appendSlice(gpa, "\n");
+            try out.appendSlice(gpa, p);
+        }
+        return out.toOwnedSlice(gpa);
+    }
+
     /// The parent is the previous turn, which is what makes the store a chain -
     /// and what will make it a shallow tree the first time a restore continues
     /// from an older turn.
@@ -339,11 +363,14 @@ pub const Store = struct {
         else
             null;
 
+        const body = messageFor(self.gpa, message, paths) catch message;
+        defer if (body.ptr != message.ptr) self.gpa.free(body);
+
         _ = gitobj.writeSnapshot(self.gpa, self.io, self.environ, .{
             .paths = paths,
             .ref = ref,
             .parent = parent,
-            .message = message,
+            .message = body,
         }) catch {
             // Off for the session. Not a message: the reader did not ask for a
             // snapshot and cannot act on its absence mid-turn.
@@ -365,21 +392,31 @@ pub const Store = struct {
     /// It is also the only uncommitted state git alone could never recover,
     /// which is the argument for the whole store.
     ///
-    /// Once per session, and never on a clean tree - there, HEAD already is the
-    /// baseline and five subprocesses would buy a ref that says nothing.
+    /// Once per session, including on a clean tree.
+    ///
+    /// Taking one on a clean tree looked like waste - HEAD already holds that
+    /// content - until the turn *after* it had nowhere to be diffed from. Every
+    /// turn's view is the diff from the turn before, and without a baseline the
+    /// first turn has no before: it opened empty. One snapshot per session buys
+    /// every later turn a well-defined parent, and that is worth more than the
+    /// five subprocesses it costs.
+    ///
     /// Returns whether one was written.
     pub fn baseline(self: *Store, paths: []const []const u8) bool {
-        if (!self.enabled or self.state.has_baseline or paths.len == 0) return false;
+        if (!self.enabled or self.state.has_baseline) return false;
         // A session that already has turns is one being continued; its baseline
         // was written when it began, or deliberately was not.
         if (self.state.latest_turn > 0) return false;
 
         var buf: [128]u8 = undefined;
         const ref = gitobj.refFor(&buf, self.state.name(), 0) catch return false;
+        const body = messageFor(self.gpa, "baseline", paths) catch "baseline";
+        defer if (body.len > "baseline".len) self.gpa.free(body);
+
         _ = gitobj.writeSnapshot(self.gpa, self.io, self.environ, .{
             .paths = paths,
             .ref = ref,
-            .message = "baseline",
+            .message = body,
         }) catch {
             self.enabled = false;
             return false;
@@ -596,10 +633,9 @@ test "the baseline is written once, and not onto a clean tree" {
     var store: Store = .{ .gpa = testing.allocator, .io = undefined, .environ = undefined };
     store.state.setName("s1");
 
-    // Nothing uncommitted: HEAD already is the baseline, and five subprocesses
-    // would buy a ref that says what HEAD says.
-    try testing.expect(!store.baseline(&.{}));
-    try testing.expect(!store.state.has_baseline);
+    // A clean tree gets one too. It looked like waste until the first turn had
+    // no parent to be diffed from and opened empty; a baseline is what gives
+    // every later turn a before.
     try testing.expectEqual(@as(u32, 1), store.oldestTurn());
 
     // Already taken: a session being continued keeps the baseline it began

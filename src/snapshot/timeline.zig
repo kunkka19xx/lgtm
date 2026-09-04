@@ -60,12 +60,12 @@ pub fn read(
     var ref_buf: [128]u8 = undefined;
     const head_ref = gitobj.refFor(&ref_buf, session, newest) catch return error.GitFailed;
 
-    // `%x00` rather than a newline between the fields: a commit subject cannot
-    // contain a NUL, and this parser then never has to guess whether a line is
-    // a header or a numstat row.
+    // `%x00` between records and `%x01` after the body: a commit message can
+    // hold neither, so the parser never has to guess whether a line is a
+    // header, one of the turn's paths, or a numstat row.
     const out = try proc.run(gpa, io, &.{
-        "git",                 "log",
-        "--format=%x00%H %ct", "--numstat",
+        "git",                         "log",
+        "--format=%x00%H %ct%n%B%x01", "--numstat",
         head_ref,
     }, 8 << 20);
     errdefer out.deinit(gpa);
@@ -90,7 +90,9 @@ pub fn read(
     var records = std.mem.splitScalar(u8, text, 0);
     _ = records.next(); // before the first NUL there is nothing
     while (records.next()) |rec| {
-        var lines = std.mem.splitScalar(u8, rec, '\n');
+        // The body ends at \x01; the numstat follows it.
+        const split = std.mem.indexOfScalar(u8, rec, 1) orelse continue;
+        var lines = std.mem.splitScalar(u8, rec[0..split], '\n');
         const header = lines.next() orelse continue;
         const sp = std.mem.indexOfScalar(u8, header, ' ') orelse continue;
         const oid = header[0..sp];
@@ -101,8 +103,16 @@ pub fn read(
             .when_s = std.fmt.parseInt(i64, std.mem.trim(u8, header[sp + 1 ..], " \r"), 10) catch 0,
         };
 
+        // Everything after the subject is the paths this turn staged. A turn
+        // written before they were recorded has none, and then nothing is
+        // filtered - an old row keeps reading as it always did rather than
+        // reading as empty.
+        const staged = lines.rest();
+        const filter = std.mem.trim(u8, staged, " \r\n").len > 0;
+
         var biggest: u32 = 0;
-        while (lines.next()) |line| {
+        var rows = std.mem.splitScalar(u8, rec[split + 1 ..], '\n');
+        while (rows.next()) |line| {
             const row = std.mem.trim(u8, line, " \r");
             if (row.len == 0) continue;
             // `<added> TAB <removed> TAB <path>`, with `-` for a binary file.
@@ -110,6 +120,13 @@ pub fn read(
             const a = it.next() orelse continue;
             const r = it.next() orelse continue;
             const p = it.next() orelse continue;
+
+            // Not one of this turn's paths, so not this turn's doing. The tree
+            // diff picks these up whenever HEAD moves under the chain: a commit
+            // between two turns otherwise reports its whole changeset as the
+            // agent's work, which is what made one row claim 66 files.
+            if (filter and !stagedHas(staged, p)) continue;
+
             const added = std.fmt.parseInt(u32, a, 10) catch 0;
             const removed = std.fmt.parseInt(u32, r, 10) catch 0;
             turn.files += 1;
@@ -123,6 +140,18 @@ pub fn read(
         try turns.append(gpa, turn);
     }
     return .{ .text = text, .turns = try turns.toOwnedSlice(gpa) };
+}
+
+/// Whether `path` is one of the newline-separated paths in `staged`.
+///
+/// A whole-line match: `src/a.zig` must not match `src/ab.zig`, and a suffix
+/// match would let a row claim a file the turn never touched.
+pub fn stagedHas(staged: []const u8, path: []const u8) bool {
+    var it = std.mem.splitScalar(u8, staged, '\n');
+    while (it.next()) |line| {
+        if (std.mem.eql(u8, std.mem.trim(u8, line, " \r"), path)) return true;
+    }
+    return false;
 }
 
 /// The turn number for a commit id, from the ref list already read.

@@ -58,7 +58,7 @@ pub const Sources = struct {
 /// file. Worktree content is read directly, one whole-file
 /// read each (8.2).
 pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!Sources {
-    return loadAt(gpa, io, repo, d, null);
+    return loadAt(gpa, io, repo, d, null, "HEAD");
 }
 
 /// As `load`, with the right-hand side read from a tree instead of from disk.
@@ -75,6 +75,10 @@ pub fn loadAt(
     repo: ?[]const u8,
     d: diff.Diff,
     work_ref: ?[]const u8,
+    /// Where the left-hand side comes from. `HEAD` for the live review; the
+    /// previous turn when a turn is on screen, because that is what its diff
+    /// was taken against and `attach` checks every line against it.
+    head_ref: []const u8,
 ) Error!Sources {
     var files: std.ArrayList(FileSource) = .empty;
     errdefer {
@@ -92,7 +96,8 @@ pub fn loadAt(
         try files.append(gpa, .{ .path = try gpa.dupe(u8, f.path()) });
         if (f.status == .added or f.status == .binary) continue;
         try wanted.append(gpa, i);
-        try req.appendSlice(gpa, "HEAD:");
+        try req.appendSlice(gpa, head_ref);
+        try req.append(gpa, ':');
         try req.appendSlice(gpa, f.old_path);
         try req.append(gpa, '\n');
     }

@@ -85,6 +85,11 @@ pub const Review = struct {
     viewing: ?u32 = null,
     view_ref: [128]u8 = @splat(0),
     view_ref_len: u8 = 0,
+    /// What that turn is diffed *against*: the turn before it, or HEAD for the
+    /// baseline. Held beside the ref because both halves of a diff have to
+    /// survive the arena reset that a re-diff is.
+    view_base: [128]u8 = @splat(0),
+    view_base_len: u8 = 0,
 
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
@@ -197,14 +202,27 @@ pub const Review = struct {
             // `attach` still checks every line against the buffer it should
             // have come from, so the historical view obeys the same rule the
             // live one does.
-            const at = git.diffAt(arena, self.io, null, skip, ref) catch {
-                self.viewing = null;
-                self.view_ref_len = 0;
-                return 0;
+            // The turn before this one. A first turn with nothing before it
+            // has no parent commit, and there the only honest base left is
+            // HEAD - it will show more than the turn did once HEAD has moved,
+            // but showing nothing would be worse.
+            var base = self.viewBase();
+            const at = git.diffAt(arena, self.io, null, skip, base, ref) catch blk: {
+                if (std.mem.eql(u8, base, "HEAD")) {
+                    self.viewing = null;
+                    self.view_ref_len = 0;
+                    return 0;
+                }
+                base = "HEAD";
+                break :blk git.diffAt(arena, self.io, null, skip, base, ref) catch {
+                    self.viewing = null;
+                    self.view_ref_len = 0;
+                    return 0;
+                };
             };
             git_span.end();
             self.parsed = at;
-            self.sources = source.loadAt(arena, self.io, null, at.diff, ref) catch null;
+            self.sources = source.loadAt(arena, self.io, null, at.diff, ref, base) catch null;
             if (self.sources) |srcs| {
                 for (at.diff.files) |*f| {
                     const s = srcs.find(f.path()) orelse continue;
@@ -388,17 +406,30 @@ pub const Review = struct {
         return self.view_ref[0..self.view_ref_len];
     }
 
+    /// What the turn on screen is diffed against.
+    pub fn viewBase(self: *const Review) []const u8 {
+        if (self.view_base_len == 0) return "HEAD";
+        return self.view_base[0..self.view_base_len];
+    }
+
     /// Shows a turn instead of the working tree. The caller re-diffs.
-    pub fn showTurn(self: *Review, turn: u32, ref: []const u8) void {
+    ///
+    /// `base` is the turn before this one, so the view is what this turn did.
+    /// HEAD for the baseline, which has nothing before it.
+    pub fn showTurn(self: *Review, turn: u32, ref: []const u8, base: []const u8) void {
         const n = @min(ref.len, self.view_ref.len);
         @memcpy(self.view_ref[0..n], ref[0..n]);
         self.view_ref_len = @intCast(n);
+        const m = @min(base.len, self.view_base.len);
+        @memcpy(self.view_base[0..m], base[0..m]);
+        self.view_base_len = @intCast(m);
         self.viewing = turn;
     }
 
     /// Back to the working tree, which is the only place the reader can act.
     pub fn showWorking(self: *Review) void {
         self.view_ref_len = 0;
+        self.view_base_len = 0;
         self.viewing = null;
     }
 
