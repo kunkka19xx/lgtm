@@ -81,11 +81,11 @@
 
           outputHashMode = "recursive";
           outputHashAlgo = "sha256";
-          # Placeholder. On the first build Nix reports the real hash and
-          # refuses to continue; paste it here. Deliberately not silenced with
-          # a permissive setting: an unpinned dependency tree is the one thing
-          # a reproducible build cannot have.
-          outputHash = nixpkgs.lib.fakeHash;
+          # The hash of the fetched dependency tree. Deliberately not silenced
+          # with a permissive setting: an unpinned dependency tree is the one
+          # thing a reproducible build cannot have. Change build.zig.zon and
+          # this changes; nix reports the new one and refuses to continue.
+          outputHash = "sha256-k0J10N4QnJ9j2MhPZLbh7lqxDj05nYCt/9pzzfKjVvk=";
         };
 
       lgtmPackage =
