@@ -25,7 +25,7 @@ pub fn main(init: std.process.Init) !u8 {
     var queue = event.Queue.init(init.gpa, init.io);
     defer queue.deinit();
 
-    var watcher = watch.Watcher.init(init.gpa, init.io, &queue, .{ .repo = repo });
+    var watcher = watch.Watcher.init(init.gpa, init.io, &queue, .{ .repo = repo, .quiet_ms = watch.default_quiet_ms });
     defer watcher.deinit();
     try watcher.start();
 
@@ -41,6 +41,7 @@ pub fn main(init: std.process.Init) !u8 {
         const events = try queue.tryDrain(init.gpa);
         defer init.gpa.free(events);
         for (events) |e| switch (e) {
+            .agent_quiescent => try w.print("[{d: >5}ms] quiet - the agent has stopped\n", .{elapsed}),
             .files_changed => |paths| {
                 batches += 1;
                 try w.print("[{d: >5}ms] batch {d}: {d} path(s)\n", .{ elapsed, batches, paths.len });

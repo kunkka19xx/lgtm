@@ -160,6 +160,30 @@ pub fn lsTreeArgv(out: *[5][]const u8, ref: []const u8) []const []const u8 {
     return out[0..5];
 }
 
+/// Every ref we have written, newest-sorted by the caller. Only ours: the
+/// pattern is the namespace, so this cannot list a branch even by accident.
+pub fn listRefsArgv(out: *[4][]const u8) []const []const u8 {
+    out.* = .{ "git", "for-each-ref", "--format=%(refname)", ref_prefix };
+    return out[0..4];
+}
+
+/// Every ref of ours with the commit it points at, which is what turns a
+/// `git log` walk back into turn numbers. One call rather than a `rev-parse`
+/// per ref: the list is read to draw a list, and a subprocess per row is how a
+/// list becomes slow.
+pub fn listRefOidsArgv(out: *[4][]const u8) []const []const u8 {
+    out.* = .{ "git", "for-each-ref", "--format=%(objectname) %(refname)", ref_prefix };
+    return out[0..4];
+}
+
+/// Deletes one ref. Pruning is ref deletion and nothing else: the objects
+/// become unreachable and ordinary `git gc` reclaims them, so this file never
+/// deletes an object and cannot delete one someone else still points at.
+pub fn deleteRefArgv(out: *[4][]const u8, ref: []const u8) []const []const u8 {
+    out.* = .{ "git", "update-ref", "-d", ref };
+    return out[0..4];
+}
+
 // -- output parsers --------------------------------------------------------
 
 /// One `ls-tree -r -z` record: `<mode> SP <type> SP <oid> TAB <path> NUL`.
@@ -319,6 +343,54 @@ pub fn writeSnapshot(
     var ur: [4][]const u8 = undefined;
     gpa.free(try plain.out(updateRefArgv(&ur, opts.ref, commit.slice())));
     return commit;
+}
+
+/// The refs we have written, in git's order. Caller owns both slices.
+pub fn listRefs(gpa: Allocator, io: std.Io) Error!struct { text: []u8, refs: [][]const u8 } {
+    var lr: [4][]const u8 = undefined;
+    const ctx: Ctx = .{ .gpa = gpa, .io = io };
+    const text = try ctx.out(listRefsArgv(&lr));
+    errdefer gpa.free(text);
+
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(gpa);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        const ref = std.mem.trim(u8, line, " \r");
+        if (ref.len > 0 and ours(ref)) try out.append(gpa, ref);
+    }
+    return .{ .text = text, .refs = try out.toOwnedSlice(gpa) };
+}
+
+/// `<oid> <ref>` for every ref of ours. Caller owns the text and the slice.
+pub fn listRefOids(gpa: Allocator, io: std.Io) Error!struct { text: []u8, pairs: []Entry } {
+    var lr: [4][]const u8 = undefined;
+    const ctx: Ctx = .{ .gpa = gpa, .io = io };
+    const text = try ctx.out(listRefOidsArgv(&lr));
+    errdefer gpa.free(text);
+
+    var out: std.ArrayList(Entry) = .empty;
+    errdefer out.deinit(gpa);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        const row = std.mem.trim(u8, line, " \r");
+        const sp = std.mem.indexOfScalar(u8, row, ' ') orelse continue;
+        const ref = row[sp + 1 ..];
+        if (!ours(ref)) continue;
+        try out.append(gpa, .{ .oid = row[0..sp], .path = ref });
+    }
+    return .{ .text = text, .pairs = try out.toOwnedSlice(gpa) };
+}
+
+/// Deletes a ref of ours, or does nothing. Never reports failure: pruning is
+/// housekeeping, and a ref that could not be removed is a little wasted disk
+/// rather than anything the reader needs to hear about.
+pub fn deleteRef(gpa: Allocator, io: std.Io, ref: []const u8) void {
+    if (!ours(ref)) return;
+    var dr: [4][]const u8 = undefined;
+    const ctx: Ctx = .{ .gpa = gpa, .io = io };
+    const text = ctx.out(deleteRefArgv(&dr, ref)) catch return;
+    gpa.free(text);
 }
 
 /// Reads a snapshot's paths and blob ids. Caller owns the slice; the strings
@@ -487,4 +559,17 @@ test "the index is primed from HEAD, so a snapshot is a whole tree" {
     const argv = readTreeArgv(&buf);
     try testing.expectEqualSlices([]const u8, &.{ "git", "read-tree", "HEAD" }, argv);
     for (argv) |word| try testing.expect(!std.mem.eql(u8, word, "--empty"));
+}
+
+test "listing and deleting name our namespace and nothing else" {
+    var a: [4][]const u8 = undefined;
+    const list = listRefsArgv(&a);
+    try testing.expectEqualStrings("for-each-ref", list[1]);
+    // The pattern is the namespace, so the listing cannot return a branch even
+    // if someone later widens what is done with the result.
+    try testing.expectEqualStrings(ref_prefix, list[3]);
+
+    var b: [4][]const u8 = undefined;
+    const del = deleteRefArgv(&b, "refs/lgtm/s/1");
+    try testing.expectEqualSlices([]const u8, &.{ "git", "update-ref", "-d", "refs/lgtm/s/1" }, del);
 }

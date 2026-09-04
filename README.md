@@ -140,6 +140,13 @@ Measured on macOS arm64, ReleaseFast, in this repository:
 Everything durable is a plain file in `.lgtm/` - comments as jsonl, reviews as
 markdown. Kill it and restart it; you lose scroll position.
 
+Snapshots, when they land, live in git's own object store under
+`refs/lgtm/**`. That namespace is invisible to `git branch` and `git status`,
+but `git log --all` walks every ref, so those commits will show up there. They
+are ordinary objects: `git show refs/lgtm/<session>/3:src/auth.zig` reads a file
+out of one without lgtm installed, and deleting the refs is all it takes to be
+rid of them.
+
 ## License
 
 Apache-2.0. See [`LICENSE`](LICENSE).

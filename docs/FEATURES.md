@@ -233,6 +233,16 @@ Every row is rendered from the bindings by `keymap.writeChords`, so a remapped k
 
 `F1` and `g?` are intended to alias the same popup; neither is bound yet.
 
+**The list footers do not restate the conventions.** `<CR> open` and `<Esc>
+close` were in both of them and are in neither now. They are the two most
+guessable keys in a picker - every one ever written selects with Enter and
+leaves with Escape - and the footer is the only place the keys that are *not*
+guessable can be said. Twenty columns of convention pushed `<C-s> send`,
+`<C-x> send all` and `<C-d> del` towards the edge, where the footer's own
+truncation would eventually have dropped them: the row was spending its budget
+on what the reader already knew. The compose box keeps its `<Esc>`, because
+there it means two levels on one key rather than "close".
+
 ### 4.5 Template strings - the sleeper feature
 
 Different agents like different reference formats, and users have strong opinions. Make every outgoing string a template. The table shipped in v0.1 as `bridge/template.zig`, so no format literal is spelled out at a call site; reading `[templates]` from the config over the top of it is v0.2:

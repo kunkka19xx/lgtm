@@ -149,6 +149,14 @@ pub const View = struct {
     /// which mark it is. Zero and zero when there is none.
     fresh_total: u32 = 0,
     mark_turn: u32 = 0,
+    /// The turn on screen, or null for the working tree. The mode row says so
+    /// on every frame it is set, and not optionally: a turn's diff looks
+    /// exactly like the working tree's, and reading old code as current is the
+    /// failure this view can cause (SNAPSHOTS.md 5.3).
+    viewing: ?u32 = null,
+    /// Turns written since the one on screen, so a reader parked in the past
+    /// can see the present accumulating without being dragged into it.
+    newer_turns: u32 = 0,
     /// The keymap, so a message that has to name a key can ask what that key
     /// currently is. One field rather than one per message: every one of them
     /// would otherwise be a place `[keys]` could be remapped out from under,
@@ -326,6 +334,11 @@ pub const FileEntry = struct {
     /// `+0 -0` beside them would be a fact about a file that did not change
     /// dressed up as a change.
     in_review: bool = true,
+    /// The row is not a file, so it gets no filetype icon and no leading
+    /// indent. The turn list draws its own rail in that column, and a `▏` for
+    /// "unknown filetype" beside `working tree` is the widget asserting
+    /// something about a row that is not a path at all.
+    plain: bool = false,
 };
 
 /// Everything the `F` overlay draws. Its own view for the same reason

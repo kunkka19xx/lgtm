@@ -71,7 +71,28 @@ pub fn diffPathsIn(
     paths: []const []const u8,
     ignore: []const []const u8,
 ) Error!Parsed {
-    return diffBase(gpa, io, repo, paths, ignore, "HEAD");
+    return diffBase(gpa, io, repo, paths, ignore, "HEAD", null);
+}
+
+/// The review as it stood at a snapshot, rather than as it stands now.
+///
+/// `git diff HEAD <ref>`: the same left-hand side, a different right-hand one.
+/// That is what makes a turn a *diff source* rather than a second kind of view
+/// (SNAPSHOTS.md 5.3) - hunks, change ids, syntax, search and the gutter all
+/// work on it because none of them ever knew where the diff came from.
+///
+/// No untracked scan. `git diff HEAD` cannot see a new file, so one is
+/// synthesised for the working tree; between two trees there is nothing to
+/// synthesise, because the right-hand side already contains everything git
+/// knew about at that moment.
+pub fn diffAt(
+    gpa: Allocator,
+    io: std.Io,
+    repo: ?[]const u8,
+    ignore: []const []const u8,
+    ref: []const u8,
+) Error!Parsed {
+    return diffBase(gpa, io, repo, &.{}, ignore, "HEAD", ref);
 }
 
 fn diffBase(
@@ -81,6 +102,8 @@ fn diffBase(
     paths: []const []const u8,
     ignore: []const []const u8,
     base: []const u8,
+    /// The right-hand side, when it is a tree rather than the working tree.
+    target: ?[]const u8,
 ) Error!Parsed {
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(gpa);
@@ -90,6 +113,7 @@ fn diffBase(
     // `HEAD` normally, `--cached` in a repository whose first commit has not
     // happened yet - see the retry below.
     try argv.appendSlice(gpa, &.{ "diff", base });
+    if (target) |r| try argv.append(gpa, r);
     try argv.appendSlice(gpa, &.{
         // Stable output regardless of the user's config.
         "--no-color",
@@ -128,15 +152,22 @@ fn diffBase(
     // synthesises the rest. So the answer is a retry, not a refusal.
     if (out.exit_code != 0) {
         if (!insideRepo(gpa, io, repo)) return error.NotARepository;
-        if (std.mem.eql(u8, base, "HEAD")) {
+        // The unborn-HEAD retry is for the working tree only. Diffing against
+        // a snapshot in a repository with no commits is a question with no
+        // answer rather than one to rephrase.
+        if (target == null and std.mem.eql(u8, base, "HEAD")) {
             out.deinit(gpa);
-            return diffBase(gpa, io, repo, paths, ignore, "--cached");
+            return diffBase(gpa, io, repo, paths, ignore, "--cached", null);
         }
         return error.GitFailed;
     }
 
     var parsed = try diff.parse(gpa, out.stdout);
     errdefer parsed.deinit(gpa);
+
+    // Between two trees there is nothing untracked: the right-hand side is
+    // already everything git knew about at that moment.
+    if (target != null) return .{ .diff = parsed, .raw = out.stdout, .stderr = out.stderr };
 
     // `git diff HEAD` does not see untracked files, and an agent creating a
     // new file is one of the most common things it does. Without this they

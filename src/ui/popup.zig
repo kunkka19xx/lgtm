@@ -100,7 +100,11 @@ fn footerOf(
         n = last + 1;
     }
     // Trailing separator trimmed: the label sits inside a border, and two
-    // spaces before the corner read as a gap in it.
+    // spaces before the corner read as a gap in it. Guarded, because the lead
+    // is one space now rather than seventeen columns of words: a budget that
+    // fits no group at all leaves just that space, and subtracting from an
+    // empty buffer would wrap rather than trim.
+    if (out.items.len == 0) return .{ .text = "", .keys = spans.items };
     return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
 }
 
@@ -126,11 +130,24 @@ fn tabsOf(arena: Allocator, active: ?keymap.Group) Allocator.Error!Footer {
     return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
 }
 
-/// What closing an overlay is bound to, in both of them.
-const close_key: keytext.HelpEntry = .{ .keys = "<Esc>", .desc = "close" };
+// `<CR> open` and `<Esc> close` are deliberately absent from both list
+// footers. They are the two most guessable keys in any picker - every one ever
+// written selects with Enter and leaves with Escape - and the row is the only
+// place the keys that are *not* guessable can be said. Spending twenty columns
+// restating a convention pushed `<C-s> send  <C-x> send all  <C-d> del` towards
+// the edge, where the footer's own truncation would have dropped them.
+//
+// The compose box keeps its `<Esc>`, because there it means something a picker
+// does not: leave insert, then leave the box, two levels on one key.
 
-/// What a filterable overlay opens its label with.
-const filter_lead = " type to filter  ";
+/// What a footer opens with: one space off the border, and no words.
+///
+/// It used to say "type to filter", and that went the same way `<CR> open` and
+/// `<Esc> close` did. The box already draws a `>` prompt with a cursor in it -
+/// a reader looking at a text field with a caret does not need to be told that
+/// typing goes there, and every fuzzy picker they have ever used works this
+/// way. Seventeen columns is most of a key group on an 80-column pane.
+const filter_lead = " ";
 
 /// The prefix drawn before the filter text, from the prompt that collects it.
 const prompt_filter_prefix = prompt_mod.Kind.help_filter.prefix();
@@ -335,7 +352,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
     // The popup's own keys, along the bottom with the filter hint. `<Esc>` is
     // `prompt.zig`'s hardcoded cancel rather than a binding, which is why that
     // one is written out and the rest are generated.
-    const foot = try footerOf(f.arena, filter_lead, v.keys, &.{close_key}, f.width() -| 2);
+    const foot = try footerOf(f.arena, filter_lead, v.keys, &.{}, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -396,12 +413,12 @@ test "the popup footer marks exactly its key names, and no other text" {
         .{ .keys = "J", .desc = "move" },
         .{ .keys = "<Right>", .desc = "column" },
     };
-    const foot = try footerOf(arena, filter_lead, nav, &.{close_key}, 200);
+    const foot = try footerOf(arena, filter_lead, nav, &.{.{ .keys = "<C-d>", .desc = "del" }}, 200);
 
     // Same description, so `H` and `J` collapse under one label.
-    try testing.expectEqualStrings(" type to filter  H J move  <Right> column  <Esc> close ", foot.text);
+    try testing.expectEqualStrings(" H J move  <Right> column  <C-d> del ", foot.text);
 
-    const want = [_][]const u8{ "H", "J", "<Right>", "<Esc>" };
+    const want = [_][]const u8{ "H", "J", "<Right>", "<C-d>" };
     try testing.expectEqual(want.len, foot.keys.len);
     for (foot.keys, want) |sp, expected| {
         try testing.expectEqualStrings(expected, foot.text[sp.start..][0..sp.len]);
@@ -418,24 +435,32 @@ test "a footer too wide for the box sheds whole groups, and never all of them" {
         .{ .keys = "H", .desc = "tab" },
     };
     // Wide: everything is there.
-    const full = try footerOf(arena, filter_lead, nav, &.{close_key}, 200);
-    try std.testing.expect(std.mem.indexOf(u8, full.text, "close") != null);
+    const full = try footerOf(arena, filter_lead, nav, &.{.{ .keys = "<C-d>", .desc = "del" }}, 200);
+    try std.testing.expect(std.mem.indexOf(u8, full.text, "del") != null);
 
     // Narrow: the last group goes rather than the whole row. A footer that
     // vanishes for being one column too wide is the bug this replaced - it is
     // the only thing on screen saying what the keys are.
-    const cut = try footerOf(arena, filter_lead, nav, &.{close_key}, 30);
-    try std.testing.expect(cut.text.len <= 30);
+    // 20, not 30: the footer shed seventeen columns when "type to filter" went,
+    // and a budget that no longer forces a decision tests nothing.
+    const cut = try footerOf(arena, filter_lead, nav, &.{.{ .keys = "<C-d>", .desc = "del" }}, 20);
+    try std.testing.expect(cut.text.len <= 20);
     try std.testing.expect(std.mem.indexOf(u8, cut.text, "move") != null);
-    try std.testing.expect(std.mem.indexOf(u8, cut.text, "close") == null);
+    try std.testing.expect(std.mem.indexOf(u8, cut.text, "del") == null);
 
     // Every span still points inside the text it was trimmed with, or the
     // accent repaint would read past the end of it.
     for (cut.keys) |sp| try std.testing.expect(sp.start + sp.len <= cut.text.len);
 
-    // Even a budget of nothing leaves the hint rather than an empty border.
-    const tiny = try footerOf(arena, filter_lead, nav, &.{close_key}, 1);
-    try std.testing.expect(tiny.text.len > 0);
+    // A budget that fits nothing draws nothing. That is a change: the footer
+    // used to survive any budget because " type to filter  " was seventeen
+    // columns it always emitted, so "never empty" was a property of the words
+    // rather than of the code. With them gone, an empty border is the honest
+    // answer - and it is still whole groups or nothing, never half a key.
+    const tiny = try footerOf(arena, filter_lead, nav, &.{.{ .keys = "<C-d>", .desc = "del" }}, 1);
+    try std.testing.expect(tiny.text.len <= 1);
+    try std.testing.expect(std.mem.indexOf(u8, tiny.text, "mov") == null);
+    try std.testing.expectEqual(@as(usize, 0), tiny.keys.len);
 }
 
 test "one column by default, and the grid still fits two when asked" {
@@ -535,13 +560,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
     const title: Footer = .{ .text = v.title, .keys = &.{} };
-    var tail: std.ArrayList(keytext.HelpEntry) = .empty;
-    // `<Esc>` before the extras: the footer drops trailing groups that do not
-    // fit, and the way out is the last thing that should go.
-    try tail.append(f.arena, .{ .keys = "<CR>", .desc = "open" });
-    try tail.append(f.arena, close_key);
-    try tail.appendSlice(f.arena, v.extra_keys);
-    const foot = try footerOf(f.arena, filter_lead, v.keys, tail.items, f.width() -| 2);
+    const foot = try footerOf(f.arena, filter_lead, v.keys, v.extra_keys, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
     m.footer = f.win.gwidth(foot.text);
@@ -593,7 +612,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // draw it: the shape and the hue together are what let a reader find
         // the Zig file without reading a name. The path keeps the status
         // colour, so the row still says what happened to it.
-        if (devicon.forPath(e.path, icons)) |icon| {
+        if (if (e.plain) null else devicon.forPath(e.path, icons)) |icon| {
             const hue = switch (icon.hue) {
                 .red => f.theme.hues.red,
                 .green => f.theme.hues.green,

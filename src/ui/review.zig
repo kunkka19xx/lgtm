@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 
 const anchor = @import("../core/anchor.zig");
 const checkpoint = @import("../core/checkpoint.zig");
+const snapshot = @import("../snapshot/snapshot.zig");
 const diff = @import("../core/diff.zig");
 const git = @import("../core/git.zig");
 const hunk = @import("../core/hunk.zig");
@@ -74,6 +75,16 @@ pub const Review = struct {
     /// empty review, and the reader has to be told why every frame rather than
     /// left looking at a wordmark wondering what happened.
     no_repo: bool = false,
+    /// The turn on screen, or null for the working tree.
+    ///
+    /// Held here because it is a property of *this generation* - which diff is
+    /// being shown - rather than of where the reader is looking. `regenerate`
+    /// reads it and everything downstream is unchanged: a turn is a diff
+    /// source, and nothing above `core/git.zig` ever knew where a diff came
+    /// from (SNAPSHOTS.md 5.3).
+    viewing: ?u32 = null,
+    view_ref: [128]u8 = @splat(0),
+    view_ref_len: u8 = 0,
 
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
@@ -181,6 +192,30 @@ pub const Review = struct {
 
         const git_span = metrics.span(.git_subprocess);
         const skip: []const []const u8 = if (self.show_ignored) &.{} else self.ignore;
+        if (self.viewRef()) |ref| {
+            // A turn. The same left-hand side, a different right-hand one, and
+            // the buffers for it read out of the tree rather than off disk -
+            // `attach` still checks every line against the buffer it should
+            // have come from, so the historical view obeys the same rule the
+            // live one does.
+            const at = git.diffAt(arena, self.io, null, skip, ref) catch {
+                self.viewing = null;
+                self.view_ref_len = 0;
+                return 0;
+            };
+            git_span.end();
+            self.parsed = at;
+            self.sources = source.loadAt(arena, self.io, null, at.diff, ref) catch null;
+            if (self.sources) |srcs| {
+                for (at.diff.files) |*f| {
+                    const s = srcs.find(f.path()) orelse continue;
+                    source.attach(f, s.*) catch {};
+                }
+            }
+            for (at.diff.files) |*f| try self.ids.inherit(arena, &.{}, f.hunks);
+            try self.refresh();
+            return 0;
+        }
         // Not a repository is a state to sit in, not an error to die from. The
         // review is empty, the splash draws, and `?`, `:q` and the compose box
         // all still work - which is the same shape as a clean tree, and for
@@ -292,6 +327,80 @@ pub const Review = struct {
         }
         self.mark_at.turn += 1;
         try self.refresh();
+    }
+
+    /// Fills the mark from a snapshot ref instead of from the live buffers.
+    ///
+    /// This is the whole of what step 3 changed. `mark()` copies what is on
+    /// screen, which is exact and free and dies with the process; this reads
+    /// the same content back out of `refs/lgtm/<session>/<turn>` so that
+    /// "since I last looked" still means something tomorrow.
+    ///
+    /// Everything above it is untouched - `freshRows` cannot tell where the
+    /// bytes came from, and neither can the gutter, `]m` or the count. That was
+    /// the point of `Checkpoint.find` being the only thing the review layer
+    /// ever asked of the mark.
+    ///
+    /// Best effort. A ref that was pruned, a repository that has moved on, a
+    /// failing plumbing call: all of them leave the mark unset, which is the
+    /// state every session starts in and needs no explaining.
+    pub fn restoreMark(self: *Review, ref: []const u8, turn: u32) void {
+        const fs = self.files();
+        if (fs.len == 0) return;
+
+        var paths = self.gpa.alloc([]const u8, fs.len) catch return;
+        defer self.gpa.free(paths);
+        for (fs, 0..) |*f, i| paths[i] = f.path();
+
+        const blobs = snapshot.readPaths(self.gpa, self.io, ref, paths) catch return;
+        defer {
+            for (blobs) |b| self.gpa.free(b);
+            self.gpa.free(blobs);
+        }
+
+        self.mark_at.clear();
+        for (fs, 0..) |*f, i| {
+            const marked = blobs[i];
+            // Absent from the snapshot means the file was not in the review
+            // then, and `freshRows` reads a missing entry as exactly that. It
+            // must not be recorded as present-and-empty, which would say the
+            // file existed and was blank.
+            if (marked.len == 0 and self.buffersFor(f.path()).head == null) continue;
+
+            // The deleted-line set cannot be read back - it lived in a diff
+            // that no longer exists - so it is derived from the marked tree
+            // against HEAD, which is the same question asked of the data that
+            // did survive (`core/checkpoint.zig`).
+            const head = self.buffersFor(f.path()).head;
+            const removed: []u32 = if (head) |h|
+                checkpoint.derivedRemoved(self.gpa, h.bytes, marked) catch &.{}
+            else
+                &.{};
+            defer if (removed.len > 0) self.gpa.free(removed);
+            self.mark_at.add(f.path(), marked, removed) catch {};
+        }
+        self.mark_at.turn = turn;
+        self.refresh() catch {};
+    }
+
+    /// The ref of the turn on screen, or null when the working tree is.
+    pub fn viewRef(self: *const Review) ?[]const u8 {
+        if (self.view_ref_len == 0) return null;
+        return self.view_ref[0..self.view_ref_len];
+    }
+
+    /// Shows a turn instead of the working tree. The caller re-diffs.
+    pub fn showTurn(self: *Review, turn: u32, ref: []const u8) void {
+        const n = @min(ref.len, self.view_ref.len);
+        @memcpy(self.view_ref[0..n], ref[0..n]);
+        self.view_ref_len = @intCast(n);
+        self.viewing = turn;
+    }
+
+    /// Back to the working tree, which is the only place the reader can act.
+    pub fn showWorking(self: *Review) void {
+        self.view_ref_len = 0;
+        self.viewing = null;
     }
 
     /// Drops the mark, and with it every freshness marker.

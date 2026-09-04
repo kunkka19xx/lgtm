@@ -16,6 +16,7 @@
 const std = @import("std");
 const lgtm = @import("lgtm");
 const gitobj = lgtm.gitobj;
+const snapshot = lgtm.snapshot;
 const proc = lgtm.proc;
 
 pub fn main(init: std.process.Init) !u8 {
@@ -29,8 +30,6 @@ pub fn main(init: std.process.Init) !u8 {
 
     var args = init.minimal.args.iterate();
     _ = args.next();
-    const session = args.next() orelse "harness";
-    const turn: u32 = if (args.next()) |s| std.fmt.parseInt(u32, s, 10) catch 1 else 1;
     const message = args.next() orelse "harness snapshot";
 
     // Ignore-clean by construction, which is what keeps `node_modules` out:
@@ -63,20 +62,19 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
-    var ref_buf: [128]u8 = undefined;
-    const ref = try gitobj.refFor(&ref_buf, session, turn);
-
-    const commit = gitobj.writeSnapshot(gpa, io, init.environ_map, .{
-        .paths = paths.items,
-        .ref = ref,
-        .message = message,
-    }) catch |err| {
-        try w.print("snapshot failed: {t}\n", .{err});
+    // Through the policy layer, which is what step 2 added: it decides the
+    // session, numbers the turn, chains it to the last one and prunes.
+    var store: snapshot.Store = .open(gpa, io, init.environ_map);
+    const was = store.state.latest_turn;
+    const turn = store.take(paths.items, message) orelse {
+        try w.print("no snapshot taken (snapshots off, or nothing changed)\n", .{});
         return 1;
     };
 
-    try w.print("wrote {s}\n  commit {s}\n  {d} path{s}\n\n", .{
-        ref, commit.slice(), paths.items.len, if (paths.items.len == 1) "" else "s",
+    var ref_buf: [128]u8 = undefined;
+    const ref = try gitobj.refFor(&ref_buf, store.state.name(), turn);
+    try w.print("session {s}\n  turn {d} (was {d})\n  {s}\n  {d} path{s}\n\n", .{
+        store.state.name(), turn, was, ref, paths.items.len, if (paths.items.len == 1) "" else "s",
     });
 
     const tree = try gitobj.readTree(gpa, io, ref);
@@ -93,9 +91,10 @@ pub fn main(init: std.process.Init) !u8 {
         \\
         \\Now check it from outside, which is the point:
         \\  git show {s}:{s} | head
-        \\  git status                  # must be exactly as you left it
-        \\  git log --oneline -1        # HEAD must not have moved
-        \\  git for-each-ref refs/lgtm/ # only our namespace
+        \\  git status                    # must be exactly as you left it
+        \\  git log --oneline -1          # HEAD must not have moved
+        \\  git for-each-ref refs/lgtm/   # only our namespace, chained by turn
+        \\  cat .lgtm/state.json          # the session, and where the reader got to
         \\
     , .{ ref, paths.items[0] });
     return 0;

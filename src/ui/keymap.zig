@@ -82,6 +82,14 @@ pub const Command = enum {
     /// changes that arrived after it.
     mark_here,
     clear_mark,
+    /// The timeline (SNAPSHOTS.md 5.3). Stepping is the primary way in: the
+    /// common question is "what did the last turn do", and it should cost one
+    /// key rather than a list that has to be opened to move one step.
+    next_turn,
+    prev_turn,
+    /// The turn list. Stepping is the primary way in (§5.3); this is for when
+    /// the target is further away than stepping.
+    turn_list,
     next_fresh,
     prev_fresh,
     /// A file over `large_file_lines` renders as a summary row; these open it
@@ -383,6 +391,11 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
     .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .jump },
+    .{ .chords = &.{ c(']'), c('t') }, .command = .next_turn, .desc = "next turn, ending at the working tree", .hint = null, .group = .jump },
+    .{ .chords = &.{ c('['), c('t') }, .command = .prev_turn, .desc = "previous turn - what the agent had written by then", .hint = null, .group = .jump },
+    .{ .chords = &.{ leader, c('l'), c('t') }, .command = .turn_list, .desc = "list the turns the agent has written", .group = .jump },
+    .{ .chords = &.{ leader, c('n'), c('t') }, .command = .next_turn, .group = .jump },
+    .{ .chords = &.{ leader, c('p'), c('t') }, .command = .prev_turn, .group = .jump },
     .{ .chords = &.{c('M')}, .command = .clear_mark, .desc = "drop the mark; the review reads as one whole change again", .hint = null, .group = .jump },
     .{ .chords = &.{ c(']'), c('m') }, .command = .next_fresh, .desc = "next change since the mark (wraps)", .hint = null, .group = .jump },
     .{ .chords = &.{ c('['), c('m') }, .command = .prev_fresh, .desc = "previous change since the mark (wraps)", .hint = null, .group = .jump },
@@ -432,9 +445,9 @@ pub const default_bindings: []const Binding = &.{
     // Not `<C-a>`, however well it reads as "all": it is the most common tmux
     // prefix after `C-b` and never reaches an application that runs under one.
     // A default nobody can press is not a default.
-    .{ .chords = &.{ctrl('s')}, .command = .comment_send_one, .modes = Modes.finder_only, .desc = "send" },
-    .{ .chords = &.{ctrl('x')}, .command = .comment_send_all, .modes = Modes.finder_only, .desc = "send all" },
-    .{ .chords = &.{ctrl('d')}, .command = .comment_drop, .modes = Modes.finder_only, .desc = "del" },
+    .{ .chords = &.{ctrl('s')}, .command = .comment_send_one, .modes = Modes.finder_only },
+    .{ .chords = &.{ctrl('x')}, .command = .comment_send_all, .modes = Modes.finder_only },
+    .{ .chords = &.{ctrl('d')}, .command = .comment_drop, .modes = Modes.finder_only },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
     .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.lists },

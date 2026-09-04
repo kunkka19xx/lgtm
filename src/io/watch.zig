@@ -16,6 +16,19 @@ const event = @import("../core/event.zig");
 
 pub const default_poll_ms: i64 = 500;
 pub const default_debounce_ms: i64 = 200;
+/// Silence after the last write that reads as "the agent has stopped".
+///
+/// A different question from debounce, and a much longer one. Debounce asks
+/// "has this write finished landing" and is measured in a fifth of a second;
+/// this asks "has the *turn* finished" and is measured in ten. Both are
+/// thresholds on the same clock, which is why they live in the same file and
+/// why there is no second timer thread.
+///
+/// It is a guess, and the guess is wrong for an agent that thinks for a long
+/// time in the middle of a turn. What that costs depends entirely on what
+/// reads it: a snapshot taken early is an extra turn in the timeline, which is
+/// harmless; a notification fired early is spent (NOTIFICATIONS.md 2.1).
+pub const default_quiet_ms: i64 = 10_000;
 
 pub const Options = struct {
     poll_ms: i64 = default_poll_ms,
@@ -25,6 +38,10 @@ pub const Options = struct {
     /// emitting. Debounce already covers the common case; this is the extra
     /// guard from SPEC.md 9 for filesystems where writes land in pieces.
     require_stable: bool = false,
+    /// Zero turns quiet detection off, which is the state until something asks
+    /// for it. Nothing polls harder to provide it: it is read off the clock
+    /// `tick` already consults.
+    quiet_ms: i64 = 0,
 };
 
 /// What a file looked like at one poll.
@@ -52,6 +69,17 @@ pub const Poller = struct {
     /// Signature of the most recent poll, for the two-tick stability check.
     last_sig: u64 = 0,
     prev_sig: u64 = 0,
+    /// Something has changed since the last quiet period was reported. Cleared
+    /// when it fires, so one silence is one signal however long it lasts, and
+    /// re-armed only by a new change - NOTIFICATIONS.md 4 rules 1 and 4, held
+    /// here rather than by every caller that would otherwise have to.
+    quiet_armed: bool = false,
+    /// Whether a poll has happened yet. The first one is not a change, it is
+    /// finding out what is there - and everything looks new against an empty
+    /// baseline. Emitting treats that as a change on purpose, because a
+    /// startup re-diff is right anyway; arming the quiet timer on it is not,
+    /// because ten seconds later it would report a turn that never happened.
+    seen_first: bool = false,
 
     pub fn init(gpa: Allocator, io: std.Io, opts: Options) Poller {
         return .{ .gpa = gpa, .io = io, .opts = opts };
@@ -75,6 +103,20 @@ pub const Poller = struct {
         self.pending.clearRetainingCapacity();
     }
 
+    /// Whether the tree has just gone quiet: something changed, and nothing has
+    /// changed for `quiet_ms` since.
+    ///
+    /// True at most once per burst of writes. Asked after `tick` rather than
+    /// returned by it, because it answers a different question about the same
+    /// poll and folding the two would make every existing caller handle a case
+    /// it does not care about.
+    pub fn quiet(self: *Poller, now_ms: i64) bool {
+        if (self.opts.quiet_ms == 0 or !self.quiet_armed) return false;
+        if (now_ms - self.last_change_ms < self.opts.quiet_ms) return false;
+        self.quiet_armed = false;
+        return true;
+    }
+
     /// One poll. Returns the coalesced path list when the tree has settled,
     /// otherwise null. The caller owns the returned slice and its strings.
     pub fn tick(self: *Poller, now_ms: i64) !?[][]const u8 {
@@ -90,7 +132,9 @@ pub const Poller = struct {
         if (sig != self.last_sig) {
             self.dirty = true;
             self.last_change_ms = now_ms;
+            if (self.seen_first) self.quiet_armed = true;
         }
+        self.seen_first = true;
         self.prev_sig = self.last_sig;
         self.last_sig = sig;
 
@@ -270,10 +314,24 @@ pub const Watcher = struct {
             }
 
             elapsed += poll;
-            const paths = self.poller.tick(elapsed) catch continue orelse continue;
-            self.queue.push(.{ .files_changed = paths }) catch {
-                event.Queue.freePayload(self.poller.gpa, .{ .files_changed = paths });
-            };
+            if (self.poller.tick(elapsed) catch null) |paths| {
+                self.queue.push(.{ .files_changed = paths }) catch {
+                    event.Queue.freePayload(self.poller.gpa, .{ .files_changed = paths });
+                };
+            }
+
+            // The turn boundary, asked after the poll rather than folded into
+            // it: a different question about the same tick (SNAPSHOTS.md 4).
+            //
+            // An event rather than the snapshot itself. This thread must not
+            // write one: the store's turn numbers and its state file are also
+            // touched by `m` on the main loop, and two threads numbering turns
+            // is a race for the sake of moving work off a loop that is idle
+            // anyway. Ten seconds into silence is by definition a moment when
+            // nobody is typing, so the subprocess costs a frame nobody wanted.
+            if (self.poller.quiet(elapsed)) {
+                self.queue.push(.{ .agent_quiescent = .{ .files = 0, .added = 0, .removed = 0 } }) catch {};
+            }
         }
     }
 };
@@ -319,7 +377,7 @@ const Harness = struct {
             .dir = dir,
             .gpa = gpa,
             .io = io,
-            .poller = Poller.init(gpa, io, .{ .repo = dir, .debounce_ms = 200 }),
+            .poller = Poller.init(gpa, io, .{ .repo = dir, .debounce_ms = 200, .quiet_ms = 10_000 }),
         };
     }
 
@@ -442,6 +500,97 @@ test "a quiet tree never emits" {
             try testing.expect(false); // nothing changed, nothing may be emitted
         }
     }
+
+    _ = try proc.run(gpa, io, &.{ "rm", "-rf", dir }, 1 << 20);
+}
+
+test "quiet fires once after the writing stops, and only after a new change" {
+    // The turn boundary the snapshot store takes its turns from
+    // (SNAPSHOTS.md 4). A different question from debounce and a much longer
+    // one: debounce asks whether a write has landed, this asks whether the
+    // agent has stopped.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{ .environ = testing.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = try scratchDir(gpa, "lgtm-watch-quiet");
+    defer gpa.free(dir);
+    _ = try proc.run(gpa, io, &.{ "rm", "-rf", dir }, 1 << 20);
+
+    var h = try Harness.init(gpa, io, dir);
+    defer h.deinit();
+    if (try h.tick(0)) |p| h.free(p);
+    if (try h.tick(500)) |p| h.free(p);
+
+    // Nothing has happened, so there is no silence to report. An agent turn
+    // that changed nothing is not an event (NOTIFICATIONS.md 4 rule 5).
+    try testing.expect(!h.poller.quiet(60_000));
+
+    try h.write("a.txt", "one\n");
+    if (try h.tick(1000)) |p| h.free(p);
+    if (try h.tick(1400)) |p| h.free(p);
+
+    // Still inside the quiet window: the agent may only be thinking.
+    try testing.expect(!h.poller.quiet(5_000));
+    // Ten seconds after the last write, the turn is over.
+    try testing.expect(h.poller.quiet(11_400));
+    // Once per burst, however long the silence goes on: six changed files are
+    // one signal, and a silence that lasts an hour is still one silence.
+    try testing.expect(!h.poller.quiet(30_000));
+    try testing.expect(!h.poller.quiet(3_600_000));
+
+    // A new change re-arms it, and nothing before it does.
+    try h.write("b.txt", "two\n");
+    if (try h.tick(40_000)) |p| h.free(p);
+    try testing.expect(!h.poller.quiet(45_000));
+    try testing.expect(h.poller.quiet(50_500));
+
+    _ = try proc.run(gpa, io, &.{ "rm", "-rf", dir }, 1 << 20);
+}
+
+test "quiet_ms of zero is off, and costs nothing to leave off" {
+    var p: Poller = .init(testing.allocator, undefined, .{});
+    defer p.deinit();
+    p.quiet_armed = true;
+    p.last_change_ms = 0;
+    // The default. Nothing asks for quiet detection until something does, and
+    // an unasked-for timer that fires is worse than one that does not exist.
+    try testing.expectEqual(@as(i64, 0), p.opts.quiet_ms);
+    try testing.expect(!p.quiet(1 << 30));
+}
+
+test "a change made before the first poll is baseline, not a turn" {
+    // Found by testing the wiring against a real repository and getting no
+    // turn: the file had been written before lgtm's watcher had established
+    // what was there, so the change was part of the baseline. Correct - a
+    // first poll discovers, it does not observe - but it means edits in the
+    // first half-second of a session are not a turn, and something looking for
+    // one will wait forever rather than briefly.
+    const gpa = testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{ .environ = testing.environ });
+    defer threaded.deinit();
+    const io = threaded.io();
+
+    const dir = try scratchDir(gpa, "lgtm-watch-baseline");
+    defer gpa.free(dir);
+    _ = try proc.run(gpa, io, &.{ "rm", "-rf", dir }, 1 << 20);
+
+    var h = try Harness.init(gpa, io, dir);
+    defer h.deinit();
+
+    // Written before anything has been polled.
+    try h.write("a.txt", "already here\n");
+    if (try h.tick(0)) |p| h.free(p);
+    if (try h.tick(500)) |p| h.free(p);
+
+    // However long the silence, there was no change to be silent after.
+    try testing.expect(!h.poller.quiet(60_000));
+
+    // A write after the baseline is a turn, and behaves normally.
+    try h.write("b.txt", "new\n");
+    if (try h.tick(61_000)) |p| h.free(p);
+    try testing.expect(h.poller.quiet(72_000));
 
     _ = try proc.run(gpa, io, &.{ "rm", "-rf", dir }, 1 << 20);
 }

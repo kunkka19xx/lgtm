@@ -39,6 +39,9 @@ const motion = @import("motion.zig");
 const compose_mod = @import("compose.zig");
 const prompt_mod = @import("prompt.zig");
 const render = @import("render.zig");
+const gitobj = @import("../snapshot/gitobj.zig");
+const snapshot = @import("../snapshot/snapshot.zig");
+const timeline = @import("../snapshot/timeline.zig");
 const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
@@ -84,6 +87,15 @@ const Keep = enum { reset, row, line };
 pub const App = struct {
     gpa: Allocator,
     io: std.Io,
+
+    /// The snapshot store, when there is an environment to run git in. Null in
+    /// the fixtures, which have no environ and want none: everything it does is
+    /// a subprocess, and a test that wanted one would be testing git.
+    snap: ?snapshot.Store = null,
+    /// Whether the mark has been looked for on disk yet. Once, after the first
+    /// diff: before it there are no files to attach the marked bytes to, and
+    /// after it a second look would undo whatever the reader has since marked.
+    mark_restored: bool = false,
 
     /// One diff generation and everything derived from it. The reader's
     /// position - which file, which row - is here; what changed is there.
@@ -185,9 +197,18 @@ pub const App = struct {
     /// What the file overlay is being used for. It is the same list, the same
     /// filter and the same drawing either way; only what happens on Enter
     /// differs, which is one field rather than a second overlay.
+    /// Turn numbers behind the rows of the turn list, so the index the overlay
+    /// hands back is the turn it names. Parallel to `pick_list` for the same
+    /// reason the comment list's is: the widget lists labelled rows, and what
+    /// a row *means* belongs to whoever built it.
+    pick_turns: std.ArrayList(u32) = .empty,
+
     files_purpose: enum {
         /// `<Space>f`: the changed files, and Enter goes to one.
         jump,
+        /// The timeline. `Enter` shows that turn, which is `[t` without the
+        /// walking.
+        turns,
         /// `@` in the box: every file, and Enter puts its path at the caret.
         mention,
         /// `<Space>d`: every file, and Enter does whichever of those two
@@ -267,6 +288,7 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
+        self.pick_turns.deinit(self.gpa);
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.pick_arena.deinit();
@@ -535,6 +557,11 @@ pub const App = struct {
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .notes = self.commentMarks(),
+            .viewing = self.review.viewing,
+            .newer_turns = if (self.snap) |s|
+                (if (self.review.viewing) |t| s.state.latest_turn -| t else 0)
+            else
+                0,
             .fresh = self.review.freshFor(self.file_index),
             .fresh_total = self.review.freshCount(),
             .mark_turn = self.review.mark_at.turn,
@@ -708,7 +735,10 @@ pub const App = struct {
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
             .send_ref => try self.openCompose(.send, .ref),
-            .comment_add => try self.commentAdd(),
+            .comment_add => {
+                if (self.readOnly()) return;
+                try self.commentAdd();
+            },
             .comment_view => try self.commentView(body),
             .comment_list => {
                 if (self.mode == .finder) return self.closeFiles();
@@ -719,10 +749,11 @@ pub const App = struct {
                 self.files_purpose = .comments;
                 self.buildPickList();
                 self.file_list.title = " comments ";
-                // Left empty: these are bindings now, so `keytext.helpEntries`
-                // puts them in the footer under the user's own spelling. A
-                // hardcoded label would advertise a key a remap had moved.
-                self.file_list.extra_keys = &.{};
+                // This list's own keys, and not the shared footer's: they do
+                // nothing in the file or turn lists, and a footer naming a key
+                // that does nothing is worse than a shorter one. Still read
+                // from the keymap, so a remap moves them.
+                self.file_list.extra_keys = self.commentListKeys(self.pick_arena.allocator());
                 self.file_list.open(0);
                 self.mode = .finder;
             },
@@ -737,7 +768,10 @@ pub const App = struct {
             .comment_delete => self.commentDelete(),
             .next_comment => self.commentStep(1, body),
             .prev_comment => self.commentStep(-1, body),
-            .submit_review => try self.submitReview(),
+            .submit_review => {
+                if (self.readOnly()) return;
+                try self.submitReview();
+            },
             .compose_ask => {
                 try self.openCompose(.send, .ref);
                 self.preset_index = 0;
@@ -796,10 +830,21 @@ pub const App = struct {
             // working tree against what is recorded here, so the rows that
             // arrive later are the ones the reader has not read.
             .mark_here => {
+                // Marking a turn as read would record a tree the reader is
+                // looking at rather than the one they are responsible for.
+                if (self.readOnly()) return;
                 const n = self.files().len;
                 try self.review.mark();
-                self.notice.set("marked {d} file{s} as read - changes after this show in the gutter", .{
-                    n, if (n == 1) "" else "s",
+                // The same state, written down. `m` copies the working tree
+                // into memory for this session and into a ref for the next
+                // one; SNAPSHOTS.md 4 says the checkpoint and the snapshot are
+                // one thing, so this is one keystroke doing one thing twice
+                // rather than two states to keep in step.
+                const kept = self.snapshotMark();
+                self.notice.set("marked {d} file{s} as read{s}", .{
+                    n,
+                    if (n == 1) "" else "s",
+                    if (kept) " - and saved, so it survives a restart" else "",
                 });
             },
             // Back to reading the change as one whole thing. The mark never
@@ -822,6 +867,12 @@ pub const App = struct {
             .compose_mention,
             .compose_newline,
             => {},
+            .turn_list => {
+                if (self.mode == .finder) return self.closeFiles();
+                try self.openTurnList();
+            },
+            .next_turn => try self.turnStep(1, body),
+            .prev_turn => try self.turnStep(-1, body),
             .next_fresh => try self.freshStep(1),
             .prev_fresh => try self.freshStep(-1),
             .copy_text => try self.yank(.selection),
@@ -1089,6 +1140,19 @@ pub const App = struct {
             .close => self.closeFiles(),
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
+                if (self.files_purpose == .turns) {
+                    const i = picked orelse {
+                        self.closeFiles();
+                        return;
+                    };
+                    const want: u32 = if (i < self.pick_turns.items.len)
+                        self.pick_turns.items[i]
+                    else
+                        std.math.maxInt(u32);
+                    self.closeFiles();
+                    try self.showTurnNumber(want, body);
+                    return;
+                }
                 if (self.files_purpose == .comments) {
                     const i = picked orelse {
                         self.closeFiles();
@@ -2416,6 +2480,325 @@ pub const App = struct {
     ///
     /// The wrap lives here rather than in `rows.nextHunkRow` because only here
     /// is there a status line to announce it in.
+    /// Whether the reader is looking at a turn rather than the working tree,
+    /// and has therefore been told why the key they pressed did nothing.
+    ///
+    /// A comment anchors to a line in the working tree (`core/comments.zig`).
+    /// One written against a historical turn either anchors to a line that is
+    /// not there any more - a comment born stale - or silently retargets to
+    /// whatever now occupies that line number, which is worse. Hard rule 7 is
+    /// about not losing a reader's remark, and the honest way to keep it is to
+    /// not take it.
+    fn readOnly(self: *App) bool {
+        const turn = self.review.viewing orelse return false;
+        var k: [32]u8 = undefined;
+        self.notice.set("turn {d} is read only - {s} returns to the working tree", .{
+            turn, self.keyFor(.next_turn, .normal, &k),
+        });
+        return true;
+    }
+
+    /// The turn list: what the agent has written, one row per turn.
+    ///
+    /// Built from the commit chain rather than from parsed diffs
+    /// (SNAPSHOTS.md 5.3c), which is what keeps it two subprocesses whatever
+    /// the length of the session. `Enter` shows that turn, so the list is a
+    /// selector and the diff view is the viewer - there is no second display
+    /// of files and hunks anywhere in this feature.
+    fn openTurnList(self: *App) !void {
+        const store = if (self.snap) |*s| s else {
+            self.notice.set("snapshots are off here - no turns to list", .{});
+            return;
+        };
+        if (store.state.latest_turn == 0 and !store.state.has_baseline) {
+            self.notice.set("no turns yet - one is taken when the agent stops writing", .{});
+            return;
+        }
+
+        const read = timeline.read(self.gpa, self.io, store.state.name(), store.state.latest_turn) catch {
+            self.notice.set("could not read the timeline", .{});
+            return;
+        };
+        defer self.gpa.free(read.text);
+        defer self.gpa.free(read.turns);
+
+        self.pick_list.clearRetainingCapacity();
+        self.pick_turns.clearRetainingCapacity();
+        _ = self.pick_arena.reset(.retain_capacity);
+        const arena = self.pick_arena.allocator();
+        const now_s: i64 = @intCast(@divFloor(
+            std.Io.Timestamp.now(self.io, .real).toNanoseconds(),
+            std.time.ns_per_s,
+        ));
+
+        // The working tree, pinned at the top. The way back has to be in the
+        // same list as the way out, or the reader is somewhere with no visible
+        // exit - the one thing a history view must never be.
+        var here: u32 = 0;
+        if (self.review.viewing == null) here = 0;
+        self.pick_list.append(self.gpa, .{
+            .path = arena.dupe(u8, "│ working tree  now") catch "working tree",
+            .added = 0,
+            .removed = 0,
+            .in_review = false,
+            .plain = true,
+            .current = self.review.viewing == null,
+        }) catch return;
+        self.pick_turns.append(self.gpa, std.math.maxInt(u32)) catch return;
+
+        var age_buf: [24]u8 = undefined;
+        for (read.turns) |turn| {
+            const shown = turnLabel(arena, turn, store, &age_buf, now_s);
+            self.pick_list.append(self.gpa, .{
+                .path = shown,
+                // The baseline is not a change - it is what was there before
+                // any were made - so it gets no counts. `+4 -0` beside it
+                // would dress up "this is the starting state" as "the agent
+                // added four lines", which is the same mistake `+0 -0` on an
+                // unchanged file was.
+                .added = if (turn.number == 0) 0 else turn.added,
+                .removed = if (turn.number == 0) 0 else turn.removed,
+                .in_review = turn.number != 0,
+                .plain = true,
+                .current = if (self.review.viewing) |v| v == turn.number else false,
+            }) catch return;
+            self.pick_turns.append(self.gpa, turn.number) catch return;
+        }
+
+        self.files_purpose = .turns;
+        self.file_list.title = " turns ";
+        self.file_list.extra_keys = &.{};
+        // Opened on the row the reader is already looking at, rather than at an
+        // arbitrary top.
+        var at: u32 = 0;
+        for (self.pick_list.items, 0..) |row, i| {
+            if (row.current) at = @intCast(i);
+        }
+        self.file_list.open(at);
+        self.mode = .finder;
+    }
+
+    /// The comment list's own footer keys, read from the keymap so a remap
+    /// moves the footer with the binding.
+    fn commentListKeys(self: *App, arena: Allocator) []const keytext.HelpEntry {
+        var out: std.ArrayList(keytext.HelpEntry) = .empty;
+        const want = [_]struct { cmd: keymap.Command, desc: []const u8 }{
+            .{ .cmd = .comment_send_one, .desc = "send" },
+            .{ .cmd = .comment_send_all, .desc = "send all" },
+            .{ .cmd = .comment_drop, .desc = "del" },
+        };
+        for (want) |w| {
+            var buf: [32]u8 = undefined;
+            const keys = keytext.firstKeyFor(self.km.bindings, w.cmd, .finder, &buf);
+            if (keys.len == 0) continue;
+            out.append(arena, .{
+                .keys = arena.dupe(u8, keys) catch continue,
+                .desc = w.desc,
+            }) catch continue;
+        }
+        return out.toOwnedSlice(arena) catch &.{};
+    }
+
+    /// Shows one turn by number, or the working tree for the sentinel.
+    ///
+    /// The same two states `]t` walks between, reached by choosing rather than
+    /// by stepping - which is the whole of what the list adds. Nothing here is
+    /// a third way to be looking at something.
+    fn showTurnNumber(self: *App, turn: u32, body: u16) !void {
+        const store = if (self.snap) |*s| s else return;
+        if (turn == std.math.maxInt(u32)) {
+            if (self.review.viewing == null) return;
+            self.review.showWorking();
+            try self.rediff();
+            self.clampScroll(body);
+            self.notice.set("back to the working tree", .{});
+            return;
+        }
+
+        var buf: [128]u8 = undefined;
+        const ref = gitobj.refFor(&buf, store.state.name(), turn) catch return;
+        self.review.showTurn(turn, ref);
+        try self.rediff();
+        self.clampScroll(body);
+        if (self.review.viewing == null) {
+            self.notice.set("turn {d} is gone", .{turn});
+            return;
+        }
+        var k: [32]u8 = undefined;
+        const back = self.keyFor(.next_turn, .normal, &k);
+        if (turn == 0) {
+            self.notice.set("the baseline - before the agent ran, {s} returns", .{back});
+            return;
+        }
+        self.notice.set("turn {d} - read only, {s} returns", .{ turn, back });
+    }
+
+    /// One turn's row. The rail, then which turn, what it touched, when, and
+    /// how big - four columns and no more (SNAPSHOTS.md 5.3).
+    fn turnLabel(
+        arena: Allocator,
+        turn: timeline.Turn,
+        store: *const snapshot.Store,
+        age_buf: []u8,
+        now_s: i64,
+    ) []const u8 {
+        // The rail smartlog and undotree both draw, one column wide, straight
+        // until a restore forks it (§5.3a). `✓` is the mark: read up to here.
+        //
+        // No `@` for the turn on screen, though 5.3b asked for one. The list
+        // widget already marks the row the reader is on, in every list in the
+        // tool, and a second indicator saying the same thing in the next column
+        // is worse than either alone. Borrowing smartlog's spelling was not
+        // worth contradicting the tool's own.
+        const rail: []const u8 = if (turn.number == store.state.reviewed_turn and turn.number > 0) "✓" else "│";
+        const when = timeline.age(age_buf, turn.when_s, now_s);
+
+        if (turn.number == 0) {
+            return std.fmt.allocPrint(arena, "{s} baseline   before the agent ran  {s}", .{ rail, when }) catch "baseline";
+        }
+        return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}", .{
+            rail,
+            turn.number,
+            turn.path,
+            when,
+            turn.files,
+            if (turn.files == 1) "" else "s",
+        }) catch "turn";
+    }
+
+    /// Walks the timeline: one turn back, or forward to the working tree.
+    ///
+    /// The working tree is a position in the walk rather than a place outside
+    /// it, so `]t` from the newest turn lands there and there is always a way
+    /// forward. Nothing here is a jump into a different mode: it is the same
+    /// review with a different right-hand side (SNAPSHOTS.md 5.3).
+    fn turnStep(self: *App, delta: i32, body: u16) !void {
+        const store = if (self.snap) |*s| s else {
+            self.notice.set("snapshots are off here - no turns to walk", .{});
+            return;
+        };
+        const latest = store.state.latest_turn;
+        if (latest == 0) {
+            self.notice.set("no turns yet - one is taken when the agent stops writing", .{});
+            return;
+        }
+
+        // Null is the working tree, and it sits one past the newest turn.
+        const here: i64 = if (self.review.viewing) |t| @intCast(t) else @as(i64, latest) + 1;
+        const want = here + delta;
+
+        if (want > latest) {
+            if (self.review.viewing == null) {
+                self.notice.set("already on the working tree", .{});
+                return;
+            }
+            self.review.showWorking();
+            try self.rediff();
+            self.clampScroll(body);
+            self.notice.set("back to the working tree", .{});
+            return;
+        }
+        // The floor is the baseline when there is one and turn 1 when there is
+        // not - a session that started on a clean tree has nothing before its
+        // first turn, and walking to a ref that was never written would report
+        // it as missing rather than as absent by design.
+        const oldest = store.oldestTurn();
+        if (want < oldest) {
+            if (oldest == 0)
+                self.notice.set("the baseline is as far back as it goes", .{})
+            else
+                self.notice.set("turn 1 is the oldest recorded - no baseline for this session", .{});
+            return;
+        }
+
+        const turn: u32 = @intCast(want);
+        var buf: [128]u8 = undefined;
+        const ref = gitobj.refFor(&buf, store.state.name(), turn) catch {
+            self.notice.set("cannot name that turn", .{});
+            return;
+        };
+        self.review.showTurn(turn, ref);
+        try self.rediff();
+        self.clampScroll(body);
+        if (self.review.viewing == null) {
+            // `regenerate` gave up on the ref - pruned, or never written.
+            self.notice.set("turn {d} is gone", .{turn});
+            return;
+        }
+        var k: [32]u8 = undefined;
+        const back = self.keyFor(.next_turn, .normal, &k);
+        if (turn == 0) {
+            // Not "turn 0". It is the tree as it was before the agent ran, and
+            // that is the only thing about it worth saying.
+            self.notice.set("the baseline - before the agent ran, {s} returns", .{back});
+            return;
+        }
+        self.notice.set("turn {d} of {d} - read only, {s} returns", .{ turn, latest, back });
+    }
+
+    /// Records the working tree as a turn, because the agent has stopped.
+    ///
+    /// The same call `m` makes, with a different reason and without touching
+    /// `reviewed_turn`: a turn nobody has read must not mark itself read, or
+    /// the gutter would go blank exactly when it had something to say.
+    fn snapshotTurn(self: *App) bool {
+        var store = &(if (self.snap) |*s| s else return false).*;
+        const fs = self.files();
+        if (fs.len == 0) return false;
+
+        var paths = self.gpa.alloc([]const u8, fs.len) catch return false;
+        defer self.gpa.free(paths);
+        for (fs, 0..) |*f, i| paths[i] = f.path();
+
+        return store.take(paths, "turn") != null;
+    }
+
+    /// Writes the mark to a ref, so it outlives the process. Returns whether it
+    /// stuck: snapshots are off in a directory git does not own, and the mark
+    /// is still perfectly good for this session without them.
+    fn snapshotMark(self: *App) bool {
+        var store = &(if (self.snap) |*s| s else return false).*;
+        const fs = self.files();
+        if (fs.len == 0) return false;
+
+        var paths = self.gpa.alloc([]const u8, fs.len) catch return false;
+        defer self.gpa.free(paths);
+        for (fs, 0..) |*f, i| paths[i] = f.path();
+
+        if (store.take(paths, "mark") == null) return false;
+        store.markReviewed();
+        return true;
+    }
+
+    /// Records what was already uncommitted before the agent ran.
+    ///
+    /// After the first diff, because that is when the path list exists, and
+    /// once - `Store.baseline` refuses a session that already has one. Silent:
+    /// it is insurance, and insurance that announces itself is noise until the
+    /// day it is not.
+    pub fn takeBaseline(self: *App) void {
+        var store = &(if (self.snap) |*s| s else return).*;
+        const fs = self.files();
+        if (fs.len == 0) return;
+
+        var paths = self.gpa.alloc([]const u8, fs.len) catch return;
+        defer self.gpa.free(paths);
+        for (fs, 0..) |*f, i| paths[i] = f.path();
+        _ = store.baseline(paths);
+    }
+
+    /// Picks the mark up again after a restart, once there are files to attach
+    /// it to. Silent either way: a mark that could not be restored leaves the
+    /// session in the state it would have started in regardless.
+    pub fn restoreMark(self: *App) void {
+        if (self.mark_restored) return;
+        self.mark_restored = true;
+        const store = if (self.snap) |*s| s else return;
+        var buf: [128]u8 = undefined;
+        const ref = store.reviewedRef(&buf) orelse return;
+        self.review.restoreMark(ref, store.state.reviewed_turn);
+    }
+
     /// What a command is bound to right now, for a message that has to name a
     /// key. Written into `buf` by the caller so this allocates nothing, and
     /// read from the keymap so `[keys]` cannot leave a notice telling the
@@ -2871,6 +3254,12 @@ pub const App = struct {
                 // One place knows what an event owns, so a new owning variant
                 // cannot be freed here and forgotten in `Queue.deinit`.
                 event.Queue.freePayload(self.gpa, .{ .files_changed = paths });
+                // A reader in the past stays there. The agent goes on writing
+                // and turns go on accumulating - the mode row counts them - but
+                // re-diffing under someone reading turn 4 would throw them back
+                // to the present mid-sentence, which is the one thing a history
+                // view must never do (SNAPSHOTS.md 5.3).
+                if (self.review.viewing != null) return;
                 try self.rediff();
                 self.clampScroll(body);
             },
@@ -2886,7 +3275,18 @@ pub const App = struct {
                 self.cols = size.cols;
                 self.clampScroll(body);
             },
-            .agent_quiescent, .snapshot_taken => {},
+            // The agent stopped writing, so this is a turn. Snapshotting here
+            // rather than on the watcher thread keeps the store's turn numbers
+            // and its state file owned by one thread; the cost lands ten
+            // seconds into silence, where a frame is worth nothing.
+            //
+            // Silent. The reader did not ask for it and cannot act on it, and
+            // a notice every quiet period would be the tool talking about
+            // itself. What it buys them is that `refs/lgtm/<session>/<n>` now
+            // holds the work the agent has just done, whether or not they ever
+            // press anything (SNAPSHOTS.md 2).
+            .agent_quiescent => _ = self.snapshotTurn(),
+            .snapshot_taken => {},
         }
     }
 };
@@ -5040,4 +5440,74 @@ test "an unbound compose command drops out of the footer rather than lying" {
     var buf: [32]u8 = undefined;
     try testing.expectEqualStrings("<CR>", keytext.firstKeyFor(&only, .compose_submit, .note_input, &buf));
     try testing.expectEqualStrings("", keytext.firstKeyFor(&only, .compose_mention, .note_input, &buf));
+}
+
+// -- the timeline ----------------------------------------------------------
+
+test "walking turns says why when there are none to walk" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // No store: the fixture has no environment to run git in, which is the
+    // same state a directory git does not own is in.
+    try fx.press("[t");
+    try fx.expectNotice("snapshots are off");
+    try testing.expect(fx.app.review.viewing == null);
+}
+
+test "a turn is read only, and the refusal names the way back" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.review.showTurn(4, "refs/lgtm/s1/4");
+
+    // A comment written against a historical turn would anchor to a line that
+    // may not be there any more, or silently retarget to whatever now occupies
+    // that line number. Hard rule 7 says do not lose a remark; the honest way
+    // to keep it is to not take it.
+    try fx.press("<Space>c");
+    try fx.expectNotice("read only");
+    try fx.expectNotice("]t");
+    try testing.expectEqual(@as(usize, 0), fx.app.comments.len());
+
+    // Marking would record a tree the reader is looking at rather than the one
+    // they are answerable for.
+    try fx.press("m");
+    try fx.expectNotice("read only");
+    try testing.expect(!fx.app.review.mark_at.taken());
+}
+
+test "the watcher cannot drag a reader out of the past" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.review.showTurn(2, "refs/lgtm/s1/2");
+
+    // A re-diff here would throw the reader back to the present mid-sentence.
+    // The event still has to free what it owns, which is why this is a return
+    // rather than a branch around the whole arm.
+    const paths = try testing.allocator.alloc([]const u8, 1);
+    paths[0] = try testing.allocator.dupe(u8, "a.zig");
+    try fx.app.handle(.{ .files_changed = paths }, body_rows);
+    try testing.expectEqual(@as(u32, 2), fx.app.review.viewing.?);
+}
+
+test "showing a turn and returning are the two states, and nothing between" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try testing.expect(fx.app.review.viewRef() == null);
+    fx.app.review.showTurn(7, "refs/lgtm/s1/7");
+    try testing.expectEqualStrings("refs/lgtm/s1/7", fx.app.review.viewRef().?);
+    try testing.expectEqual(@as(u32, 7), fx.app.review.viewing.?);
+
+    fx.app.review.showWorking();
+    try testing.expect(fx.app.review.viewRef() == null);
+    try testing.expect(fx.app.review.viewing == null);
+}
+
+test "the turn list says why when there is nothing to list" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // No store, which is the state a directory git does not own is in.
+    try fx.press("<Space>lt");
+    try fx.expectNotice("snapshots are off");
+    try fx.expectMode(.normal);
 }

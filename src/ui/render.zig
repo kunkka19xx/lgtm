@@ -269,7 +269,18 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
 
     // The two visual modes share a `Mode` and are told apart by what is
     // selected, which is also the only place the difference matters.
-    const label = if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
+    // A turn takes the badge, because being in the past *is* a mode: nothing
+    // can be written from here and everything on screen is old. It went in the
+    // message slot first, where it was correct and useless - it outranked every
+    // notice, so pressing a key that refuses in this view gave no answer at
+    // all. The badge is the right home for a state, and it leaves the slot for
+    // the messages that state produces.
+    const label = if (v.viewing) |turn|
+        (if (turn == 0)
+            "BASELINE"
+        else
+            try std.fmt.allocPrint(f.arena, "TURN {d}", .{turn}))
+    else if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
         "VISUAL LINE"
     else
         modeLabel(v.mode);
@@ -277,13 +288,18 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // Flush against the left edge: a leading space reads as the pill being
     // indented rather than as the bar starting there.
     var walk_key: [32]u8 = undefined;
-    var col: u16 = try f.print(row, 0, t.mode_badge, " {s} ", .{label});
+    const badge = if (v.viewing != null) t.turn_badge else t.mode_badge;
+    var col: u16 = try f.print(row, 0, badge, " {s} ", .{label});
 
     col += 2;
 
     // One slot, three claimants, in order of how much the reader needs it: a
     // torn read is a correctness warning, a notice answers the keystroke just
     // typed, and the row count is what fills the space when neither applies.
+    // Ahead of everything, including a notice: a turn's diff looks exactly like
+    // the working tree's, and a reader who has forgotten where they are will
+    // read old code as current. This is the one thing on the row that is not
+    // allowed to lose its place to something more urgent.
     const left: []const u8, const style = if (v.torn)
         .{ "file changed while reading, re-diffing", t.removed_count }
     else if (v.notice.len > 0)
@@ -294,6 +310,13 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         }), t.dim }
     else if (v.selection) |sel|
         .{ try selectionSize(f, v, sel), t.dim }
+    else if (v.viewing != null and v.newer_turns > 0)
+        // Only when idle. The badge already says which turn; this says the
+        // present is still moving, which is what a reader parked in the past
+        // needs to know and does not need shouted.
+        .{ try std.fmt.allocPrint(f.arena, "{d} newer turn{s} since", .{
+            v.newer_turns, if (v.newer_turns == 1) "" else "s",
+        }), t.dim }
     else if (v.fresh_total > 0)
         // Ahead of the row count because it is the one thing in this slot the
         // reader came back to find out. The count is of rows rather than

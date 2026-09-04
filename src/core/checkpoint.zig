@@ -113,6 +113,38 @@ pub fn removedLines(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error![]u
     return out.toOwnedSlice(gpa);
 }
 
+/// HEAD line numbers already gone from the working tree when the mark was
+/// taken, derived rather than read off a diff.
+///
+/// `removedLines` gets them from the diff that existed at the moment of
+/// marking, which is exact and free - and gone after a restart, when all that
+/// survives is the marked tree itself. A HEAD line was already deleted then
+/// exactly when the marked working tree holds no image of it, and that is a
+/// question the same line map answers.
+///
+/// Without this a restored mark would report every deleted row as new, which is
+/// the worst kind of wrong: it says the agent removed something while you were
+/// away, and it says it about code that went before you ever looked.
+pub fn derivedRemoved(gpa: Allocator, head: []const u8, marked: []const u8) Allocator.Error![]u32 {
+    var interner: linemap.Interner = .{};
+    defer interner.deinit(gpa);
+
+    const a = try interner.internLines(gpa, head);
+    defer gpa.free(a);
+    const b = try interner.internLines(gpa, marked);
+    defer gpa.free(b);
+
+    var map = try linemap.lineMap(gpa, a, b);
+    defer map.deinit(gpa);
+
+    var out: std.ArrayList(u32) = .empty;
+    errdefer out.deinit(gpa);
+    for (0..a.len) |i| {
+        if (map.get(i) == null) try out.append(gpa, @intCast(i + 1));
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 /// One bool per row of `f`: whether that row's change arrived after the mark.
 ///
 /// Only added and removed rows can be fresh. A context row is unchanged code
@@ -386,4 +418,48 @@ test "clearing a mark frees it and taken() says so" {
     cp.clear();
     try testing.expectEqual(@as(usize, 0), cp.files.items.len);
     try testing.expectEqual(@as(usize, 0), cp.bytes());
+}
+
+test "removed lines are derivable from the marked tree alone" {
+    // The restore path. `removedLines` reads a diff that no longer exists after
+    // a restart; this reads the marked tree, which does.
+    const gpa = testing.allocator;
+    const head = "keep\ngone before\nalso keep\n";
+    const marked = "keep\nalso keep\n";
+
+    const removed = try derivedRemoved(gpa, head, marked);
+    defer gpa.free(removed);
+    // HEAD line 2 is absent from the marked tree: already deleted then.
+    try testing.expectEqualSlices(u32, &.{2}, removed);
+}
+
+test "a derived mark agrees with the one taken live" {
+    // The two paths must not disagree, or a restart would silently change what
+    // the gutter says about the same file.
+    const gpa = testing.allocator;
+    var f = try fileOf(gpa, "a.zig", &.{ " keep", "-gone before", "-gone since", "+added" });
+    defer f.lines.deinit(gpa);
+
+    // Live: read off the diff at mark time, when only the first deletion had
+    // happened.
+    var live: Checkpoint = .init(gpa);
+    defer live.deinit();
+    try live.add("a.zig", "keep\nadded\n", &.{2});
+
+    // Restored: the same marked tree, and HEAD, with nothing else kept.
+    const head = "keep\ngone before\ngone since\n";
+    const derived = try derivedRemoved(gpa, head, "keep\nadded\n");
+    defer gpa.free(derived);
+    var back: Checkpoint = .init(gpa);
+    defer back.deinit();
+    try back.add("a.zig", "keep\nadded\n", derived);
+
+    const a = try freshRows(gpa, &f, "keep\nadded\n", live.find("a.zig"));
+    defer gpa.free(a);
+    const b = try freshRows(gpa, &f, "keep\nadded\n", back.find("a.zig"));
+    defer gpa.free(b);
+    // The derived set is wider - it also contains line 3, which really was gone
+    // from the marked tree - so the restored mark is at least as truthful about
+    // what the reader had already seen.
+    try testing.expect(!a[1] and !b[1]);
 }

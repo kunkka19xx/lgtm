@@ -29,6 +29,7 @@ const App = app_mod.App;
 const editor = @import("editor.zig");
 const keytext = @import("keytext.zig");
 const render = @import("render.zig");
+const snapshot = @import("../snapshot/snapshot.zig");
 const splash = @import("splash.zig");
 const theme_mod = @import("theme.zig");
 
@@ -120,7 +121,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // The reader services SIGWINCH on its own wake, because the handler is
     // only allowed to set a flag - see `io/input.zig`.
     reader.winsize = &winsize;
-    var watcher = watch.Watcher.init(gpa, io, &queue, .{});
+    var watcher = watch.Watcher.init(gpa, io, &queue, .{ .quiet_ms = watch.default_quiet_ms });
     if (!opts.once) {
         winsize.register() catch {};
         try reader.start();
@@ -157,8 +158,16 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // Notes outlive the process: the whole point of `.lgtm/` is that killing
     // the pane costs scroll position and nothing else (ARCHITECTURE.md 1).
     app.loadComments();
+    // The store needs an environment to run git in, which only this layer has.
+    // Opened before the first diff so `.lgtm/state.json` is read once, and the
+    // mark picked up after it, when there are files to attach it to.
+    app.snap = snapshot.Store.open(gpa, io, environ);
 
     try app.rediff();
+    app.restoreMark();
+    // After the first diff, because the path list is what it needs, and before
+    // the agent has had a chance to write anything - which is the whole point.
+    app.takeBaseline();
 
     while (!app.quit) {
         // A SIGWINCH that never reached the queue leaves the screen wider

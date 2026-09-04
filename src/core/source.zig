@@ -59,6 +59,24 @@ pub const Sources = struct {
 /// file (PERFORMANCE.md 8.1). Worktree content is read directly, one whole-file
 /// read each (8.2).
 pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!Sources {
+    return loadAt(gpa, io, repo, d, null);
+}
+
+/// As `load`, with the right-hand side read from a tree instead of from disk.
+///
+/// What the timeline needs (SNAPSHOTS.md 5.3): viewing a turn means the "new"
+/// side of every file is a blob in a snapshot, not the file on disk. Everything
+/// downstream is unchanged - `attach` still verifies each line against the
+/// buffer it should have come from, which is what keeps the rule that the
+/// buffer is the source of truth true for a historical view as well as a live
+/// one (ARCHITECTURE.md 11.1).
+pub fn loadAt(
+    gpa: Allocator,
+    io: std.Io,
+    repo: ?[]const u8,
+    d: diff.Diff,
+    work_ref: ?[]const u8,
+) Error!Sources {
     var files: std.ArrayList(FileSource) = .empty;
     errdefer {
         for (files.items) |*f| f.deinit(gpa);
@@ -98,6 +116,40 @@ pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!S
         }
     }
 
+    if (work_ref) |ref| {
+        // One batch again, for the same reason the HEAD side is one.
+        var wreq: std.ArrayList(u8) = .empty;
+        defer wreq.deinit(gpa);
+        var wwant: std.ArrayList(usize) = .empty;
+        defer wwant.deinit(gpa);
+        for (d.files, 0..) |f, i| {
+            if (f.status == .deleted or f.status == .binary) continue;
+            try wwant.append(gpa, i);
+            try wreq.appendSlice(gpa, ref);
+            try wreq.append(gpa, ':');
+            try wreq.appendSlice(gpa, f.path());
+            try wreq.append(gpa, '\n');
+        }
+        if (wwant.items.len > 0) {
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(gpa);
+            try argv.append(gpa, "git");
+            if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+            try argv.appendSlice(gpa, &.{ "cat-file", "--batch" });
+
+            const out = try proc.runWithInput(gpa, io, argv.items, wreq.items, max_blob_bytes);
+            defer out.deinit(gpa);
+            if (out.exit_code != 0) return error.GitFailed;
+
+            var cursor: usize = 0;
+            for (wwant.items) |i| {
+                const blob = nextBlob(out.stdout, &cursor) orelse break;
+                files.items[i].work = try Buffer.initOwned(gpa, try gpa.dupe(u8, blob));
+            }
+        }
+        return .{ .files = try files.toOwnedSlice(gpa) };
+    }
+
     for (d.files, 0..) |f, i| {
         if (f.status == .deleted or f.status == .binary) continue;
         const full = if (repo) |r| try std.fs.path.join(gpa, &.{ r, f.path() }) else try gpa.dupe(u8, f.path());
@@ -112,7 +164,11 @@ pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!S
 /// `git cat-file --batch` emits "<sha> <type> <size>\n<contents>\n" per
 /// request, or "<name> missing\n". Size is authoritative, so contents
 /// containing newlines parse correctly.
-fn nextBlob(out: []const u8, cursor: *usize) ?[]const u8 {
+///
+/// Public because the snapshot store reads blobs out of a marked tree the same
+/// way, with `<ref>:<path>` request lines instead of blob ids. One parser for
+/// one output format, rather than a second copy that drifts.
+pub fn nextBlob(out: []const u8, cursor: *usize) ?[]const u8 {
     if (cursor.* >= out.len) return null;
     const nl = std.mem.indexOfScalarPos(u8, out, cursor.*, '\n') orelse return null;
     const header = out[cursor.*..nl];

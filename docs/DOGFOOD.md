@@ -437,5 +437,222 @@ harness checking the code that wrote it would be testing agreement rather than
 correctness - it takes a snapshot and prints the four git commands to check it
 with.
 
+### 2026-09-04 - snapshots, step 2, and a doc that was tmux-shaped
+
+**`NOTIFICATIONS.md` §2 rewritten first.** It ordered delivery as three layers -
+bell, tmux user option, desktop - and said to build downward. The whole argument
+for putting desktop last was that tmux discards OSC 9 without
+`allow-passthrough`. That is a tmux problem: run lgtm directly in ghostty and
+the "hard" layer is one escape sequence with no setup, while the "easy" layer, a
+tmux user option, does not exist. The difficulty ordering inverts the moment you
+leave tmux, so it was never an ordering. It is one method per backend now,
+through the `bridge/` union that already does exactly this for references -
+same detection, same addressing, same exhaustive switch.
+
+Two things fell out of the rewrite that were not in the old draft. **Prefer a
+persistent indicator to a transient one**, because the trigger is a guess: a
+badge on a wrong guess appears early and then goes on being correct, while a
+bell on a wrong guess is spent. And so **the bell is not the fallback** - it is
+transient, it is the sound a terminal makes when something is wrong, and three
+early ones in a turn is how a feature gets muted. `bell = false` by default now,
+which is the opposite of what the doc said.
+
+**Step 2 itself.** `io/watch.zig` gained the quiet period - a second, much
+longer threshold on the clock `tick` already reads. Debounce asks whether a
+write has landed; this asks whether the turn has finished. One subtlety worth
+recording: the first poll armed it, because everything looks new against an
+empty baseline, and ten seconds later the store would have snapshotted a turn
+that never happened. Discovering what is there is not a change.
+
+`snapshot/snapshot.zig` is the policy: session id, the four-hour rule,
+`.lgtm/state.json`, turn numbering and chaining, pruning. Two decisions worth
+keeping. **Other sessions are never pruned** - they are somebody's afternoon,
+git shares the objects so they cost almost nothing, and deleting them is how a
+safety net becomes the thing that lost the work. And **the baseline is never
+pruned**, because `<session>/0` is the tree before the agent ran and it is the
+one snapshot no other snapshot can reconstruct.
+
+Verified across three separate processes in a scratch repo: one session
+continued, turns 1-2-3 chained, each holding its own content, `git status` and
+`.git/index` untouched throughout. `git log --graph` on the newest ref draws the
+chain with stock git, which is the property worth having.
+
+One scare that was not a bug: `git show <ref>:$n.txt` printed empty for every
+turn. zsh applies its `:a` modifier to `$n` there. The trees were right all
+along - a reminder that a verification script is code too.
+
+### 2026-09-04 - the mark survives a restart
+
+Step 3. `m` now writes the working tree to `refs/lgtm/<session>/<turn>` and puts
+the turn in `.lgtm/state.json`; the next session reads it back and refills the
+mark before the first frame.
+
+Checked the way it will actually be used: mark, quit lgtm entirely, edit two
+lines *while it is not running*, start it again. The bar is on those two lines
+and not on the one that was already there. That is the whole feature.
+
+**Nothing above the mark changed**, which is the part worth recording. `freshRows`
+cannot tell where its bytes came from, so the gutter, `]m`, the count, `M` and
+fifteen tests were untouched. `Checkpoint.find(path) -> bytes` being the only
+thing the review layer ever asked of the mark is what made a storage change a
+storage change.
+
+Two decisions the design sketch did not contain.
+
+**The bytes stay in RAM.** "The mark is a ref" is about identity and durability,
+not about where the comparison reads from. Reading the marked content out of git
+per file per re-diff would have turned a 0.93 ms line map into a subprocess, and
+the measurement that justified recomputing everything every time would have
+stopped holding. One `cat-file --batch` at startup, then it is the same in-memory
+mark it always was.
+
+**The deleted-line set had to be derived.** It lived in the diff that existed
+when the mark was taken, and that diff does not survive the process. A HEAD line
+was already deleted at the mark exactly when the marked tree holds no image of
+it - the same line map, asked about the data that did survive. Without it every
+deletion would have read as new after a restart: the tool saying the agent
+removed something while you were away, about code that went before you ever
+looked at it.
+
+One test crashed rather than failed, which was the useful kind of feedback:
+`markReviewed` writes the state file, and the test had handed it an `undefined`
+io. The assertion worth having was the subtraction, not the write.
+
+### 2026-09-04 - turns happen on their own now
+
+The watcher's quiet period is wired to the store. Ten seconds after the agent
+stops writing, `refs/lgtm/<session>/<n>` holds what it did, whether or not
+anyone pressed anything. That is the safety net finally existing rather than
+being designed.
+
+The event goes through the queue and the snapshot is taken on the **main loop**,
+not the watcher thread. The store's turn numbers and its state file are also
+touched by `m`, and two threads numbering turns is a race bought to move work
+off a loop that is idle anyway. The subprocess lands ten seconds into silence,
+where a frame is worth nothing.
+
+`agent_quiescent` deliberately does not touch `reviewed_turn`. A turn nobody has
+read must not mark itself read, or the gutter would go blank exactly when it had
+something to say. Confirmed on disk: `latest_turn: 1, reviewed_turn: 0` after an
+automatic turn, then two turns chaining.
+
+**The first test said it did not work, and the test was wrong.** The file was
+written about two seconds after launch, which sounds like plenty - but the
+watcher's first poll had not established a baseline yet, so the change was
+folded into the starting state rather than counted as a change. That is correct
+by design (discovering what is there is not an observation) and it is exactly
+the thing that will make someone conclude the feature is broken. Written down in
+SNAPSHOTS.md 4 and pinned with a test named after it.
+
+Worth noting how long that took to find: the watcher harness (`zig build watch`)
+answered it in one run once it printed quiescence events, after the TUI had made
+it look like an event-routing problem. A harness that prints what a subsystem
+believes is worth more than a guess about what it does.
+
+### 2026-09-04 - the timeline, and a correct indicator that was useless
+
+Step 4. `]t` and `[t` walk the turns; the working tree is the last position
+rather than somewhere outside the walk, so there is always a way forward.
+
+The design claim held: **a turn is a diff source**. `git diff HEAD <ref>` is the
+same left-hand side with a different right-hand one, and hunks, change ids,
+syntax, search, wrapping and the mark's gutter all work on it without knowing.
+Two files had to learn about it and nothing else did - `core/git.zig` takes a
+target rev, `core/source.zig` reads the right-hand buffers out of a tree instead
+of off disk. `attach()` still checks every line against the buffer it should
+have come from, so the historical view obeys ARCHITECTURE.md 11.1 the same way
+the live one does.
+
+**The indicator was right and useless, which took a live session to see.** It
+went in the mode row's message slot, ahead of every other claimant, on the
+reasoning that a reader must never lose track of being in the past. That is
+true, and the consequence was that it outranked every notice: pressing
+`<Space>c` on a turn refused the comment and the refusal was invisible. The
+screen said "turn 2 - read only" and nothing else, forever.
+
+Being in the past is a *mode*. It belongs in the badge, where `NORMAL` becomes
+`TURN 2` in the accent instead of the mode green. The message slot then behaves
+like a message slot, and says "1 newer turn since" when idle. Worth remembering
+as a shape: an indicator that wins every contest is not an indicator, it is a
+mute button on everything else.
+
+The other fix was smaller and the same kind. `[t` at the oldest turn said "turn
+0 is gone" - a true sentence about a ref and a confusing one about a history
+that starts at 1. `refs/lgtm/<session>/0` is the startup baseline that SNAPSHOTS
+4 specifies and nothing writes yet, so the floor is turn 1 and says so.
+
+Also retired a test that had broken three times in one afternoon: it asserted an
+exact count of leader-key rows, so every new binding failed it with a fact about
+arithmetic rather than about the thing it protected. It now asserts the shape -
+a bracket pair and its leader spelling share one row - and a floor.
+
+### 2026-09-04 - the baseline, and the first time the store earned itself
+
+`refs/lgtm/<session>/0`, taken after the first diff. The one snapshot no other
+snapshot can reconstruct: every later turn is the agent's work, and this is what
+was there first.
+
+Tested the way the doc argues for it. Hand-edit a file and never commit it, let
+lgtm start, let the agent overwrite the edit, then:
+
+    git show refs/lgtm/<session>/0:f.zig  ->  MY_PRECIOUS_HAND_EDIT();
+    cat f.zig                             ->  agent_rewrote_everything();
+
+That is uncommitted work git alone could never have recovered, and it came back
+out with a stock command and no lgtm involved. Everything else in the store has
+been machinery up to now; this is the first part of it that would have been
+worth having.
+
+Three rules it needed. Never on a clean tree - HEAD already is the baseline
+there, and five subprocesses would buy a ref that says what HEAD says. Never
+twice - a session being continued keeps the one it began with. And never once a
+session already has turns, whatever the flag says, because writing turn 0 then
+would record the agent's output as the state before the agent ran, which is a
+lie in the one place it must not be.
+
+The badge reads `BASELINE`, not `TURN 0`. It is not the agent's zeroth turn.
+
+### 2026-09-04 - the turn list
+
+`<Space>lt`. The working tree pinned at the top, each turn with the file it
+mostly touched, an age and a size, the baseline at the bottom, `Enter` to show
+one.
+
+The design rule held and was worth having: **built from the commit chain, never
+from parsed diffs**. `git log --numstat` on the newest ref walks the whole
+session in one subprocess and hands back per-turn file counts and line counts
+that git computed; `for-each-ref` maps commits back to turn numbers in a second.
+Two subprocesses whatever the length of the session.
+
+That rule was nearly broken by accident. The first version resolved each ref
+with its own `rev-parse` inside the loop over commits - a subprocess per ref per
+commit, quadratic in the length of a session, and it would have looked fine on
+the three turns it was tested with.
+
+Three things the design asked for and the build declined.
+
+**No `@` for the current turn.** smartlog and undotree both use it and this
+document specified it, but the list widget already marks the row the reader is
+on, in every list in the tool, one column to the left. Two indicators saying the
+same thing in adjacent columns is worse than either. The rail carries `✓` for
+the mark and `│` for the chain.
+
+**No counts on the baseline.** It is not a change, it is what was there before
+any were made, and `+4 -0` beside it would dress up the starting state as four
+lines the agent added - the same mistake `+0 -0` on an unchanged file was.
+
+**No filetype icon on a row that is not a file.** `working tree` was getting one
+because the widget assumes rows are paths. `FileEntry.plain` says otherwise.
+
+Fixed while in there, and overdue: the file and turn lists were advertising
+`<C-s> send`, `<C-x> send all` and `<C-d> del` in their footers - comment-list
+keys that do nothing in either. They are the comment list's own keys now,
+through `extra_keys`, still read from the keymap so a remap moves them.
+
+Still to come in §5.3b-c: eliding the runs of turns already read, folding runs
+over one file, `↺` for a turn that undid earlier work, `↩` for a turn that
+answered a comment. All four are refinements of a list that now exists, which is
+the right order.
+
 <!-- Append dated entries. Keep them short and specific: what happened, what you
      expected, what you did instead. A measurement beats an adjective. -->

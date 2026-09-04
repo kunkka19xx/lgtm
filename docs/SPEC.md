@@ -121,7 +121,10 @@ The 100 comes from: each side needs ~5 (line number) + 1 (gutter) + ~42 (readabl
 | `<Esc>` `:noh` | clear the search highlight, keeping the pattern for `n` |
 | `m` | mark the working tree as read; every change after this shows a bar in the gutter. `<C-s>` marks too - submitting a review is the one moment the reader has read all of it - which `[nav] mark_on_submit` turns off |
 | `]m` / `[m` | next and previous change since the mark, wrapping across the whole review. `<Space>nm` and `<Space>pm` are the leader spellings. By row rather than by hunk: what the reader came back for is the lines that answer the last comment, and a hunk containing one of them is a coarser answer |
+| `m` (again) | the mark is written to `refs/lgtm/<session>/<turn>` as well as held in memory, and `.lgtm/state.json` remembers which turn it was. Quit, let the agent work, come back: the gutter still says which lines arrived while you were gone |
 | `M` / `:nomark` | drop the mark. The review reads as one whole change again - which it always was: the mark annotates, it never hid a row, so this removes marks rather than revealing anything |
+| `]t` / `[t` | walk the turns the agent has written, ending at the working tree. A turn is the same review against the same HEAD with a different right-hand side, so every motion, hunk id and search works on it. The badge reads `TURN 2` while you are there; comments, `m` and `<C-s>` refuse, because a remark written against a tree that is no longer on disk anchors to a line that may not exist |
+| `<Space>lt` | the turn list: the working tree, then each turn with what it touched, when, and how big, then the baseline. `Enter` shows one. Built from the commit chain rather than by diffing each turn, which is what keeps it two subprocesses however long the session |
 | `zi` | show the files `[review] ignore` hides, and hide them again |
 | `zo` / `zc` | open a file too large to render inline, and fold it again. `zc` re-diffs rather than filtering, for the same reason `zi` does: git decided the file was large, so git is what gets asked again |
 | `<Space>c` | write a comment on this line |

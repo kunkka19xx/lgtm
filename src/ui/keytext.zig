@@ -592,7 +592,20 @@ test "the filter narrows the overlay, run matches before scattered ones" {
     }
     // Actions, not bindings: a row carries both spellings where there are two,
     // so the leader form is inside the keys rather than at the front of them.
-    try testing.expectEqual(@as(usize, 19), leaders);
+    //
+    // A floor and a shape, not a count. This asserted an exact number and
+    // broke on every binding added, three times in one afternoon, each time
+    // reporting a fact about arithmetic rather than about the thing it was
+    // written to protect - which is that a bracket pair and its leader
+    // spelling share one row.
+    try testing.expect(leaders > 10);
+    var paired: usize = 0;
+    for (leader_hits) |e| {
+        if (std.mem.indexOf(u8, e.keys, "]") == null) continue;
+        try testing.expect(std.mem.indexOf(u8, e.keys, "<Space>") != null);
+        paired += 1;
+    }
+    try testing.expect(paired > 3);
     // The rows that actually contain the query come first, which is the whole
     // point of the two tiers - the scattered-letter matches a query like this
     // also drags in sit behind them rather than among them.

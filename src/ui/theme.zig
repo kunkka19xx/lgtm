@@ -235,6 +235,10 @@ pub const Theme = struct {
     added_count: Style,
     removed_count: Style,
     mode_badge: Style,
+    /// The badge while a past turn is on screen. The accent rather than the
+    /// mode green: this is not a mode the reader chose to work in, it is a
+    /// place they have to come back from.
+    turn_badge: Style,
     hint: Style,
     cursor_line: Style,
     /// Visual line select. Distinct from `cursor_line` and drawn under it, so
@@ -306,6 +310,7 @@ pub fn fromPalette(p: Palette) Theme {
         .added_count = .{ .fg = p.green },
         .removed_count = .{ .fg = p.red },
         .mode_badge = .{ .fg = p.on_fill, .bg = p.green, .bold = true },
+        .turn_badge = .{ .fg = p.on_fill, .bg = p.accent, .bold = true },
         .hint = .{ .fg = p.muted },
         .cursor_line = .{ .bg = p.cursor_bg },
         .selection = .{ .bg = p.select_bg },

@@ -16,7 +16,12 @@
 > (§5.3), and restore (§5.4-5.5). Read the present tense below as design.
 > `m` is the right key on the wrong storage, which is the cheap half to
 > replace: `Checkpoint.find` is the only thing the review layer asks it.
-> §5.6 has the build order; step 1 is `snapshot/gitobj.zig`.
+> §5.6 has the build order. Steps 1 to 4 are built, and the baseline with them:
+> turns are written when the agent goes quiet, uncommitted work is captured
+> before the agent touches it, `m` survives a restart, and `]t` / `[t` walk from
+> the baseline to the working tree. What is left is the list (§5.3b) and restore
+> (§5.4) - and restore is the only one that writes to the working tree, so it
+> gets its own pass and the most friction.
 
 ---
 
@@ -83,11 +88,13 @@ Custom refs under `refs/lgtm/` are hidden from `git branch` and `git status`, bu
 
 | Trigger | Ref | Notes |
 |---|---|---|
-| `lgtm` starts | `refs/lgtm/<session>/0` | Baseline. Captures pre-existing uncommitted work. |
-| Agent quiescence (NOTIFICATIONS.md §3.1) | `refs/lgtm/<session>/<n>` | The main one — one snapshot per agent turn |
+| `lgtm` starts | `refs/lgtm/<session>/0` | **Built.** Baseline. Captures pre-existing uncommitted work, and is the whole of §5.5. Once per session, after the first diff, and never on a clean tree - there HEAD already is the baseline. A session being continued keeps the one it began with |
+| Agent quiescence (NOTIFICATIONS.md §3.1) | `refs/lgtm/<session>/<n>` | **Built.** The main one — one snapshot per agent turn. It does *not* touch `reviewed_turn`: a turn nobody has read must not mark itself read, or the gutter would go blank exactly when it had something to say |
 | Agent hook `lgtm notify --done` | same | Exact version of the above |
 | User presses `m` (mark reviewed) | tag the current ref as reviewed | Checkpoint and snapshot are the same state — see §5 |
 | Before any `lgtm`-initiated write (revert-hunk, restore) | `refs/lgtm/<session>/<n>` | Never destroy without a snapshot first |
+
+One thing that falls out of the trigger and is worth knowing: **a change made before the watcher's first poll is baseline, not a turn.** A first poll discovers what is there rather than observing a change, so an edit landing in the first half-second of a session is folded into the starting state. That is correct, and it is also the thing that will make someone think the feature is broken - which is what happened the first time it was tested against a real repository.
 
 Session id: timestamp plus a short random suffix, recorded in `.lgtm/session`. A new `lgtm` process in the same repo continues the existing session if the last snapshot is recent (< 4h), otherwise starts a new one.
 
@@ -117,9 +124,24 @@ Prune by deleting refs; objects become unreachable and normal `git gc` reclaims 
 
 ## 5. What this unlocks
 
-### 5.1 Durable checkpoints
+### 5.1 Durable checkpoints - shipped
 
 `m` stores a ref name in `.lgtm/state.json`, not an in-memory marker. Restart, and "since I last looked" still means the same thing.
+
+One thing the sketch did not say, and it decides the shape: **the bytes stay in
+RAM**. The ref is where the mark *is*; the copy is a cache of it, refilled once
+at startup with a single `cat-file --batch`. Reading the marked content out of
+git on every re-diff would have turned a 0.9 ms line map into a subprocess, and
+the number that made "recompute everything every time" the right design would
+have stopped being true.
+
+The other is that the deleted-line set cannot be read back. It lived in the diff
+that existed when the mark was taken, and that diff is gone; so on the restore
+path it is *derived* - a HEAD line was already deleted at the mark exactly when
+the marked tree holds no image of it, which is the same line map answering a
+question about the data that did survive. Without it every deletion would read
+as new after a restart, which is the worst kind of wrong: it says the agent
+removed something while you were away, about code that went before you looked.
 
 The pending-notification badge (NOTIFICATIONS.md §4 rule 3) reads the same state: pending is simply *latest snapshot ≠ reviewed snapshot*. One source of truth, not two.
 
@@ -194,11 +216,18 @@ same list as the way out, or the reader is somewhere with no visible exit -
 which is the one thing a history view must never be. `]t` past the newest turn
 lands there too.
 
-**The status row says which turn is on screen, always.** A turn's diff looks
-exactly like the working tree's, and mistaking one for the other is the failure
-mode that matters here: reading old code as though it were current, or writing a
-comment against a line that has since moved. It takes the slot the mark's count
-uses, in the accent colour, and it is not optional or elidable.
+**The badge says which turn is on screen, always.** A turn's diff looks exactly
+like the working tree's, and mistaking one for the other is the failure mode
+that matters here: reading old code as though it were current, or writing a
+comment against a line that has since moved.
+
+It went in the mode row's *message* slot first, ahead of everything, on the
+argument that it must never lose its place. That was correct and useless: it
+outranked every notice, so pressing a key that refuses in this view produced no
+answer at all - `<Space>c` did nothing and said nothing. Being in the past is a
+*mode*, so it belongs in the badge, where `NORMAL` becomes `TURN 2` in the
+accent rather than the mode green. The message slot then behaves normally, and
+says "1 newer turn since" when it is otherwise idle.
 
 **The watcher does not move the view.** While a turn is on screen the agent
 keeps writing and turns keep accumulating, and re-diffing under the reader would
@@ -303,9 +332,13 @@ elided row expands it, because a summary that cannot be opened is a wall. Typing
 a filter expands everything, because a search that skipped folded rows would be
 a search that lies.
 
-`@` rather than `▸` for the current turn: it is what smartlog, `hg log -G` and
-half the graph tools in the terminal already use, and it costs nothing to spell
-a familiar thing familiarly.
+**And in the end, no `@` at all.** It is what smartlog, `hg log -G` and half the
+graph tools in the terminal use, and it was in this document until the list was
+built - at which point the row the reader is on already had a marker, the same
+one every list in the tool draws, one column to the left. Two indicators saying
+the same thing in adjacent columns is worse than either alone, and borrowing
+another tool's spelling was not worth contradicting this one's. The rail carries
+`✓` for the mark and `│` for everything else.
 
 `0 original` is pinned the way `working tree` is. The two ends of the history
 are the two places a reader most often wants to jump to, and neither should
@@ -425,9 +458,22 @@ file, or a small field that says so.
 
 This is the feature people will tell their colleagues about. It is also the most dangerous one in the tool, so it gets the most friction.
 
-### 5.5 Recovering the pre-agent state
+### 5.5 Recovering the pre-agent state - shipped
 
 `refs/lgtm/<session>/0` is the working tree as it was before the agent ran. "Undo everything this session did" is one diff away — and it is uncommitted work that git alone could never have recovered.
+
+`[t` walks back to it and the badge reads `BASELINE` rather than `TURN 0`: it is
+not the agent's zeroth turn, it is what was there first, and that is the only
+thing about it worth saying. Whether it exists is stored in `.lgtm/state.json`
+rather than asked of git, because the answer decides how far `[t` may walk and
+finding out per keystroke would be a subprocess per press.
+
+There is no `R` yet (§5.4). What there is, and what the whole store is for, is
+that the bytes are reachable with stock git:
+
+```
+git show refs/lgtm/<session>/0:src/auth.zig
+```
 
 ---
 
@@ -438,11 +484,11 @@ split is real rather than a list of file names.
 
 | | | |
 |---|---|---|
-| 1 | `snapshot/gitobj.zig` | The plumbing and nothing else: argv in, object ids out. No policy, no UI, no idea what a turn is. Verified from outside with stock git - `git show refs/lgtm/<s>/3:src/auth.zig` must print the file, and `git status` must be untouched. That external check is worth more than any test written against our own code |
-| 2 | `snapshot/snapshot.zig` | Policy: session identity, when to take one, pruning. Gated on the watcher's two-consecutive-polls signal (§4), because hashing a file mid-write stores a corrupt turn under a ref that claims to be good |
-| 3 | the mark becomes a ref | `core/checkpoint.zig` keeps its interface - `find(path)` returning bytes - and stops holding them. `.lgtm/state.json`. Nothing above it changes, which is the point of having built it that way |
-| 4 | `]t` / `[t` + the status row | The timeline, minus the list. Usable: stepping is the common case anyway (§5.3) |
-| 5 | the list | `<Space>lt`, with the rail, the elision and the three signals (§5.3a-c) |
+| 1 | `snapshot/gitobj.zig` | **Done.** The plumbing and nothing else: argv in, object ids out. No policy, no UI, no idea what a turn is. Verified from outside with stock git - `git show refs/lgtm/<s>/3:src/auth.zig` must print the file, and `git status` must be untouched. That external check is worth more than any test written against our own code |
+| 2 | `snapshot/snapshot.zig` | **Done, and wired.** The watcher emits `agent_quiescent`; the main loop takes the turn. On that thread and not the watcher's: the store's turn numbers and its state file are also touched by `m`, and two threads numbering turns is a race bought for nothing, since ten seconds into silence is by definition a moment when no frame is wanted. Session identity and the four-hour rule, `.lgtm/state.json`, turn numbering and chaining, pruning by ref deletion. `io/watch.zig` gained the quiet period (§3.1 of NOTIFICATIONS.md) as the turn boundary - silence *after* the writes, which is the gate that keeps a half-written file out of a ref claiming to be good |
+| 3 | the mark becomes a ref | **Done.** `m` writes a snapshot and records `reviewed_turn`; the next session reads it back with one `cat-file --batch` and refills the mark. `core/checkpoint.zig` kept its interface exactly - `find(path)` returning bytes - so the gutter, `]m`, the count and fifteen tests were untouched, which is the point of having built it that way. The bytes still live in RAM: the ref is where the mark *is*, and the copy is a cache of it, because reading git per file per re-diff would turn a 0.9 ms lookup into a subprocess |
+| 4 | `]t` / `[t` + the badge | **Done.** A turn is `git diff HEAD <ref>` with the right-hand buffers read out of the tree, so hunks, ids, syntax, search and the gutter all work on it unchanged. The badge says `TURN 2`; comments, `m` and `<C-s>` refuse and say why; the watcher counts new turns without moving the view. Not the status *row* in the end - see below |
+| 5 | the list | **Done in part.** `<Space>lt`, the rail, the working tree pinned at the top, the baseline at the bottom, `✓` for the mark, and `<CR>` to show a turn. Built from the commit chain in two subprocesses whatever the length of the session, never from parsed diffs. **Not done:** the elision of read turns (§5.3b), run folding, `↺` self-revert and `↩` answered-your-comment (§5.3c) - all four are refinements of a list that now exists |
 | 6 | restore | Its own pass, and the most friction (§5.4) |
 
 Steps 1 to 3 are invisible: at the end of them the tool looks identical and the

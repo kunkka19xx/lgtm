@@ -2,7 +2,8 @@
 
 **Companion docs:** SPEC.md, ARCHITECTURE.md, FEATURES.md
 **Status:** draft v0.1
-**Milestone:** v0.2 (layers 1–2), v0.3 (layer 3)
+**Milestone:** v0.2, after SNAPSHOTS.md 5.6 step 3 - the pending state *is* the
+checkpoint state (rule 3), so building this first would build that state twice
 
 > Added after the initial doc set. Slots into FEATURES.md as §2.4; nothing in the existing docs contradicts it.
 
@@ -16,38 +17,81 @@
 
 This matters because the user is usually in another window or another pane by then. The agent's own output scrolled past; there is nothing left on screen saying "you have unreviewed changes." The session ends, the branch gets pushed, and nobody read the diff.
 
-Notification scope must therefore be **session-wide, not pane-local**: a different tmux window, a different pane, or a detached session must all still surface the signal.
+Notification scope must therefore be **session-wide, not pane-local**: another pane, another tmux window, another terminal tab, or another application entirely must all still surface the signal. Side by side with the agent is one arrangement among many and the least in need of this - which is exactly why the feature must not be designed around it.
 
 ---
 
-## 2. Three layers
+## 2. One method per backend, not three layers
 
-Ordered by reliability. Build downward, not upward.
+An earlier draft of this section ordered the delivery mechanisms as three
+layers - bell, then tmux user option, then desktop - and said to build downward.
+That ordering was **tmux-shaped**, and it is wrong for a tool that means to run
+under ghostty, kitty, WezTerm and whatever comes next.
 
-| Layer | Mechanism | Reach | Requires |
-|---|---|---|---|
-| **1. Bell** | `\a` (BEL) | tmux status bar flash via `monitor-bell`, works over SSH | nothing |
-| **2. tmux user option** | `tmux set-option -g @lgtm_pending "3 files"` | persistent badge in the status bar, any window | user adds `#{@lgtm_pending}` to their status line |
-| **3. Desktop** | OSC 9 / OSC 777 / OSC 99, or `notify-send` / `terminal-notifier` | OS notification centre | passthrough config, or a local session |
+The whole argument for putting desktop notifications last was that tmux discards
+OSC 9 and OSC 777 unless `allow-passthrough` is on, which it has not been since
+tmux 3.3. That is a tmux problem. Run `lgtm` directly in a terminal that speaks
+OSC 9 and the "hard" layer is a single escape sequence with no setup at all,
+while the "easy" layer - a tmux user option - does not exist. The difficulty
+ordering inverts the moment you leave tmux, so it was never an ordering.
 
-### 2.1 The trap: tmux swallows OSC notification sequences
+**Notification delivery is the same problem the bridge already solves.** Sending
+a reference to an agent is one method per backend, detected from the
+environment, with a fallback for the unknown case and an exhaustive switch so a
+new backend cannot be half-added. Notifying is that again, and it belongs beside
+it rather than in a subsystem of its own:
 
-Since tmux 3.3, `allow-passthrough` is off by default, so OSC 9 and OSC 777 emitted from inside a pane are discarded. Making them work requires wrapping them in a passthrough sequence **and** telling the user to enable the option in their config.
+| Backend | Native mechanism | Setup |
+|---|---|---|
+| tmux | `set-option -g @lgtm_pending "3 files"` | user adds `#{@lgtm_pending}` to their status line |
+| ghostty, kitty | OSC 9 | none |
+| WezTerm | user var, OSC 1337 `SetUserVar` | user renders it in their config |
+| Zellij | none worth having | falls through |
+| unknown | nothing, said plainly | - |
 
-That is a setup instruction, and setup instructions are where features go to die. **Layer 3 is opt-in and must never be the foundation.** Layers 1 and 2 need no user configuration beyond a status-line variable, and layer 1 needs nothing at all.
+The fallback is *nothing*, and saying so. There is no universal notification the
+way OSC 52 is a universal clipboard, and a bell pretending to be one is worse
+than an honest absence - see 2.2.
 
-### 2.2 Why layer 2 is the sweet spot
+### 2.1 Prefer a persistent indicator to a transient one
 
-`@lgtm_pending` is a tmux user option — set it from anywhere, read it from any window's status line. No passthrough, no escape-sequence filtering, no platform branching. And because it is a persistent badge rather than a transient toast, it cannot be missed the way a notification that fired three minutes ago can.
+The choice that matters is not which escape sequence. It is whether the signal
+**stays**.
 
-```sh
-# what the user adds once, documented in the README
-set -g status-right '#{?#{@lgtm_pending},#[fg=yellow]⚠ #{@lgtm_pending} unreviewed ,}%H:%M'
-```
+A badge - the tmux option, a WezTerm user var - is ambient. Nothing to dismiss,
+nothing lost by not looking, and it is still there when you come back. A bell or
+a toast happens once and is gone.
 
-`lgtm` sets and clears the option; the user's status line renders it.
+That distinction decides the feature, because the trigger is a **guess**.
+Quiescence detection (§3.1) says "quiet for ten seconds, therefore done", and a
+long-thinking agent trips it mid-turn. Consider what each kind of signal does
+with a wrong guess:
 
-Equivalents exist for WezTerm (user vars via OSC 1337 `SetUserVar`) and kitty (`kitty @ set-user-vars`). Same shape, different call — one method per bridge backend.
+- a badge appears slightly early, and then goes on being correct
+- a bell rings, you look, nothing has finished, and the signal is spent
+
+An imprecise trigger is survivable behind a persistent indicator and corrosive
+behind a transient one. Three early bells in a turn is how a feature gets
+muted, and a muted feature is a deleted feature.
+
+So: **badge where the backend has one, notification where the backend has one
+for free, bell nowhere by default.**
+
+### 2.2 The bell is not a fallback
+
+`\a` reaches every terminal, which makes it tempting as the universal case. It
+is the wrong universal case: it is transient (2.1), it is the sound the terminal
+makes when something is *wrong*, and on a mis-timed guess it trains the user to
+ignore it. `[notify] bell = false` by default. Available for anyone who wants
+it, chosen rather than inherited.
+
+### 2.3 The one that needs no backend at all
+
+`lgtm` can say it in its own status row: "3 unreviewed turns". It reaches
+nobody who is looking at another window, which is the case this document exists
+for, so it is not a substitute. But it costs nothing, it needs no detection and
+no configuration, and it is already half-specified as SNAPSHOTS.md 5.3's
+"2 newer turns". Build that first, whatever else happens here.
 
 ---
 
@@ -116,15 +160,19 @@ These matter as much as the delivery mechanism. A notification feature that fire
 [notify]
 enabled = true
 quiet_ms = 10000          # silence after last write before "done"
-bell = true               # layer 1
-tmux_option = true        # layer 2 — sets @lgtm_pending
+bell = false              # transient, and the trigger is a guess - see 2.2
+badge = true              # the backend's persistent indicator, where it has one
 option_name = "@lgtm_pending"
-desktop = false           # layer 3 — opt-in, needs allow-passthrough
+desktop = true            # where the backend does it without setup; no-op elsewhere
 only_when_hidden = true   # rule 2
 min_changed_lines = 1     # ignore trivial turns
 ```
 
-`desktop = false` by default is deliberate. Enabling it without `allow-passthrough` produces silent no-ops, which reads as a broken feature; better that the user turns it on after reading what it needs.
+`desktop = true` is safe here in a way it was not under the old layering,
+because it means "use OSC 9 where the backend natively supports it" rather than
+"emit OSC 9 and hope". Under tmux without `allow-passthrough` the backend
+reports that it cannot, and nothing is emitted - the same shape as the bridge
+falling back to OSC 52 rather than pretending `send-keys` worked.
 
 ---
 
@@ -132,15 +180,25 @@ min_changed_lines = 1     # ignore trivial turns
 
 ```
 src/
+├── bridge/
+│   ├── bridge.zig      # gains notify(): the same union, a second verb
+│   ├── tmux.zig        # set-option -g @lgtm_pending
+│   ├── ghostty.zig     # OSC 9
+│   └── ...             # one file per backend, as today
 ├── notify/
-│   ├── notify.zig      # policy: quiescence, dedupe, visibility check
-│   ├── bell.zig        # layer 1
-│   ├── tmux_opt.zig    # layer 2 (+ wezterm/kitty user vars)
-│   └── desktop.zig     # layer 3, opt-in
+│   └── notify.zig      # policy only: quiescence, dedupe, visibility check
 └── io/watch.zig        # gains a second, longer timer
 ```
 
-`notify/` depends on `bridge/` for backend detection and pane addressing — the detection logic already exists there, so do not duplicate it. It does not belong in `core/`: it touches the outside world.
+Delivery lives in `bridge/`, not in a `notify/` of its own. It is the same
+detection, the same pane addressing and the same exhaustive switch, and a second
+copy of all three would drift from the first. What `notify/` keeps is the part
+that is genuinely its own: when to fire, whether the user is already looking,
+and not firing twice for one turn.
+
+`io/watch.zig` gains the longer timer - which the snapshot store needs anyway
+for its turn boundaries (SNAPSHOTS.md 4), so it is built there and read here
+rather than the other way round.
 
 New `Event` variant (ARCHITECTURE.md §11.4):
 
@@ -153,4 +211,4 @@ agent_quiescent: struct { files: u32, added: u32, removed: u32 },
 ## 7. Later
 
 - **Notify on risk, not just on completion** — "agent finished, and 2 tests were removed" (FEATURES.md §1.2) is a far more urgent signal than "agent finished." Once weakened-test detection exists, fold its result into the notification text.
-- **Detached-session case** — if the whole tmux session is detached, layers 1–2 are invisible until reattach. Layer 3 or a shell-prompt hook is the only real answer; probably not worth solving.
+- **Detached-session case** — a detached tmux session hides its own badge until reattach. A desktop notification or a shell-prompt hook is the only real answer, and only the first is cheap; probably not worth solving.
