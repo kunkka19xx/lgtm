@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: Apache-2.0
+name: release
+
+# A tag is a release claim, so it is the only thing that triggers this. Pushing
+# to main never publishes anything.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          # Kept in step with .zigversion, build.zig.zon's minimum_zig_version
+          # and ci.yml, the same way flake.nix is.
+          version: 0.16.0
+
+      # One runner for every target. Zig cross-compiles without a toolchain to
+      # install, which is the whole reason this is one job and not four.
+      #
+      # No Windows: io/input.zig and io/tty.zig are POSIX throughout - poll,
+      # tcgetattr, TIOCGWINSZ - so a Windows artifact would be a download that
+      # cannot run. Blocked on a port, not on a manifest.
+      - name: build every target
+        run: |
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p out
+          for target in aarch64-macos x86_64-macos x86_64-linux aarch64-linux; do
+            echo "::group::$target"
+            rm -rf zig-out
+            zig build dist -Dtarget="$target"
+
+            # The same budget ci.yml enforces, checked per target rather than
+            # once: a cross build can regress on one architecture alone, and
+            # what a user downloads is this file and not the average.
+            size=$(wc -c < zig-out/bin/lgtm)
+            echo "$target: $size bytes ($((size * 100 / 1048576))% of 1 MB)"
+            test "$size" -lt 1048576
+
+            # Flat tarball, one binary, no leading directory: the install
+            # script and every package manager want to extract and move on.
+            tar -czf "out/lgtm-$target.tar.gz" -C zig-out/bin lgtm
+            echo "::endgroup::"
+          done
+
+          cd out
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+          echo "version=$version" >> "$GITHUB_ENV"
+
+      # The checksums are what makes `curl | sh` honest: the install script
+      # fetches this file from the same release and refuses on a mismatch.
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          gh release create "$GITHUB_REF_NAME" \
+            --title "lgtm $GITHUB_REF_NAME" \
+            --generate-notes \
+            out/lgtm-*.tar.gz out/SHA256SUMS

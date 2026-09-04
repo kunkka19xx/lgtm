@@ -7,12 +7,30 @@ you need to use it; [CONFIG.md](CONFIG.md) is the full settings reference.
 
 ## Install
 
-You need [Zig](https://ziglang.org) (the version is pinned in `.zigversion`) and
-`git`. `tmux` is optional but is what lets `lgtm` type into your agent's input
-box; without it, references go to the clipboard over OSC 52, which works over
-SSH.
-
+```sh
+curl -fsSL https://raw.githubusercontent.com/kunkka19xx/lgtm/main/scripts/install.sh | sh
 ```
+
+macOS and Linux, arm64 and x86_64. The script needs no sudo — one static binary
+goes in `~/.local/bin` — and it will not install over a copy something else
+manages. It verifies every download against the `SHA256SUMS` published in the
+same release and stops on a mismatch.
+
+```sh
+scripts/install.sh --dry-run       # say what it would do, do nothing
+scripts/install.sh --version v0.1.0
+scripts/install.sh --dir /opt/bin
+scripts/install.sh --uninstall
+```
+
+No Windows build: `io/input.zig` and `io/tty.zig` are POSIX throughout, so that
+needs a port rather than a manifest.
+
+### From source
+
+Needs [Zig](https://ziglang.org), the version pinned in `.zigversion`:
+
+```sh
 make local          # build and install to ~/.local/bin
 make clean-local    # remove it, restoring whatever it displaced
 ```
@@ -20,7 +38,11 @@ make clean-local    # remove it, restoring whatever it displaced
 `make local` will not install over a symlink and will not delete a binary it did
 not write, so a copy from a package manager is safe from it.
 
-There are no packages yet.
+### What else you need
+
+`git`. `tmux` is optional but is what lets `lgtm` type into your agent's input
+box; without it, references go to the clipboard over OSC 52, which works over
+SSH.
 
 ### Checking it works
 

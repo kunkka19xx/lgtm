@@ -40,16 +40,25 @@ into the chat. `lgtm` removes the retyping.
 
 ## Install
 
-Needs [Zig](https://ziglang.org) (version pinned in `.zigversion`), git, and
-tmux for the bridge - without one, references go to the clipboard over OSC 52,
-which works over SSH.
-
+```sh
+curl -fsSL https://raw.githubusercontent.com/kunkka19xx/lgtm/main/scripts/install.sh | sh
 ```
+
+macOS and Linux, arm64 and x86_64. No sudo: one static binary goes in
+`~/.local/bin`. It verifies the download against the checksums published in the
+same release, leaves a copy installed by anything else alone, and takes
+`--uninstall`.
+
+Or build it, which needs [Zig](https://ziglang.org) (version pinned in
+`.zigversion`):
+
+```sh
 make local          # build and install to ~/.local/bin
 make clean-local    # remove it, restoring whatever it displaced
 ```
 
-There are no packages yet.
+You also need `git`. `tmux` is optional: without it, references go to the
+clipboard over OSC 52, which works over SSH.
 
 ## The loop
 

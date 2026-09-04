@@ -18,6 +18,11 @@
       # Kept in step with .zigversion and build.zig.zon's minimum_zig_version.
       zigVersion = "0.16.0";
 
+      # Kept in step with build.zig.zon's `.version`, which is what the binary
+      # itself prints. Nix cannot read a .zon at evaluation time, so this is the
+      # one place the number is repeated - bump both together.
+      lgtmVersion = "0.0.0";
+
       # git and a bridge backend (tmux, wezterm or kitty) are runtime
       # dependencies, but they are assumed to be on the host already - mkShell
       # prepends to PATH rather than replacing it, so they stay reachable.
@@ -89,8 +94,88 @@
         }
       );
 
+      # The three dependencies from build.zig.zon, fetched into a Zig cache.
+      #
+      # Its own derivation because a Nix build has no network, and Zig's package
+      # manager wants one. A fixed-output derivation is the exception that is
+      # allowed to reach out, and it pays for that with a hash: change
+      # build.zig.zon and this hash changes, and `nix build` will tell you the
+      # new one rather than silently building something else.
+      zigDeps =
+        pkgs:
+        pkgs.stdenv.mkDerivation {
+          pname = "lgtm-zig-deps";
+          version = lgtmVersion;
+          src = ./.;
+          nativeBuildInputs = [ pkgs.zig_0_16 ];
+
+          dontConfigure = true;
+          dontInstall = true;
+          buildPhase = ''
+            export ZIG_GLOBAL_CACHE_DIR="$out"
+            zig build --fetch
+            # Zig writes a lock and timestamps into the cache; neither is
+            # content and both would make the hash depend on when it ran.
+            rm -rf "$out/tmp" "$out/h" 2>/dev/null || true
+          '';
+
+          outputHashMode = "recursive";
+          outputHashAlgo = "sha256";
+          # Placeholder. On the first build Nix reports the real hash and
+          # refuses to continue; paste it here. Deliberately not silenced with
+          # a permissive setting: an unpinned dependency tree is the one thing
+          # a reproducible build cannot have.
+          outputHash = nixpkgs.lib.fakeHash;
+        };
+
+      lgtmPackage =
+        pkgs:
+        pkgs.stdenv.mkDerivation {
+          pname = "lgtm";
+          version = lgtmVersion;
+          src = ./.;
+
+          nativeBuildInputs = [ pkgs.zig_0_16 ];
+          # git is how lgtm reads a diff, so it is a runtime dependency and not
+          # a build one. tmux is optional - without it references go to the
+          # clipboard over OSC 52 - so it is not wrapped in.
+          buildInputs = [ pkgs.git ];
+
+          dontConfigure = true;
+
+          buildPhase = ''
+            runHook preBuild
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+            cp -r --no-preserve=mode,ownership ${zigDeps pkgs} "$ZIG_GLOBAL_CACHE_DIR"
+            # `dist` rather than the default: ReleaseSmall and stripped is what
+            # a user should be installing, and it is the same binary the
+            # release workflow ships.
+            zig build dist --global-cache-dir "$ZIG_GLOBAL_CACHE_DIR"
+            runHook postBuild
+          '';
+
+          installPhase = ''
+            runHook preInstall
+            install -Dm755 zig-out/bin/lgtm "$out/bin/lgtm"
+            runHook postInstall
+          '';
+
+          meta = {
+            description = "A terminal diff reviewer for agentic coding";
+            homepage = "https://github.com/kunkka19xx/lgtm";
+            license = nixpkgs.lib.licenses.asl20;
+            mainProgram = "lgtm";
+            platforms = systems;
+          };
+        };
+
       packages = forAllSystems (
-        pkgs: nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { fhs = fhsShell pkgs; }
+        pkgs:
+        {
+          default = lgtmPackage pkgs;
+          lgtm = lgtmPackage pkgs;
+        }
+        // nixpkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux { fhs = fhsShell pkgs; }
       );
 
       formatter = forAllSystems (pkgs: pkgs.nixfmt-tree);
