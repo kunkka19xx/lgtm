@@ -301,7 +301,40 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `<C-r>` | re-diff now |
 | `<Space>e` | open this line in `$EDITOR` |
 | `?` | every key, from your bindings |
+| `:` | run any command by name, `<Tab>` completes (see below) |
 | `:q` | quit |
+
+### The command line
+
+`:` runs any command by the name `[keys]` binds it by, so everything in
+[CONFIG.md](CONFIG.md)'s command list is typeable whether or not it has a key:
+
+```
+:next_file        :turn_list        :toggle_wrap
+:q  :qa           :noh              :nomark
+```
+
+`<Tab>` completes. The first press extends to whatever every candidate shares,
+so `:n` becomes `:next_` without choosing between them; the next presses cycle,
+and `<S-Tab>` goes back. The candidates appear on the line above, which is the
+rule the prompt was covering anyway, so nothing on screen moves to make room:
+
+```
+next_hunk  next_file  next_comment  next_turn  next_fresh  next_risk
+:next_
+```
+
+If nothing starts with what you typed it falls back to a loose match, so `:nf`
+still reaches `next_file`.
+
+The short spellings are vim's and mean the same as the long ones. A name that
+does not exist suggests the nearest one that does, and a command that only lives
+inside the compose box or a list says so rather than running somewhere it has no
+meaning. Neither the suggestion nor `<Tab>` will ever offer a command `:` would
+then refuse.
+
+`?` shows the keys and `:` runs the names. Both read the same table, so neither
+can drift from what the tool actually does.
 
 ### In a list
 

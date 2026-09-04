@@ -45,6 +45,12 @@ pub const Result = enum {
     submit,
     /// Escape, or backspace over the leading character. The line is cleared.
     cancel,
+    /// `<Tab>` and `<S-Tab>`. What a completion *is* is not decided here: this
+    /// file knows characters, and the command table lives elsewhere. The
+    /// caller reads `text()`, works out what it should become, and writes it
+    /// back with `set`.
+    complete,
+    complete_back,
 };
 
 pub const Prompt = struct {
@@ -84,6 +90,7 @@ pub const Prompt = struct {
                 self.len = prevBoundary(self.buf[0..self.len]);
                 return .typing;
             },
+            event.code.tab => return if (key.mods.shift) .complete_back else .complete,
             'u' => if (key.mods.ctrl) {
                 self.len = 0;
                 return .typing;
@@ -100,6 +107,16 @@ pub const Prompt = struct {
         if (key.codepoint < 0x20) return .typing;
         self.insert(key.codepoint);
         return .typing;
+    }
+
+    /// Replaces the line, for a completion the caller worked out.
+    ///
+    /// Truncates rather than failing: the names it is handed are shorter than
+    /// the buffer by a wide margin, and a completion that could error would
+    /// need an error path in the key loop for a case that cannot arise.
+    pub fn set(self: *Prompt, line: []const u8) void {
+        self.len = @min(line.len, self.buf.len);
+        @memcpy(self.buf[0..self.len], line[0..self.len]);
     }
 
     /// Silently drops the keystroke when full. Truncating mid-codepoint would

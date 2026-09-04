@@ -72,6 +72,10 @@ pub const Help = struct {
                 self.index = 0;
                 break :blk .stay;
             },
+            // Completion is the `:` line's alone. In an overlay `<Tab>` is
+            // the list's own key and reaches the keymap before this, so the
+            // only way here is a chord the list does not bind: stay put.
+            .complete, .complete_back => .stay,
             .submit, .cancel => .close,
         };
     }

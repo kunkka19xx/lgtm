@@ -212,6 +212,22 @@ pub const Command = enum {
     }
 };
 
+/// Whether `:` should run this command.
+///
+/// The command line is a normal-mode affordance, so a command that only lives
+/// inside the compose box or a list is refused rather than run somewhere it
+/// has no meaning. A command with no binding at all is available: `quit` is
+/// exactly that, and `:q` is how it has always been reached.
+pub fn typeable(bindings: []const Binding, cmd: Command) bool {
+    var bound = false;
+    for (bindings) |b| {
+        if (b.command != cmd) continue;
+        bound = true;
+        if (b.modes.normal or b.modes.visual) return true;
+    }
+    return !bound;
+}
+
 /// Which modes a binding is live in. Motions are live in both, which is what
 /// makes visual select "normal mode plus an anchor" rather than a second
 /// dispatch table that has to be kept in step with the first.

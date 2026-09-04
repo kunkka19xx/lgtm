@@ -21,6 +21,7 @@ const frame_mod = @import("frame.zig");
 const devicon = @import("devicon.zig");
 const testrisk = @import("../core/testrisk.zig");
 const keytext = @import("keytext.zig");
+const complete = @import("complete.zig");
 const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
 
@@ -70,8 +71,15 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     try drawStatus(f, v, 0);
     f.put(1, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
     try body_mod.draw(f, v, 2, bodyHeight(h, false));
-    f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
-    if (v.prompt) |p| drawPrompt(f, p, h - 1) else try drawMode(f, v, h - 1);
+    if (v.prompt) |p| {
+        // The strip takes the rule's row rather than one of its own. While a
+        // prompt is open that rule separates nothing the reader is reading.
+        if (p.completions.len > 0) drawCompletions(f, p, h - 2) else f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
+        drawPrompt(f, p, h - 1);
+    } else {
+        f.put(h - 2, 0, try f.rule(f.glyphs.rule, f.width()), f.theme.rule);
+        try drawMode(f, v, h - 1);
+    }
 
     // Last, and over everything: an overlay is a layer, not a pane. Only one
     // can be open, because each is its own mode.
@@ -113,6 +121,31 @@ pub fn drawPrompt(f: Frame, p: PromptView, row: u16) void {
     f.put(row, at, p.text, f.theme.prompt);
     const col = at + f.win.gwidth(p.text);
     if (col < f.width()) f.win.showCursor(col, row);
+}
+
+/// The `<Tab>` candidates, wildmenu-style: one row, the offered one picked out.
+///
+/// The selected name is drawn in the search-match style rather than a slot of
+/// its own. It means the same thing both places - this is the one you are being
+/// shown - and a theme slot that exists for one row is a slot every theme has
+/// to have an opinion about.
+fn drawCompletions(f: Frame, p: PromptView, row: u16) void {
+    const at = p.completion_at orelse 0;
+    const strip = complete.fit(p.completions, at, f.width());
+
+    var col: u16 = 0;
+    for (strip.from..strip.to) |i| {
+        if (i != strip.from) col += complete.gap;
+        const name = @tagName(p.completions[i]);
+        const chosen = p.completion_at != null and p.completion_at.? == i;
+        f.put(row, col, name, if (chosen) f.theme.search_match else f.theme.dim);
+        col += @intCast(name.len);
+    }
+    if (strip.more > 0) {
+        var buf: [8]u8 = undefined;
+        const tail = std.fmt.bufPrint(&buf, " +{d}", .{strip.more}) catch return;
+        if (col + tail.len <= f.width()) f.put(row, col, tail, f.theme.dim);
+    }
 }
 
 fn modeLabel(mode: event.Mode) []const u8 {

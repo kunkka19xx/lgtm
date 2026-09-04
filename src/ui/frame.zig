@@ -107,6 +107,14 @@ pub const Range = struct {
 pub const PromptView = struct {
     prefix: []const u8,
     text: []const u8,
+    /// `<Tab>` candidates, all of them. Empty unless
+    /// the reader is completing, and drawn over the rule rather than on a row
+    /// of its own: while the prompt is open that rule is decoration, so the
+    /// strip costs no screen. Narrowing them to the row is the renderer's job,
+    /// because only it knows how wide the row is.
+    completions: []const keymap.Command = &.{},
+    /// Which of `completions` is in the line, as an index into it.
+    completion_at: ?usize = null,
 };
 
 /// Everything one frame needs. Assembled by the app; nothing here reaches back

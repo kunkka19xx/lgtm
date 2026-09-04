@@ -45,6 +45,8 @@ const timeline = @import("../snapshot/timeline.zig");
 const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
 const search = @import("search.zig");
+const fuzzy = @import("fuzzy.zig");
+const complete = @import("complete.zig");
 const theme_mod = @import("theme.zig");
 const wrap_mod = @import("wrap.zig");
 
@@ -145,6 +147,20 @@ pub const App = struct {
     pending_find: ?motion.Find = null,
     /// The last completed one, which is what `;` and `,` repeat.
     last_find: ?motion.Find = null,
+    /// `<Tab>` candidates for the open `:` line. Empty when not completing,
+    /// which is also what tells the renderer whether to draw the strip.
+    comp: complete.Set = .{},
+    /// Which candidate is currently in the line, or null while the line is
+    /// still the reader's own text.
+    comp_at: ?usize = null,
+    /// What was typed before `<Tab>` first replaced it.
+    ///
+    /// Kept because cycling rewrites the line: recomputing the candidates
+    /// from a line that now holds `next_file` would give a different list on
+    /// every press, and the list would change under the reader mid-cycle.
+    comp_stem: [prompt_mod.max_bytes]u8 = undefined,
+    comp_stem_len: usize = 0,
+
     /// The last walk `;` should repeat: `]h`, `]w`, `]c`, `/`'s `n`, any of
     /// them. Null until one has been used, and then never null again - `;`
     /// with nothing behind it is the only case where it falls back to `f`.
@@ -624,6 +640,8 @@ pub const App = struct {
             .prompt = if (self.prompt.open) .{
                 .prefix = self.prompt.kind.prefix(),
                 .text = self.prompt.text(),
+                .completions = self.comp.slice(),
+                .completion_at = self.comp_at,
             } else null,
             .notice = self.notice.text(),
             .query = self.liveQuery(),
@@ -1306,6 +1324,7 @@ pub const App = struct {
     }
 
     fn closePrompt(self: *App) void {
+        self.comp = .{};
         self.prompt.close();
         self.mode = self.prompt_return;
     }
@@ -1314,7 +1333,11 @@ pub const App = struct {
     /// prompt `j` is the letter j, not a motion (see prompt.zig).
     fn feedPrompt(self: *App, key: event.Key, body: u16) !void {
         switch (self.prompt.feed(key)) {
-            .typing => {},
+            // Any edit invalidates the cycle: the reader has said something
+            // new, so the next `<Tab>` starts from what is now on the line.
+            .typing => self.comp = .{},
+            .complete => self.completeStep(1),
+            .complete_back => self.completeStep(-1),
             .cancel => self.closePrompt(),
             .submit => {
                 // Copied out before closing: the prompt's buffer is about to
@@ -1324,13 +1347,13 @@ pub const App = struct {
                 @memcpy(buf[0..text.len], text);
                 const kind = self.prompt.kind;
                 self.closePrompt();
-                try self.submitPrompt(kind, buf[0..text.len]);
+                try self.submitPrompt(kind, buf[0..text.len], body);
                 self.clampScroll(body);
             },
         }
     }
 
-    fn submitPrompt(self: *App, kind: prompt_mod.Kind, line: []const u8) !void {
+    fn submitPrompt(self: *App, kind: prompt_mod.Kind, line: []const u8, body: u16) !void {
         switch (kind) {
             .search_forward => {
                 // Bare Enter repeats the last query, as in vim. Every search
@@ -1338,41 +1361,151 @@ pub const App = struct {
                 if (line.len != 0) self.finder.set(line, .forward);
                 try self.searchStep(if (line.len == 0) self.finder.dir else .forward);
             },
-            .command => self.submitCommand(line),
+            .command => try self.submitCommand(line, body),
             // The popup's filter is its own `Prompt`, fed by `feedHelp`, so it
             // never arrives here.
             .help_filter => {},
         }
     }
 
-    /// `:q` and nothing else. There is no command mode in v1
-    /// except this one, so an unknown command says so rather than being
-    /// quietly ignored - which would read as a dropped keystroke.
-    fn submitCommand(self: *App, line: []const u8) void {
-        const cmd = std.mem.trim(u8, line, " ");
-        if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "q!") or
-            std.mem.eql(u8, cmd, "qa") or std.mem.eql(u8, cmd, "qa!"))
-        {
-            self.quit = true;
+    /// `<Tab>` in the `:` line: extend to what every candidate shares, then
+    /// cycle through them.
+    ///
+    /// Vim's `longest:full` in two rules. Typing `n` and pressing Tab gets to
+    /// `next_` without committing to which `next_` it is, because that is the
+    /// part the reader would have typed anyway; only when there is nothing
+    /// left to share does Tab start choosing for them.
+    fn completeStep(self: *App, dir: i32) void {
+        if (self.prompt.kind != .command) return;
+
+        if (self.comp.empty()) {
+            const typed = self.prompt.text();
+            @memcpy(self.comp_stem[0..typed.len], typed);
+            self.comp_stem_len = typed.len;
+            self.comp = complete.candidates(self.km.bindings, typed);
+            self.comp_at = null;
+            if (self.comp.empty()) return;
+
+            // Something shared beyond what was typed: hand that over and stop.
+            // The strip stays up, so the reader can see what they are choosing
+            // between before the next press picks one.
+            if (self.comp.common > typed.len) {
+                self.prompt.set(@tagName(self.comp.items[0])[0..self.comp.common]);
+                self.comp_stem_len = self.comp.common;
+                @memcpy(self.comp_stem[0..self.comp.common], @tagName(self.comp.items[0])[0..self.comp.common]);
+                // One candidate means the line is now that command, whole.
+                if (self.comp.len == 1) self.comp_at = 0;
+                return;
+            }
+        }
+
+        const n = self.comp.len;
+        if (n == 0) return;
+        const next = if (self.comp_at) |at| blk: {
+            const step = @as(i64, @intCast(at)) + dir;
+            break :blk @as(usize, @intCast(@mod(step, @as(i64, @intCast(n)))));
+        } else if (dir > 0) 0 else n - 1;
+
+        self.comp_at = next;
+        self.prompt.set(@tagName(self.comp.items[next]));
+    }
+
+    /// `:` runs a command by the name `[keys]` binds it by.
+    ///
+    /// The same `stringToEnum` the config parser uses, pointed at what the
+    /// reader typed. That is the whole implementation, and it is the
+    /// convention that every action is a named command finally being worth
+    /// something where a user can see it: `?` shows the keys, `:` runs the
+    /// names, and both read the one table, so neither can drift from what the
+    /// tool does.
+    ///
+    /// A key is scarce and a name is not, which is why this matters beyond
+    /// convenience: `quit` has no binding at all and never has, and `:q` is
+    /// how it is reached. This generalises that to all of them.
+    fn submitCommand(self: *App, line: []const u8, body: u16) !void {
+        const typed = std.mem.trim(u8, line, " ");
+        if (typed.len == 0) return;
+
+        const cmd = aliasFor(typed) orelse
+            std.meta.stringToEnum(keymap.Command, typed) orelse
+            {
+                // Naming the nearest one beats refusing: the names are long
+                // and a reader typing them has already got most of it right.
+                // Without echoing the typo back: the reader typed it a
+                // keystroke ago, and at 80 columns the slot is about 54
+                // characters. A message that gets cut off is a worse bug
+                // than a message that says less.
+                if (self.nearestCommand(typed)) |near| {
+                    self.notice.set("not a command - did you mean :{s}?", .{@tagName(near)});
+                } else {
+                    self.notice.set("not a command: :{s}", .{typed});
+                }
+                return;
+            };
+
+        if (!keymap.typeable(self.km.bindings, cmd)) {
+            self.notice.set(":{s} works only in {s}", .{ typed, self.onlyIn(cmd) });
             return;
         }
-        // Every spelling vim answers to, because the muscle memory is for
-        // whichever one the reader happens to have learned.
-        if (std.mem.eql(u8, cmd, "noh") or std.mem.eql(u8, cmd, "nohl") or
-            std.mem.eql(u8, cmd, "nohlsearch"))
-        {
-            self.finder.hide();
-            return;
+        try self.run(cmd, body);
+    }
+
+    /// Vim's spellings for the commands a reader arrives already knowing.
+    ///
+    /// Aliases onto the same table rather than a second implementation: `:noh`
+    /// and the key that clears the highlight have to keep meaning the same
+    /// thing, and two code paths are how that quietly stops being true. It
+    /// already had: `:nomark` used to drop the mark without noticing there was
+    /// none to drop, which `clear_mark` has always got right.
+    fn aliasFor(text: []const u8) ?keymap.Command {
+        const table = [_]struct { []const u8, keymap.Command }{
+            .{ "q", .quit },
+            .{ "q!", .quit },
+            .{ "qa", .quit },
+            .{ "qa!", .quit },
+            .{ "noh", .clear_search },
+            .{ "nohl", .clear_search },
+            .{ "nohlsearch", .clear_search },
+            .{ "nomark", .clear_mark },
+            .{ "nom", .clear_mark },
+        };
+        for (table) |e| {
+            if (std.mem.eql(u8, text, e[0])) return e[1];
         }
-        // The same shape as `:noh`, for the same reason: a reader who wants
-        // the highlighting gone reaches for a colon command before they go
-        // looking for which key drops it.
-        if (std.mem.eql(u8, cmd, "nomark") or std.mem.eql(u8, cmd, "nom")) {
-            self.review.unmark();
-            self.notice.set("mark dropped - the whole change again", .{});
-            return;
+        return null;
+    }
+
+    /// Where a command that `:` refuses does live, for the message that says so.
+    ///
+    /// Naming the one place beats listing every place it is not: "works only
+    /// in a list" tells a reader what to do next, and it fits the slot.
+    fn onlyIn(self: *App, cmd: keymap.Command) []const u8 {
+        for (self.km.bindings) |b| {
+            if (b.command != cmd) continue;
+            if (b.modes.compose) return "the compose box";
+            if (b.modes.help or b.modes.finder) return "a list";
         }
-        self.notice.set("not an editor command: :{s}", .{cmd});
+        return "another mode";
+    }
+
+    /// The closest command name to something that was not one.
+    ///
+    /// Only ever suggests a command `:` would actually run, because pointing a
+    /// reader at `:compose_submit` and then refusing it is worse than saying
+    /// nothing.
+    fn nearestCommand(self: *App, typed: []const u8) ?keymap.Command {
+        var loose: ?keymap.Command = null;
+        for (std.enums.values(keymap.Command)) |cmd| {
+            if (!keymap.typeable(self.km.bindings, cmd)) continue;
+            const tier = fuzzy.match(@tagName(cmd), typed) orelse continue;
+            switch (tier) {
+                .solid => return cmd,
+                .loose => if (loose == null) {
+                    loose = cmd;
+                },
+            }
+        }
+        return loose;
     }
 
     /// `*` and `#`: search the review for the identifier under the cursor.
@@ -3805,6 +3938,7 @@ test {
     _ = motion;
     _ = rows_mod;
     _ = search;
+    _ = complete;
     _ = theme_mod;
 }
 
@@ -4038,9 +4172,11 @@ const Fixture = struct {
     fn press(self: *Fixture, sequence: []const u8) !void {
         var buf: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
         for (try keytext.parseChords(sequence, &buf)) |ch| {
+            // Shift as well as ctrl: without it `<S-Tab>` arrives as `<Tab>`
+            // and no test can tell a key from its reverse.
             try self.app.handle(.{ .key = .{
                 .codepoint = ch.cp,
-                .mods = .{ .ctrl = ch.ctrl },
+                .mods = .{ .ctrl = ch.ctrl, .shift = ch.shift },
             } }, body_rows);
         }
     }
@@ -6175,4 +6311,273 @@ test "a / after a * loosens the pattern again" {
     try fx.typeIn("token");
     try fx.press("<CR>");
     try testing.expect(!fx.app.finder.whole);
+}
+
+// -- the command line ------------------------------------------------------
+
+test ": runs a command by the name [keys] binds it by" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.expectFile(0);
+    try fx.press(":");
+    try fx.typeIn("next_file");
+    try fx.press("<CR>");
+    try fx.expectFile(1);
+}
+
+test "vim's spellings are aliases onto the same commands, not a second path" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `:noh` is `clear_search`, so the pattern survives and only the paint
+    // stops - which is the whole of what `:noh` means.
+    try fx.press("/");
+    try fx.typeIn("token");
+    try fx.press("<CR>");
+    try fx.press(":");
+    try fx.typeIn("noh");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("", fx.app.finder.shown());
+    try testing.expectEqualStrings("token", fx.app.finder.query());
+
+    // And the alias inherits what the command already got right: `:nomark`
+    // used to drop a mark that was not there without saying so.
+    try fx.press(":");
+    try fx.typeIn("nomark");
+    try fx.press("<CR>");
+    try fx.expectNotice("no mark to drop");
+}
+
+test ":q still quits, though quit has no key of its own" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("q");
+    try fx.press("<CR>");
+    try testing.expect(fx.app.quit);
+}
+
+test ":quit works too, because the name is the command" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("quit");
+    try fx.press("<CR>");
+    try testing.expect(fx.app.quit);
+}
+
+test "a typo names the nearest command rather than only refusing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("nextfile");
+    try fx.press("<CR>");
+    try fx.expectNotice("did you mean :next_file?");
+    // And it did not run anything on a guess.
+    try fx.expectFile(0);
+}
+
+test "a name that resembles nothing says so without inventing a suggestion" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("zzzzqqqq");
+    try fx.press("<CR>");
+    try fx.expectNotice("not a command");
+}
+
+test ": refuses a command that only lives inside the compose box" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Running this from the review would submit a box that is not open.
+    try fx.press(":");
+    try fx.typeIn("compose_submit");
+    try fx.press("<CR>");
+    try fx.expectNotice("works only in the compose box");
+}
+
+test "a bare colon does nothing rather than complaining about the empty name" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.press("<CR>");
+    try fx.expectNoNotice();
+}
+
+test "every typeable command is reachable by its own name" {
+    // The property that makes `?` and `:` two halves of one table: if a
+    // command can be typed, `stringToEnum` must find it under exactly the
+    // name CONFIG.md prints. A command renamed in the enum and not in the
+    // docs fails here rather than in a user's config file.
+    for (std.enums.values(keymap.Command)) |cmd| {
+        if (!keymap.typeable(keymap.default_bindings, cmd)) continue;
+        const back = std.meta.stringToEnum(keymap.Command, @tagName(cmd));
+        try testing.expectEqual(cmd, back.?);
+    }
+}
+
+test "quit is the command with no key, which is why : has to reach names" {
+    // If this ever gains a binding the comment in `submitCommand` is stale,
+    // and if another command loses its binding this is where that shows up.
+    try testing.expect(keymap.typeable(keymap.default_bindings, .quit));
+    for (keymap.default_bindings) |b| {
+        try testing.expect(b.command != .quit);
+    }
+}
+
+test "every command-line message fits the slot at 80 columns" {
+    // Hard rule 9's home environment. The refusals are the long ones, and the
+    // longest command name is what decides whether they fit, so this measures
+    // the worst case rather than a representative one.
+    var longest: usize = 0;
+    for (std.enums.values(keymap.Command)) |cmd| {
+        longest = @max(longest, @tagName(cmd).len);
+    }
+    // " NORMAL " and the right-hand hint strip take the rest of the row.
+    const slot = 54;
+    try testing.expect("not a command - did you mean :".len + longest + "?".len <= slot);
+    try testing.expect(":".len + longest + " works only in the compose box".len <= slot);
+}
+
+// -- <Tab> in the command line ---------------------------------------------
+
+test "Tab extends to what every candidate shares before choosing for you" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("n");
+    try fx.press("<Tab>");
+
+    // `next_` is the part the reader would have typed anyway. Committing to
+    // one of the six here would be the key guessing.
+    try testing.expectEqualStrings("next_", fx.app.prompt.text());
+    try testing.expect(fx.app.comp_at == null);
+    try testing.expect(fx.app.comp.len > 1);
+}
+
+test "the next Tab cycles, and Shift-Tab comes back" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("n");
+    try fx.press("<Tab>"); // extends to next_
+    try fx.press("<Tab>"); // first candidate
+    // Duped: `text()` is a view into the prompt's buffer, which the next
+    // completion overwrites in place.
+    const first = try testing.allocator.dupe(u8, fx.app.prompt.text());
+    defer testing.allocator.free(first);
+    try testing.expect(std.mem.startsWith(u8, first, "next_"));
+
+    try fx.press("<Tab>");
+    try testing.expect(!std.mem.eql(u8, first, fx.app.prompt.text()));
+
+    try fx.press("<S-Tab>");
+    try testing.expectEqualStrings(first, fx.app.prompt.text());
+}
+
+test "cycling wraps rather than stopping at the end" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("next_");
+    try fx.press("<Tab>");
+    const first = try testing.allocator.dupe(u8, fx.app.prompt.text());
+    defer testing.allocator.free(first);
+
+    // Round the whole list once and land back where it started.
+    for (0..fx.app.comp.len) |_| try fx.press("<Tab>");
+    try testing.expectEqualStrings(first, fx.app.prompt.text());
+
+    // And backwards off the start goes to the end, not to nothing.
+    try fx.press("<S-Tab>");
+    try testing.expect(!std.mem.eql(u8, first, fx.app.prompt.text()));
+}
+
+test "one candidate is completed outright" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("toggle_z");
+    try fx.press("<Tab>");
+    try testing.expectEqualStrings("toggle_zen", fx.app.prompt.text());
+}
+
+test "typing after a Tab starts the next one from the new text" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("n");
+    try fx.press("<Tab>");
+    try fx.typeIn("h");
+    // The list must not still be the one built for `n`, or the reader would
+    // be cycling through candidates their own text has ruled out.
+    try testing.expect(fx.app.comp.empty());
+
+    try fx.press("<Tab>");
+    try testing.expectEqualStrings("next_hunk", fx.app.prompt.text());
+}
+
+test "Tab completes a name that Enter then runs" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.expectFile(0);
+    try fx.press(":");
+    try fx.typeIn("next_f");
+    // `next_file` and `next_fresh` already share all of `next_f`, so there is
+    // nothing left to extend to and the first Tab picks.
+    try fx.press("<Tab>");
+    try testing.expectEqualStrings("next_file", fx.app.prompt.text());
+    try fx.press("<CR>");
+    try fx.expectFile(1);
+}
+
+test "Tab in the search prompt is not completion" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `/` collects a pattern, not a command name. Offering command names
+    // there would be worse than the key doing nothing.
+    try fx.press("/");
+    try fx.typeIn("n");
+    try fx.press("<Tab>");
+    try testing.expectEqualStrings("n", fx.app.prompt.text());
+    try testing.expect(fx.app.comp.empty());
+}
+
+test "Tab on something resembling no command leaves the line alone" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("zzzqqq");
+    try fx.press("<Tab>");
+    try testing.expectEqualStrings("zzzqqq", fx.app.prompt.text());
+    try testing.expect(fx.app.comp.empty());
+}
+
+test "closing the prompt forgets the candidates" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("n");
+    try fx.press("<Tab>");
+    try testing.expect(!fx.app.comp.empty());
+    try fx.press("<Esc>");
+    // Left behind, they would be drawn over the rule the next time any
+    // prompt opened.
+    try testing.expect(fx.app.comp.empty());
 }

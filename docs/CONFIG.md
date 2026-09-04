@@ -155,6 +155,10 @@ the leader, and `<CR>` `<Esc>` `<Tab>` `<S-Tab>` `<BS>` `<Up>` `<Down>` `<Left>`
 `<Space>dc` exists makes one of them unreachable, and `lgtm` says so on the
 status line rather than picking a winner.
 
+These names are also what `:` takes: `:next_file` runs the command whether or
+not a key is bound to it, and `<Tab>` completes them. Typing one is the quickest
+way to check a spelling before committing it to a config file.
+
 ### Every command
 
 **Moving** `line_down` `line_up` `page_down` `page_up` `top` `bottom`
