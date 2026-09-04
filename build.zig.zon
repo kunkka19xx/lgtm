@@ -1,6 +1,6 @@
 .{
     .name = .lgtm,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .fingerprint = 0x657ceb15ee40c88a,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
