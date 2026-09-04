@@ -58,12 +58,26 @@ jobs:
 
       # The checksums are what makes `curl | sh` honest: the install script
       # fetches this file from the same release and refuses on a mismatch.
+      #
+      # Upload, rather than create-with-files, because the release may already
+      # be there: publishing from the GitHub UI creates the tag *and* the
+      # release, and the tag is what triggers this. `gh release create` then
+      # fails on "already exists" and the tarballs it just built are discarded
+      # - leaving a published release with no assets, which is worse than no
+      # release at all, because every install path now points at it and 404s.
+      # So: create only when missing, then upload either way.
       - name: publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          gh release create "$GITHUB_REF_NAME" \
-            --title "lgtm $GITHUB_REF_NAME" \
-            --generate-notes \
-            out/lgtm-*.tar.gz out/SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; uploading into it"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "lgtm $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          # --clobber so a re-run replaces assets rather than failing on them.
+          gh release upload "$GITHUB_REF_NAME" \
+            out/lgtm-*.tar.gz out/SHA256SUMS --clobber
