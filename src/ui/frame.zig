@@ -19,6 +19,7 @@ const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
 const diff = @import("../core/diff.zig");
+const testrisk = @import("../core/testrisk.zig");
 const event = @import("../core/event.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
@@ -157,6 +158,12 @@ pub const View = struct {
     /// Turns written since the one on screen, so a reader parked in the past
     /// can see the present accumulating without being dragged into it.
     newer_turns: u32 = 0,
+    /// The working tree has changed since this turn was opened. Drawn on the
+    /// badge rather than only in the message slot: a notice would hide it, and
+    /// what it says is a *state* rather than an answer to a keystroke.
+    tree_moved: bool = false,
+    /// What this change did to the tests across the whole review.
+    risk: testrisk.Risk = .{},
     /// The keymap, so a message that has to name a key can ask what that key
     /// currently is. One field rather than one per message: every one of them
     /// would otherwise be a place `[keys]` could be remapped out from under,
@@ -346,6 +353,12 @@ pub const FileEntry = struct {
     /// worth having: it is the same argument the file list makes, that shape
     /// and hue together find the one you want without reading a name.
     icon_path: []const u8 = "",
+    /// A number this row *is*, as against a number that appears in its label.
+    ///
+    /// The turn list's rows carry an age and two counts, so fuzzy-matching `2`
+    /// against the whole label found `27m`, `+23` and `-2` - seven rows out of
+    /// eight, which is not a filter. A digits-only query means this instead.
+    key: ?u32 = null,
 };
 
 /// Everything the `F` overlay draws. Its own view for the same reason

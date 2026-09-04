@@ -135,7 +135,29 @@ survives quitting `lgtm`: come back tomorrow and it still means the same thing.
 The mark never hides anything. You are always looking at the whole diff against
 `HEAD`; the bars are an annotation on top of it.
 
-### 5. Get your work back
+### 5. Watch for a weakened test
+
+The failure with the worst consequences, and the one hardest to catch by
+reading: a test deleted because it failed, a `skip` added, a body that stopped
+asserting. It turns a red build green while looking like ordinary cleanup.
+
+`lgtm` counts what a change did to its tests on every re-diff and says so on the
+status line:
+
+```
+1 test removed, 1 skip added, 1 fewer assertion
+```
+
+`]w` and `[w` walk to them — to the removed declaration or the added skip, so
+you land on the thing rather than near it.
+
+Detected by content, not by path, so it works for languages that keep tests in
+the source file. Two of the three signals are near-certain and lead; "fewer
+assertions" follows behind, because a refactor that merges two checks into one
+looks the same. Zig, Go, Python, JavaScript, TypeScript, Rust and Swift are
+described; anything else stays silent rather than guessing.
+
+### 6. Get your work back
 
 `lgtm` snapshots the working tree whenever the agent stops writing, into git's
 own object store under `refs/lgtm/**`. The first snapshot is taken before the
@@ -150,7 +172,9 @@ uncommitted work is invisible to git until you lose it.
 | `u` | undo the last restore |
 
 A turn is read-only: comments, `m` and `<C-s>` refuse there and say why. The
-badge reads `TURN 2` or `BASELINE` so you always know you are in the past.
+badge reads `TURN 2` or `BASELINE` so you always know you are in the past, and
+grows a `•` when the working tree changes while you are back there — nothing
+updates under you, but you are told the world moved.
 
 `R` takes a snapshot **before** it writes, asks before it writes, restores one
 file and no more, and then names the turn that undoes it. It is the only thing
@@ -173,7 +197,7 @@ They are invisible to `git branch` and `git status`. `git log --all` walks every
 ref, so they do appear there. Deleting the refs is all it takes to be rid of
 them.
 
-### 6. Read anything
+### 7. Read anything
 
 `<Space>f` lists the changed files; `<Space>F` lists every file git knows about.
 An unchanged file opens whole, outside the review — still readable, still
@@ -197,7 +221,7 @@ documents itself. What follows is the defaults.
 | `W` `B` `E` | the same over WORDs — only blanks separate |
 | `0` `^` `$` | first, first non-blank, last column |
 | `f` `t` `F` `T` | to or before a character on this line |
-| `;` `,` | repeat the last `f`/`t`/`F`/`T`, either way |
+| `;` `,` | repeat the last jump, either way (see below) |
 | `<C-d>` `<C-u>` | half a page |
 | `gg` `G` | first and last line |
 | `zz` | centre the cursor line |
@@ -211,12 +235,21 @@ documents itself. What follows is the defaults.
 | `]c` `[c` | next and previous comment |
 | `]m` `[m` | next and previous change since the mark |
 | `]t` `[t` | next and previous turn |
+| `]w` `[w` | next and previous weakened test |
 | `/` `n` `N` | search the review, then step |
 | `<Space>f` | the changed files |
 | `<Space>F` | every file in the project |
 
 Every `]x` has a `<Space>nx` spelling and every `[x` a `<Space>px`, for anyone
 whose terminal makes brackets awkward.
+
+**`;` repeats whichever of these you used last, and `,` goes back.** After `]h`
+they walk hunks, after `]w` weakened tests, after `n` search matches. After `f(`
+they are vim's, exactly. That is the whole rule: `;` is "that again", so the
+keystroke you spend most costs one key instead of two, and you never have to
+remember which family you are in.
+
+A second `,` keeps going back rather than turning round, the way vim's does.
 
 ### Talking to the agent
 
@@ -245,9 +278,10 @@ whose terminal makes brackets awkward.
 |---|---|
 | `m` | mark: everything after this is new |
 | `M` | drop the mark |
-| `<Space>lt` | list the turns |
+| `<Space>lt` | list the turns. Typing a number finds that turn; typing a word searches the row |
 | `R` | restore this file from the turn on screen |
 | `u` | undo the last restore |
+| `]w` `[w` | walk the weakened tests |
 
 ### View
 

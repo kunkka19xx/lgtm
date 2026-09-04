@@ -27,6 +27,10 @@ pub const Kind = enum {
     /// and the whole argument for doing it this way is that it is a line map
     /// rather than a second diff.
     checkpoint,
+    /// Reading every file's diff for a weakened test. Its own span because the
+    /// claim made for it is that it is a pass over lines already in memory,
+    /// and a claim like that should be checkable.
+    test_risk,
     lex,
     layout,
     render,
@@ -76,6 +80,7 @@ fn budgetMs(kind: Kind) ?f64 {
         // Part of the 100 ms re-diff, so it gets a slice of it rather than a
         // budget of its own size.
         .checkpoint => 20.0,
+        .test_risk => 10.0,
         else => null,
     };
 }

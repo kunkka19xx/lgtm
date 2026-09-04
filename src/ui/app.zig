@@ -145,6 +145,14 @@ pub const App = struct {
     pending_find: ?motion.Find = null,
     /// The last completed one, which is what `;` and `,` repeat.
     last_find: ?motion.Find = null,
+    /// The last walk `;` should repeat: `]h`, `]w`, `]c`, `/`'s `n`, any of
+    /// them. Null until one has been used, and then never null again - `;`
+    /// with nothing behind it is the only case where it falls back to `f`.
+    ///
+    /// Set for the *whole* family rather than for one direction, so `[h` then
+    /// `;` walks backwards: `;` means "that again", and the last thing done
+    /// was a backwards step.
+    last_walk: ?keymap.Command = null,
     /// The mode to return to when the prompt closes, so `/` from a selection
     /// does not silently drop it.
     prompt_return: event.Mode = .normal,
@@ -599,6 +607,8 @@ pub const App = struct {
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .notes = self.commentMarks(),
             .viewing = self.review.viewing,
+            .tree_moved = self.review.moved,
+            .risk = self.review.risk_total,
             .newer_turns = if (self.snap) |s|
                 (if (self.review.viewing) |t| s.state.latest_turn -| t else 0)
             else
@@ -751,8 +761,16 @@ pub const App = struct {
             .till_char => self.pending_find = .{ .target = 0, .forward = true, .till = true },
             .find_char_back => self.pending_find = .{ .target = 0, .forward = false, .till = false },
             .till_char_back => self.pending_find = .{ .target = 0, .forward = false, .till = true },
-            .find_repeat => if (self.last_find) |f| self.applyFind(f),
-            .find_reverse => if (self.last_find) |f| self.applyFind(f.flip()),
+            // `;` and `,` repeat whichever walk was last used. A char search
+            // is one of them, so after `f(` they behave exactly as vim's do;
+            // after `]h` they walk hunks, which is the keystroke this tool
+            // spends most and the reason the pair was widened.
+            .find_repeat => if (self.last_walk) |w| {
+                return self.run(w, body);
+            } else if (self.last_find) |f| self.applyFind(f),
+            .find_reverse => if (self.last_walk) |w| {
+                if (w.opposite()) |back| return self.run(back, body);
+            } else if (self.last_find) |f| self.applyFind(f.flip()),
             .next_hunk => try self.stepHunk(1),
             .prev_hunk => try self.stepHunk(-1),
             .next_file => {
@@ -916,6 +934,8 @@ pub const App = struct {
             },
             .next_turn => try self.turnStep(1, body),
             .prev_turn => try self.turnStep(-1, body),
+            .next_risk => try self.riskStep(1),
+            .prev_risk => try self.riskStep(-1),
             .next_fresh => try self.freshStep(1),
             .prev_fresh => try self.freshStep(-1),
             .copy_text => try self.yank(.selection),
@@ -2611,6 +2631,9 @@ pub const App = struct {
                 // a generic file icon instead of a Zig one, which is how it
                 // was noticed rather than how it would usually show.
                 .icon_path = if (turn.number == 0) "" else arena.dupe(u8, turn.path) catch "",
+                // Typing a number in this list means a turn, not a digit that
+                // happens to appear in an age or a count.
+                .key = turn.number,
                 .plain = turn.number == 0 or turn.files == 0,
                 .current = if (self.review.viewing) |v| v == turn.number else false,
             }) catch return;
@@ -2990,13 +3013,17 @@ pub const App = struct {
         }
         var k: [32]u8 = undefined;
         const back = self.keyFor(.next_turn, .normal, &k);
+        // "returns" only when there is nothing between here and the present. A
+        // turn taken while the reader was parked puts one there, and the
+        // message then promised something the key would not do.
+        const forward: []const u8 = if (turn >= latest) "returns to the working tree" else "goes forward";
         if (turn == 0) {
             // Not "turn 0". It is the tree as it was before the agent ran, and
             // that is the only thing about it worth saying.
-            self.notice.set("the baseline - before the agent ran, {s} returns", .{back});
+            self.notice.set("the baseline - before the agent ran, {s} {s}", .{ back, forward });
             return;
         }
-        self.notice.set("turn {d} of {d} - read only, {s} returns", .{ turn, latest, back });
+        self.notice.set("turn {d} of {d} - read only, {s} {s}", .{ turn, latest, back, forward });
     }
 
     /// Records the working tree as a turn, because the agent has stopped.
@@ -3121,6 +3148,85 @@ pub const App = struct {
             self.noteWrap(delta, "change");
             self.moveTo(row);
         }
+    }
+
+    /// Remembers what `;` should repeat.
+    ///
+    /// Set here, on the key the reader actually pressed, and not inside `run`:
+    /// `,` dispatches the opposite command, and updating the memory there would
+    /// make a second `,` turn round and come back. `,` means "again, the other
+    /// way", not "reverse each time".
+    ///
+    /// A fresh `f` or `t` clears it, so `;` goes back to meaning what vim
+    /// readers expect the moment they use the motion vim attaches it to.
+    fn rememberWalk(self: *App, cmd: keymap.Command) void {
+        switch (cmd) {
+            .find_repeat, .find_reverse => {},
+            .find_char, .till_char, .find_char_back, .till_char_back => self.last_walk = null,
+            else => if (cmd.opposite() != null) {
+                self.last_walk = cmd;
+            },
+        }
+    }
+
+    /// Walks the weakened tests, across the whole review.
+    ///
+    /// The same walk `]m` does over a different set of rows. It exists because
+    /// the status line can say "1 test removed" and then leave the reader to
+    /// find it, which on a large change is the difference between a warning
+    /// and a rumour.
+    fn riskStep(self: *App, delta: i32) !void {
+        if (!self.review.risk_total.any()) {
+            self.notice.set("no weakened tests in this change", .{});
+            return;
+        }
+        if (!self.review.risk_total.certain()) {
+            // Only `fewer_asserts`, which is a property of a file rather than
+            // a place: there is no row that *is* the finding.
+            self.notice.set("fewer assertions than before, but no test removed or skipped", .{});
+            return;
+        }
+
+        if (self.riskFrom(self.cursor, delta)) |row| {
+            self.moveTo(row);
+            return;
+        }
+        const count = self.files().len;
+        if (count > 1) {
+            var tries: usize = 0;
+            while (tries < count) : (tries += 1) {
+                try self.stepFile(delta);
+                if (self.riskEdge(delta)) |row| {
+                    self.moveTo(row);
+                    return;
+                }
+            }
+            return;
+        }
+        if (self.riskEdge(delta)) |row| {
+            self.noteWrap(delta, "weakened test");
+            self.moveTo(row);
+        }
+    }
+
+    fn riskFrom(self: *App, from: u32, delta: i32) ?u32 {
+        return self.scanRiskRows(@as(i64, from) + delta, delta);
+    }
+
+    fn riskEdge(self: *App, delta: i32) ?u32 {
+        return self.scanRiskRows(if (delta > 0) 0 else @as(i64, self.rows.len()) - 1, delta);
+    }
+
+    fn scanRiskRows(self: *App, start: i64, delta: i32) ?u32 {
+        const marks = self.review.riskRowsFor(self.file_index);
+        if (marks.len == 0) return null;
+        var i = start;
+        while (i >= 0 and i < self.rows.len()) : (i += delta) {
+            const row: u32 = @intCast(i);
+            const li = self.rows.lineAt(row) orelse continue;
+            if (li < marks.len and marks[li]) return row;
+        }
+        return null;
     }
 
     /// The next row after `from` whose line changed since the mark.
@@ -3514,7 +3620,10 @@ pub const App = struct {
                     return;
                 }
                 switch (self.km.feed(k, self.mode)) {
-                    .command => |cmd| try self.run(cmd, body),
+                    .command => |cmd| {
+                        self.rememberWalk(cmd);
+                        try self.run(cmd, body);
+                    },
                     .pending, .none => {},
                 }
             },
@@ -3531,7 +3640,10 @@ pub const App = struct {
                 // re-diffing under someone reading turn 4 would throw them back
                 // to the present mid-sentence, which is the one thing a history
                 // view must never do.
-                if (self.review.viewing != null) return;
+                if (self.review.viewing != null) {
+                    self.review.moved = true;
+                    return;
+                }
                 try self.rediff();
                 self.clampScroll(body);
             },
@@ -5880,4 +5992,70 @@ test "undo is one step: after it there is nothing left to undo" {
     // file does not exist, so the hash check is what stops it.
     try fx.press("u");
     try testing.expect(fx.app.last_restore == null);
+}
+
+// -- `;` repeats the last walk ---------------------------------------------
+
+test "; repeats the last walk, and , goes back without turning round" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // Two files, one hunk each, so `]f` has somewhere to go and back.
+    try fx.expectFile(0);
+
+    try fx.press("]f");
+    try fx.expectFile(1);
+    // `;` is "that again", not "the next hunk" or any other family.
+    try fx.press(";");
+    try fx.expectFile(0);
+
+    // `,` is "again, the other way" - and a second `,` keeps going that way
+    // rather than reversing each time, which is what vim's does.
+    try fx.press("]f");
+    try fx.expectFile(1);
+    try fx.press(",");
+    try fx.expectFile(0);
+    try fx.press(",");
+    try fx.expectFile(1);
+}
+
+test "; still belongs to f and t the moment either is used" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press("]f");
+    try testing.expect(fx.app.last_walk != null);
+
+    // A vim reader who types `f` expects `;` back. Using the motion vim
+    // attaches it to takes it back, rather than the walk keeping it for the
+    // rest of the session.
+    try fx.press("f");
+    try fx.typeIn("x");
+    try testing.expect(fx.app.last_walk == null);
+}
+
+test "; with nothing behind it does nothing rather than guessing" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    const before = fx.app.cursor;
+    try fx.press(";");
+    try testing.expectEqual(before, fx.app.cursor);
+    try fx.press(",");
+    try testing.expectEqual(before, fx.app.cursor);
+}
+
+test "every walk has an opposite, or ',' would be a dead key on it" {
+    // A family that answers `opposite` is one `;` will repeat, so it must also
+    // be one `,` can reverse. A new `]x` added without its pair would repeat
+    // forwards and do nothing backwards, which is the kind of half-binding
+    // nobody notices until they press it.
+    const walks = [_]keymap.Command{
+        .next_hunk,    .prev_hunk,    .next_file,  .prev_file,
+        .next_comment, .prev_comment, .next_fresh, .prev_fresh,
+        .next_risk,    .prev_risk,    .next_turn,  .prev_turn,
+        .search_next,  .search_prev,
+    };
+    for (walks) |w| {
+        const back = w.opposite() orelse return error.TestExpectedOpposite;
+        try testing.expectEqual(w, back.opposite().?);
+    }
 }

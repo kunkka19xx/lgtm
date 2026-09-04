@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 
 const anchor = @import("../core/anchor.zig");
 const checkpoint = @import("../core/checkpoint.zig");
+const testrisk = @import("../core/testrisk.zig");
 const snapshot = @import("../snapshot/snapshot.zig");
 const diff = @import("../core/diff.zig");
 const git = @import("../core/git.zig");
@@ -90,6 +91,15 @@ pub const Review = struct {
     /// survive the arena reset that a re-diff is.
     view_base: [128]u8 = @splat(0),
     view_base_len: u8 = 0,
+    /// The working tree changed while a turn was on screen.
+    ///
+    /// Being parked in the past is a state the reader has to be able to see
+    /// from the screen alone. Turns only advance after ten seconds of quiet,
+    /// so counting them is not enough: edit a file and nothing would say
+    /// anything at all for ten seconds, which reads exactly like the tool
+    /// having stopped working. This is set the moment the watcher notices,
+    /// which is under a second.
+    moved: bool = false,
 
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
@@ -110,6 +120,17 @@ pub const Review = struct {
     /// belongs to the generation, because rows do.
     mark_at: checkpoint.Checkpoint,
     fresh: [][]bool = &.{},
+
+    /// What this generation's change did to its tests, per file and in total.
+    ///
+    /// Recomputed with the diff because that is what it reads: it is a count
+    /// over lines that appeared against lines that disappeared, so it costs a
+    /// pass over `DiffLines` and nothing else - no second lex, no file read.
+    risk: []testrisk.Risk = &.{},
+    risk_total: testrisk.Risk = .{},
+    /// One bool per row of each file: whether `]w` should stop there. Parallel
+    /// to `fresh`, and for the same reason - rows belong to a generation.
+    risk_rows: [][]bool = &.{},
 
     pub fn init(gpa: Allocator, io: std.Io) Review {
         return .{ .gpa = gpa, .io = io, .arena = .init(gpa), .mark_at = .init(gpa) };
@@ -193,6 +214,9 @@ pub const Review = struct {
         self.sources = null;
         self.torn = false;
         self.fresh = &.{};
+        self.risk = &.{};
+        self.risk_rows = &.{};
+        self.risk_total = .{};
 
         const git_span = metrics.span(.git_subprocess);
         const skip: []const []const u8 = if (self.show_ignored) &.{} else self.ignore;
@@ -294,7 +318,51 @@ pub const Review = struct {
         }
 
         try self.refresh();
+        try self.scanRisk();
         return index;
+    }
+
+    /// Reads every file for a weakened test.
+    ///
+    /// A language nobody has described yields nothing rather than a guess, and
+    /// a file with no diff lines yields nothing because there is nothing to
+    /// compare - both of which mean this is silent far more often than not,
+    /// which is the point.
+    fn scanRisk(self: *Review) Allocator.Error!void {
+        const sp = metrics.span(.test_risk);
+        defer sp.end();
+
+        const arena = self.arena.allocator();
+        const fs = self.files();
+        const out = try arena.alloc(testrisk.Risk, fs.len);
+        const rows = try arena.alloc([]bool, fs.len);
+        var total: testrisk.Risk = .{};
+        for (fs, 0..) |*f, i| {
+            const lang = highlight.byExtension(f.path());
+            if (lang) |def| {
+                out[i] = testrisk.scan(f, def);
+                rows[i] = try testrisk.markRows(arena, f, def);
+            } else {
+                out[i] = .{};
+                rows[i] = &.{};
+            }
+            total.add(out[i]);
+        }
+        self.risk = out;
+        self.risk_rows = rows;
+        self.risk_total = total;
+    }
+
+    /// What the change did to the tests in file `index`.
+    pub fn riskFor(self: *const Review, index: u32) testrisk.Risk {
+        if (index >= self.risk.len) return .{};
+        return self.risk[index];
+    }
+
+    /// Which rows of file `index` are findings `]w` should stop on.
+    pub fn riskRowsFor(self: *const Review, index: u32) []const bool {
+        if (index >= self.risk_rows.len) return &.{};
+        return self.risk_rows[index];
     }
 
     /// Recomputes what changed since the mark, for every file.
@@ -417,6 +485,11 @@ pub const Review = struct {
     /// `base` is the turn before this one, so the view is what this turn did.
     /// HEAD for the baseline, which has nothing before it.
     pub fn showTurn(self: *Review, turn: u32, ref: []const u8, base: []const u8) void {
+        // Cleared on any change of view. The flag means "the tree has moved
+        // since you last looked at it", so arriving somewhere new resets it and
+        // the next change re-arms it. Left standing, it followed the reader
+        // from turn to turn reporting a move they had already seen.
+        self.moved = false;
         const n = @min(ref.len, self.view_ref.len);
         @memcpy(self.view_ref[0..n], ref[0..n]);
         self.view_ref_len = @intCast(n);
@@ -431,6 +504,7 @@ pub const Review = struct {
         self.view_ref_len = 0;
         self.view_base_len = 0;
         self.viewing = null;
+        self.moved = false;
     }
 
     /// Drops the mark, and with it every freshness marker.

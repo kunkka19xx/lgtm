@@ -36,5 +36,11 @@ pub const def = langdef.define(.{
         "f128",         "c_int",          "c_uint",   "c_char", "c_long",   "c_ulong",
     },
     .fn_decl = &.{"fn"},
+    // `test {` is the unnamed form and is a test too. One `testing.expect`
+    // entry rather than one per helper: `expectEqual` and `expectEqualStrings`
+    // contain it, and listing them separately would count a single call twice.
+    .test_decl = &.{ "test \"", "test {" },
+    .assert_names = &.{ "testing.expect", "std.debug.assert" },
+    .skip_names = &.{"error.SkipZigTest"},
     .ident_extra = "@",
 });

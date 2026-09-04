@@ -28,6 +28,7 @@ pub const diff = @import("core/diff.zig");
 pub const git = @import("core/git.zig");
 pub const hunk = @import("core/hunk.zig");
 pub const source = @import("core/source.zig");
+pub const testrisk = @import("core/testrisk.zig");
 
 pub const lexer = @import("syntax/lexer.zig");
 pub const highlight = @import("syntax/highlight.zig");
@@ -51,6 +52,7 @@ test {
     _ = git;
     _ = hunk;
     _ = source;
+    _ = testrisk;
     _ = lexer;
     _ = highlight;
 }

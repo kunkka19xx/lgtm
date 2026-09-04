@@ -164,8 +164,8 @@ status line rather than picking a winner.
 `find_reverse` `center`
 
 **Jumping** `next_hunk` `prev_hunk` `next_file` `prev_file` `next_comment`
-`prev_comment` `next_fresh` `prev_fresh` `next_turn` `prev_turn`
-`search_forward` `search_next` `search_prev` `clear_search`
+`prev_comment` `next_risk` `prev_risk` `search_forward` `search_next`
+`search_prev` `clear_search`
 
 **The agent** `send_ref` `compose_ask` `copy_text` `copy_text_lines` `copy_ref`
 `copy_ref_lines` `submit_review`
@@ -173,7 +173,8 @@ status line rather than picking a winner.
 **Comments** `comment_add` `comment_view` `comment_list` `comment_send`
 `comment_delete` `comment_send_one` `comment_send_all` `comment_drop`
 
-**Turns** `mark_here` `clear_mark` `turn_list` `restore_file` `undo_restore`
+**Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`
+`next_turn` `prev_turn` `turn_list` `restore_file` `undo_restore`
 
 **View** `toggle_zen` `toggle_wrap` `toggle_ignored` `expand_file`
 `collapse_file` `file_list` `file_browse` `help` `refresh` `open_editor`

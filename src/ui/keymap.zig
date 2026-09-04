@@ -37,7 +37,9 @@ pub const Command = enum {
     till_char,
     find_char_back,
     till_char_back,
-    /// `;` and `,`, which repeat the last of those forwards and backwards.
+    /// `;` and `,`. They repeat the last *walk* of any family, not only the
+    /// char searches above: after `]h` they step hunks, after `n` search
+    /// matches. A fresh `f` or `t` hands them back to vim's meaning.
     find_repeat,
     find_reverse,
     next_hunk,
@@ -102,6 +104,10 @@ pub const Command = enum {
     undo_restore,
     next_fresh,
     prev_fresh,
+    /// Walk the weakened tests: a removed test declaration, an added skip.
+    /// `w` for weakened, and it is the one letter in that family still free.
+    next_risk,
+    prev_risk,
     /// A file over `large_file_lines` renders as a summary row; these open it
     /// and fold it again. `zo` and `zc` because a deferred file is a fold in
     /// everything but name, and vim already decided what those keys mean.
@@ -146,6 +152,34 @@ pub const Command = enum {
     /// list, which is the same movement in a list one column wide.
     list_left,
     list_right,
+
+    /// The command that walks the same family the other way, for `,`.
+    ///
+    /// `;` and `,` mean "again" and "again, backwards", and vim only ever had
+    /// one family for them to repeat - `f` and `t` - because it only had one.
+    /// This tool has six, and pressing `]h ]h ]h` to walk a review is the
+    /// keystroke it spends most. Extending the pair rather than adding a key
+    /// costs a vim reader nothing: after `f(`, `;` still does what it always
+    /// did, because `f` is one of the families.
+    pub fn opposite(self: Command) ?Command {
+        return switch (self) {
+            .next_hunk => .prev_hunk,
+            .prev_hunk => .next_hunk,
+            .next_file => .prev_file,
+            .prev_file => .next_file,
+            .next_comment => .prev_comment,
+            .prev_comment => .next_comment,
+            .next_fresh => .prev_fresh,
+            .prev_fresh => .next_fresh,
+            .next_risk => .prev_risk,
+            .prev_risk => .next_risk,
+            .next_turn => .prev_turn,
+            .prev_turn => .next_turn,
+            .search_next => .search_prev,
+            .search_prev => .search_next,
+            else => null,
+        };
+    }
 
     /// Whether this command *jumps* - takes the reader somewhere they asked to
     /// go - as against stepping, where the view moves only because the cursor
@@ -238,18 +272,24 @@ pub const Chord = struct {
 
 /// Which tab of the `?` overlay a binding is listed under.
 ///
-/// Five, and no more, for two reasons. The strip is drawn into the top border
-/// of a box that has to fit an 80-column pane, and a reader hunting for a key
-/// already knows which of these five things they are trying to do - so a
-/// sixth tab would cost a column and answer a question nobody asks. The
-/// filter cuts across all of them, because *finding* a key must not require
-/// knowing which tab it was filed under.
+/// Few, and each one a question a reader is actually asking. The strip is
+/// drawn into the top border of a box that has to fit an 80-column pane, so
+/// every tab costs columns there - and the filter cuts across all of them
+/// anyway, because *finding* a key must not require knowing which tab it was
+/// filed under.
+///
+/// `turns` was split out of `jump` once the snapshot store landed. `jump` had
+/// become four unrelated things - walking hunks, the mark, the timeline, and
+/// restoring a file - and a tab that holds four answers is a tab you scroll
+/// rather than read. What is in `jump` now is moving around the diff on
+/// screen; what is in `turns` is the record of how it got that way.
 pub const Group = enum {
     move,
     jump,
     send,
     comment,
     find,
+    turns,
     view,
 
     pub const count = @typeInfo(Group).@"enum".fields.len;
@@ -346,8 +386,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('t')}, .command = .till_char, .desc = "to or before <char>, forwards and back", .group = .move },
     .{ .chords = &.{c('F')}, .command = .find_char_back, .desc = "to or before <char>, forwards and back", .group = .move },
     .{ .chords = &.{c('T')}, .command = .till_char_back, .desc = "to or before <char>, forwards and back", .group = .move },
-    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last f/t/F/T, either way", .group = .move },
-    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat the last f/t/F/T, either way", .group = .move },
+    .{ .chords = &.{c(';')}, .command = .find_repeat, .desc = "repeat the last jump or f/t, either way", .group = .move },
+    .{ .chords = &.{c(',')}, .command = .find_reverse, .desc = "repeat the last jump or f/t, either way", .group = .move },
     .{ .chords = &.{ c(']'), c('h') }, .command = .next_hunk, .desc = "next hunk (wraps)", .group = .jump },
     .{ .chords = &.{ c('['), c('h') }, .command = .prev_hunk, .desc = "previous hunk (wraps)", .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('h') }, .command = .next_hunk, .group = .jump },
@@ -400,19 +440,23 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('e') }, .command = .open_editor, .desc = "open line in $EDITOR", .group = .view },
     .{ .chords = &.{c(event.code.tab)}, .command = .toggle_zen, .desc = "zen: hide the chrome", .group = .view },
     .{ .chords = &.{ c('z'), c('w') }, .command = .toggle_wrap, .hint = null, .desc = "soft wrap long lines", .group = .view },
-    .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .jump },
-    .{ .chords = &.{ c(']'), c('t') }, .command = .next_turn, .desc = "next turn, ending at the working tree", .hint = null, .group = .jump },
-    .{ .chords = &.{ c('['), c('t') }, .command = .prev_turn, .desc = "previous turn - what the agent had written by then", .hint = null, .group = .jump },
-    .{ .chords = &.{c('u')}, .command = .undo_restore, .desc = "undo the last restore", .hint = null, .group = .jump },
-    .{ .chords = &.{c('R')}, .command = .restore_file, .desc = "restore this file from the turn on screen", .hint = null, .group = .jump },
-    .{ .chords = &.{ leader, c('l'), c('t') }, .command = .turn_list, .desc = "list the turns the agent has written", .group = .jump },
-    .{ .chords = &.{ leader, c('n'), c('t') }, .command = .next_turn, .group = .jump },
-    .{ .chords = &.{ leader, c('p'), c('t') }, .command = .prev_turn, .group = .jump },
-    .{ .chords = &.{c('M')}, .command = .clear_mark, .desc = "drop the mark; the review reads as one whole change again", .hint = null, .group = .jump },
-    .{ .chords = &.{ c(']'), c('m') }, .command = .next_fresh, .desc = "next change since the mark (wraps)", .hint = null, .group = .jump },
-    .{ .chords = &.{ c('['), c('m') }, .command = .prev_fresh, .desc = "previous change since the mark (wraps)", .hint = null, .group = .jump },
-    .{ .chords = &.{ leader, c('n'), c('m') }, .command = .next_fresh, .group = .jump },
-    .{ .chords = &.{ leader, c('p'), c('m') }, .command = .prev_fresh, .group = .jump },
+    .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .turns },
+    .{ .chords = &.{ c(']'), c('t') }, .command = .next_turn, .desc = "next turn, ending at the working tree", .hint = null, .group = .turns },
+    .{ .chords = &.{ c('['), c('t') }, .command = .prev_turn, .desc = "previous turn - what the agent had written by then", .hint = null, .group = .turns },
+    .{ .chords = &.{c('u')}, .command = .undo_restore, .desc = "undo the last restore", .hint = null, .group = .turns },
+    .{ .chords = &.{c('R')}, .command = .restore_file, .desc = "restore this file from the turn on screen", .hint = null, .group = .turns },
+    .{ .chords = &.{ leader, c('l'), c('t') }, .command = .turn_list, .desc = "list the turns the agent has written", .group = .turns },
+    .{ .chords = &.{ leader, c('n'), c('t') }, .command = .next_turn, .group = .turns },
+    .{ .chords = &.{ leader, c('p'), c('t') }, .command = .prev_turn, .group = .turns },
+    .{ .chords = &.{c('M')}, .command = .clear_mark, .desc = "drop the mark; the review reads as one whole change again", .hint = null, .group = .turns },
+    .{ .chords = &.{ c(']'), c('w') }, .command = .next_risk, .desc = "next weakened test (wraps)", .hint = null, .group = .jump },
+    .{ .chords = &.{ c('['), c('w') }, .command = .prev_risk, .desc = "previous weakened test (wraps)", .hint = null, .group = .jump },
+    .{ .chords = &.{ leader, c('n'), c('w') }, .command = .next_risk, .group = .jump },
+    .{ .chords = &.{ leader, c('p'), c('w') }, .command = .prev_risk, .group = .jump },
+    .{ .chords = &.{ c(']'), c('m') }, .command = .next_fresh, .desc = "next change since the mark (wraps)", .hint = null, .group = .turns },
+    .{ .chords = &.{ c('['), c('m') }, .command = .prev_fresh, .desc = "previous change since the mark (wraps)", .hint = null, .group = .turns },
+    .{ .chords = &.{ leader, c('n'), c('m') }, .command = .next_fresh, .group = .turns },
+    .{ .chords = &.{ leader, c('p'), c('m') }, .command = .prev_fresh, .group = .turns },
     .{ .chords = &.{ c('z'), c('i') }, .command = .toggle_ignored, .desc = "show the files [review] ignore hides", .group = .view },
     .{ .chords = &.{ c('z'), c('o') }, .command = .expand_file, .desc = "open a file too large to render inline, or fold it again", .group = .view },
     .{ .chords = &.{ c('z'), c('c') }, .command = .collapse_file, .desc = "open a file too large to render inline, or fold it again", .hint = null, .group = .view },

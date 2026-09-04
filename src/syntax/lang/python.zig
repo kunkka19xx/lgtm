@@ -17,12 +17,12 @@ pub const def = langdef.define(.{
         .{ .open = "'", .close = "'" },
     },
     .keywords = &.{
-        "and",     "as",     "assert", "async",  "await",  "break",
-        "class",   "continue", "def",  "del",    "elif",   "else",
-        "except",  "finally", "for",   "from",   "global", "if",
-        "import",  "in",     "is",     "lambda", "nonlocal", "not",
-        "or",      "pass",   "raise",  "return", "try",    "while",
-        "with",    "yield",  "None",   "True",   "False",  "self",
+        "and",    "as",       "assert", "async",  "await",    "break",
+        "class",  "continue", "def",    "del",    "elif",     "else",
+        "except", "finally",  "for",    "from",   "global",   "if",
+        "import", "in",       "is",     "lambda", "nonlocal", "not",
+        "or",     "pass",     "raise",  "return", "try",      "while",
+        "with",   "yield",    "None",   "True",   "False",    "self",
     },
     .types = &.{
         "bool", "bytes", "complex", "dict", "float", "frozenset",
@@ -31,5 +31,10 @@ pub const def = langdef.define(.{
     // `class` opens a span too: for a method the innermost wins, and for a
     // line between methods the class name is still better than nothing.
     .fn_decl = &.{ "def", "class" },
+    // `assert ` keeps its trailing space so it is the statement and not
+    // `assertion` or `asserts`.
+    .test_decl = &.{ "def test_", "async def test_" },
+    .assert_names = &.{ "assert ", "self.assert", "pytest.raises" },
+    .skip_names = &.{ "@pytest.mark.skip", "@unittest.skip", "pytest.skip(" },
     .blocks = .indent,
 });

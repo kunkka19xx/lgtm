@@ -77,6 +77,19 @@ pub const def = langdef.define(.{
     .keywords = &keywords,
     .types = &types,
     .fn_decl = &fn_decl,
+    // The opening quote is part of the pattern. `it(` alone would match
+    // `edit(`, `submit(` and `exit(` - the shortest name in the vocabulary is
+    // the one most likely to match something else, so it carries the most
+    // context.
+    .test_decl = &.{ "it(\"", "it('", "it(`", "test(\"", "test('", "test(`" },
+    .assert_names = &.{ "expect(", "assert.", "chai.expect" },
+    // `.only` is a weakening too: focusing one test switches off every other
+    // in the file, and it is the one people leave behind by accident.
+    // ` xit(` keeps its leading space: `xit(` alone matches `exit(`, which is
+    // ordinary code in any language that has one. `xdescribe(` needs no such
+    // guard because nothing else ends in it. Both found by the false-positive
+    // test in `core/testrisk.zig`.
+    .skip_names = &.{ "it.skip", "test.skip", "describe.skip", " xit(", "xdescribe(", ".only(" },
     .fn_decl_body = &fn_decl_body,
     // `$foo` and `foo$bar`: a start byte and a continuation byte both.
     .ident_extra = "$",

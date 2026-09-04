@@ -142,15 +142,43 @@ pub const Files = struct {
 /// a ranking: a reader who knows the change knows roughly where a file sits in
 /// it, and re-sorting on every keystroke takes that away. The tiers still
 /// matter for *which* rows survive, not for where they land.
+/// Whether a query is nothing but digits, and so is asking for a `key`.
+///
+/// Only when some row has one: in the file list `2` should still fuzzy-match a
+/// path, because there is no other number a reader could mean.
+fn byNumber(files: []const frame.FileEntry, query: []const u8) bool {
+    if (query.len == 0) return false;
+    for (query) |c| {
+        if (!std.ascii.isDigit(c)) return false;
+    }
+    for (files) |f| {
+        if (f.key != null) return true;
+    }
+    return false;
+}
+
+/// Whether `f` answers a digits-only query.
+///
+/// Prefix, not equality: typing `1` on the way to `12` should narrow rather
+/// than blink empty and come back.
+fn keyMatches(f: frame.FileEntry, query: []const u8) bool {
+    const k = f.key orelse return false;
+    var buf: [16]u8 = undefined;
+    const text = std.fmt.bufPrint(&buf, "{d}", .{k}) catch return false;
+    return std.mem.startsWith(u8, text, query);
+}
+
 pub fn entries(
     files: []const frame.FileEntry,
     current: u32,
     query: []const u8,
     arena: Allocator,
 ) Allocator.Error![]const frame.FileEntry {
+    const numeric = byNumber(files, query);
     var out: std.ArrayList(frame.FileEntry) = .empty;
     for (files, 0..) |f, i| {
-        if (fuzzy.match(f.path, query) == null) continue;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        if (!keep) continue;
         var e = f;
         e.current = i == current;
         try out.append(arena, e);
@@ -161,9 +189,11 @@ pub fn entries(
 /// How many rows survive `query`. Lets the selection be clamped without
 /// building the list first.
 pub fn count(files: []const frame.FileEntry, query: []const u8) usize {
+    const numeric = byNumber(files, query);
     var n: usize = 0;
     for (files) |f| {
-        if (fuzzy.match(f.path, query) != null) n += 1;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        if (keep) n += 1;
     }
     return n;
 }
@@ -302,4 +332,58 @@ test "Enter opens, Escape closes, and typing does neither" {
     // `?` overlay and in every prompt.
     fl.open(0);
     try testing.expectEqual(Fed.close, fl.feed(.{ .codepoint = event.code.backspace, .mods = .{} }));
+}
+
+test "a number in the turn list means a turn" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // Labels as the turn list builds them: the age and the counts are full of
+    // digits, which is what made `2` match seven rows out of eight.
+    const turns = [_]frame.FileEntry{
+        .{ .path = "│ 9   src/core/testrisk.zig  27m ago  1 file", .added = 0, .removed = 0, .key = 9 },
+        .{ .path = "│ 3   src/ui/app.zig  35m ago  2 files", .added = 0, .removed = 0, .key = 3 },
+        .{ .path = "│ 2   src/ui/render.zig  36m ago  1 file", .added = 0, .removed = 0, .key = 2 },
+        .{ .path = "│ 12  src/ui/files.zig  40m ago  1 file", .added = 0, .removed = 0, .key = 12 },
+    };
+
+    // `2` is turn 2 and nothing else. Against the old label match it found
+    // seven rows: `27m`, `+23`, `-2`, `36m`.
+    const two = try entries(&turns, 0, "2", arena);
+    try testing.expectEqual(@as(usize, 1), two.len);
+    try testing.expectEqual(@as(u32, 2), two[0].key.?);
+    try testing.expectEqual(@as(usize, 1), count(&turns, "2"));
+
+    // A prefix, so `1` narrows to the turns that begin with it rather than
+    // blinking empty on the way to a second digit.
+    const ones = try entries(&turns, 0, "1", arena);
+    try testing.expectEqual(@as(usize, 1), ones.len);
+    try testing.expectEqual(@as(u32, 12), ones[0].key.?);
+
+    const twelve = try entries(&turns, 0, "12", arena);
+    try testing.expectEqual(@as(usize, 1), twelve.len);
+    try testing.expectEqual(@as(u32, 12), twelve[0].key.?);
+
+    // A word still searches the label, which is how you find the turn that
+    // touched a file without knowing its number.
+    const named = try entries(&turns, 0, "render", arena);
+    try testing.expectEqual(@as(usize, 1), named.len);
+    try testing.expectEqual(@as(u32, 2), named[0].key.?);
+}
+
+test "a number in the file list still searches the path" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // No row carries a key, so there is no other number a reader could mean -
+    // `2` has to go on matching `utf8.zig` and `v2/handler.go`.
+    const files = [_]frame.FileEntry{
+        .{ .path = "src/base32.zig", .added = 0, .removed = 0 },
+        .{ .path = "api/v2/handler.go", .added = 0, .removed = 0 },
+        .{ .path = "src/main.zig", .added = 0, .removed = 0 },
+    };
+    const hits = try entries(&files, 0, "2", arena);
+    try testing.expectEqual(@as(usize, 2), hits.len);
 }

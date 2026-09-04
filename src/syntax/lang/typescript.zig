@@ -36,6 +36,10 @@ pub const def = langdef.define(.{
     // `interface Foo {` and `type Bar = {` name a hunk as usefully as a
     // function does, and close the same way at the next sibling.
     .fn_decl = &(js.fn_decl ++ [_][]const u8{ "interface", "type", "enum" }),
+    // The same test vocabulary as JavaScript: the frameworks are the same ones.
+    .test_decl = js.def.test_decl,
+    .assert_names = js.def.assert_names,
+    .skip_names = js.def.skip_names,
     .fn_decl_body = &js.fn_decl_body,
     .ident_extra = "$",
     .ident_cont_extra = "$",

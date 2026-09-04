@@ -19,6 +19,7 @@ const body_mod = @import("body.zig");
 const motion = @import("motion.zig");
 const frame_mod = @import("frame.zig");
 const devicon = @import("devicon.zig");
+const testrisk = @import("../core/testrisk.zig");
 const keytext = @import("keytext.zig");
 const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
@@ -275,11 +276,15 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // notice, so pressing a key that refuses in this view gave no answer at
     // all. The badge is the right home for a state, and it leaves the slot for
     // the messages that state produces.
+    // The dot says the working tree has moved on without you. On the badge
+    // because that is the one thing on this row a notice cannot push aside,
+    // and being parked in the past while the world changes is a state rather
+    // than an answer to a keystroke.
     const label = if (v.viewing) |turn|
         (if (turn == 0)
-            "BASELINE"
+            (if (v.tree_moved) "BASELINE •" else "BASELINE")
         else
-            try std.fmt.allocPrint(f.arena, "TURN {d}", .{turn}))
+            try std.fmt.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
     else if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
         "VISUAL LINE"
     else
@@ -310,10 +315,28 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         }), t.dim }
     else if (v.selection) |sel|
         .{ try selectionSize(f, v, sel), t.dim }
+    else if (v.viewing != null and v.tree_moved)
+        // Only when idle, so a notice still answers the key that was pressed.
+        // The badge carries the same fact where nothing can hide it.
+        //
+        // This rather than a count of turns: a turn is only taken after ten
+        // seconds of silence, so counting them meant a reader who edited a
+        // file saw nothing at all for ten seconds - which reads as the tool
+        // having stopped rather than as it holding their place.
+        .{ if (v.newer_turns > 0)
+            try std.fmt.allocPrint(f.arena, "the working tree has moved on - {d} newer turn{s}", .{
+                v.newer_turns, if (v.newer_turns == 1) "" else "s",
+            })
+        else
+            "the working tree has changed - ]t returns to it", t.notice }
+    else if (try riskLine(f.arena, v.risk)) |line|
+        // Above the mark's count and the row count, below anything the reader
+        // just did. A weakened test is the finding with the worst consequences
+        // and the one a reader is least likely to spot on their own - but it
+        // persists for as long as the change does, so a slot it could never be
+        // moved out of would hide every notice for the rest of the session.
+        .{ line, t.notice }
     else if (v.viewing != null and v.newer_turns > 0)
-        // Only when idle. The badge already says which turn; this says the
-        // present is still moving, which is what a reader parked in the past
-        // needs to know and does not need shouted.
         .{ try std.fmt.allocPrint(f.arena, "{d} newer turn{s} since", .{
             v.newer_turns, if (v.newer_turns == 1) "" else "s",
         }), t.dim }
@@ -335,6 +358,36 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     const room = f.width() -| col -| 1;
     const fitted = fitHints(f, v.hints, room);
     if (fitted.len > 0) f.putRight(row, fitted, t.hint);
+}
+
+/// What the review did to its tests, or null when it did nothing to them.
+///
+/// Only the two certain signals lead. `fewer_asserts` is real but a refactor
+/// that merges two checks looks the same, so it follows behind rather than
+/// making the claim - a warning that is wrong twice is one nobody reads again.
+fn riskLine(arena: Allocator, r: testrisk.Risk) Allocator.Error!?[]const u8 {
+    if (!r.any()) return null;
+
+    var out: std.ArrayList(u8) = .empty;
+    var buf: [64]u8 = undefined;
+    if (r.removed > 0) {
+        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} test{s} removed", .{
+            r.removed, if (r.removed == 1) "" else "s",
+        }) catch "");
+    }
+    if (r.skipped > 0) {
+        if (out.items.len > 0) try out.appendSlice(arena, ", ");
+        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} skip{s} added", .{
+            r.skipped, if (r.skipped == 1) "" else "s",
+        }) catch "");
+    }
+    if (r.fewer_asserts > 0) {
+        if (out.items.len > 0) try out.appendSlice(arena, ", ");
+        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} fewer assertion{s}", .{
+            r.fewer_asserts, if (r.fewer_asserts == 1) "" else "s",
+        }) catch "");
+    }
+    return out.items;
 }
 
 /// What the mode row says a selection is. Lines for a linewise one and for a

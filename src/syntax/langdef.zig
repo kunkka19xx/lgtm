@@ -89,6 +89,34 @@ pub const LangDef = struct {
     /// function, so it is typed `.type_name` and opens no span.
     angle_tags: bool = false,
 
+    // -- what a test looks like ---------------------------------------------
+    //
+    // Vocabulary rather than grammar, and it lives here because this is where a
+    // language is already described. `core/testrisk.zig` reads it to answer
+    // "did the agent quietly weaken a test", which is a question about lines
+    // that appeared and disappeared rather than about structure - so a list of
+    // words is the whole of what it needs.
+    //
+    // Matched as a substring of a diff line, not as a token. A removed line is
+    // not parseable on its own: it is one line out of a file that no longer
+    // exists in that form, and half of them will not lex. Substrings are what
+    // survives that, and the cost is on the side of missing a case rather than
+    // inventing one.
+
+    /// How a test is declared. `test "` in Zig, `func Test` in Go. A removed
+    /// line containing one of these is a test that is gone.
+    ///
+    /// Not path-based, deliberately: Zig puts tests in the source file, so this
+    /// codebase keeps 531 of them in 74 files that are not test files. A rule
+    /// that only looked in `tests/` would miss every one.
+    test_decl: []const []const u8 = &.{},
+    /// How a test asserts. Counted on both sides of a diff: fewer after than
+    /// before is a test that checks less than it did.
+    assert_names: []const []const u8 = &.{},
+    /// How a test is switched off without being deleted. The highest-signal of
+    /// the three - an added skip is almost never anything else.
+    skip_names: []const []const u8 = &.{},
+
     /// Filled in by `define`. Written by hand nowhere.
     words: std.StaticStringMap(Kind) = .{},
     fn_words: std.StaticStringMap(void) = .{},
