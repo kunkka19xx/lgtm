@@ -398,6 +398,52 @@ fn collectPaths(
     }
 }
 
+/// The directories that contain tracked files, deduplicated, git's own order.
+///
+/// The set `io/notify.zig` watches, and the reason a native watcher is cheap
+/// here rather than a trap. Watching the repository root would mean an event
+/// per file of a multi-gigabyte build directory every time anything is built,
+/// and filtering those out means matching `.gitignore` - which is git's job
+/// and famously not a small one. Asking which directories hold *tracked* files
+/// excludes build output by construction, because build output is not tracked.
+///
+/// Ancestors are included even where they hold no tracked file of their own, so
+/// a directory the agent creates is seen: the parent fires when a subdirectory
+/// appears under it, and the caller adds the new one.
+pub fn trackedDirs(gpa: Allocator, io: std.Io) Error![][]const u8 {
+    const out = try proc.run(gpa, io, &.{ "git", "ls-files" }, max_diff_bytes);
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+
+    var seen: std.StringArrayHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(gpa);
+    errdefer for (seen.keys()) |k| gpa.free(k);
+
+    // The repository root, which holds tracked files in every project and is
+    // where a new top-level directory appears.
+    try seen.put(gpa, try gpa.dupe(u8, "."), {});
+
+    var it = std.mem.splitScalar(u8, out.stdout, '\n');
+    while (it.next()) |line| {
+        const p = std.mem.trim(u8, line, " \t\r");
+        if (p.len == 0) continue;
+        var dir = std.fs.path.dirname(p);
+        while (dir) |d| : (dir = std.fs.path.dirname(d)) {
+            if (d.len == 0) break;
+            if (seen.contains(d)) break;
+            const owned = try gpa.dupe(u8, d);
+            errdefer gpa.free(owned);
+            try seen.put(gpa, owned, {});
+        }
+    }
+
+    const dirs = try gpa.alloc([]const u8, seen.count());
+    for (seen.keys(), 0..) |k, i| dirs[i] = k;
+    // Ownership of the key strings moves to the caller.
+    seen.clearRetainingCapacity();
+    return dirs;
+}
+
 /// A ceiling on the mention list. At this many paths one filter pass is a few
 /// milliseconds against an 8 ms frame budget; past it the box stutters as you
 /// type, which is worse than an incomplete list you can still filter.

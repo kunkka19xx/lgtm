@@ -399,7 +399,18 @@ pub const FilesView = struct {
     /// The popup's own keys, along its bottom border.
     keys: []const keytext.HelpEntry = &.{},
     layout: ?*HelpLayout = null,
+    /// The whole change, drawn at the right end of the top border. The rows
+    /// each say what one file cost; a reader deciding whether to start here
+    /// wants what all of them cost, and that number is nowhere else on screen
+    /// while the overlay is covering the status row.
+    ///
+    /// Null on the lists where it would be a lie: every file in the project,
+    /// where most rows changed nothing, and the comments.
+    totals: ?Totals = null,
 };
+
+/// Added and removed lines across every row that is part of the review.
+pub const Totals = struct { added: u32, removed: u32 };
 
 /// The compose box: the message being written, and the preset list when it is
 /// open over it. Its own view for the same reason `HelpView` is - it floats

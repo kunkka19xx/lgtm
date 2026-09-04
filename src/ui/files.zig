@@ -43,6 +43,10 @@ pub const Files = struct {
     title: []const u8 = " files ",
     /// Keys this list adds to the shared footer.
     extra_keys: []const keytext.HelpEntry = &.{},
+    /// The whole change, for the top border. Set by the caller that knows
+    /// which list this is: a project browse or a comment list has no total
+    /// worth drawing, and `null` is how they say so.
+    totals: ?frame.Totals = null,
 
     /// Opens on the file the review is already showing, so the list answers
     /// "where am I" before it answers "where else could I be".
@@ -131,6 +135,7 @@ pub const Files = struct {
         if (mode != .finder) return null;
         const filter = self.filter.text();
         return .{
+            .totals = self.totals,
             .entries = try entries(files, current, filter, arena),
             .title = self.title,
             .extra_keys = self.extra_keys,

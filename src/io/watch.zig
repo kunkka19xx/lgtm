@@ -1,7 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Change detection. Polling only in v0.1; native filesystem events are v0.2
-// behind the same interface.
+// Change detection. A poller, and a doorbell in front of it.
+//
+// The poller is the answer: `git status --porcelain` is the only thing that
+// knows about `.gitignore`, about a file saved with no edit in it, and about
+// content that matches HEAD anyway. It is 9 ms on a repository of this size
+// and it has to run for every real change regardless.
+//
+// The doorbell (`io/notify.zig`) only decides *when* to ask. Without it the
+// poller runs twice a second forever and a write is noticed up to a poll
+// interval late; with it the thread sleeps on a kqueue or an inotify
+// descriptor and asks when the OS says a watched directory moved. Detection
+// latency was half of the whole path from an agent's write to a drawn frame,
+// and it is the only part of that path that was doing no work.
+//
+// The poll interval survives as the timeout on that wait, so a missed or
+// unsupported event costs latency and never correctness. Everything below the
+// wait - the scan, the signature, the debounce, the quiet period - is the same
+// code whichever woke it.
 //
 // Debounce lives here, not in the main loop: the main loop must never see a
 // burst. Agents write several files in quick succession and
@@ -11,6 +27,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fs = @import("fs.zig");
+const notify = @import("notify.zig");
 const proc = @import("proc.zig");
 const event = @import("../core/event.zig");
 
@@ -42,6 +59,9 @@ pub const Options = struct {
     /// for it. Nothing polls harder to provide it: it is read off the clock
     /// `tick` already consults.
     quiet_ms: i64 = 0,
+    /// Directories to hand the doorbell: the ones containing tracked files.
+    /// Empty polls, which is what a caller with no git to ask should do.
+    watch_dirs: []const []const u8 = &.{},
 };
 
 /// What a file looked like at one poll.
@@ -115,6 +135,17 @@ pub const Poller = struct {
         if (now_ms - self.last_change_ms < self.opts.quiet_ms) return false;
         self.quiet_armed = false;
         return true;
+    }
+
+    /// Whether a change has been seen and is still waiting out the debounce.
+    ///
+    /// The thread asks so it can come back in a debounce rather than in a poll
+    /// interval. Without it the doorbell made things *worse*: the bell rings,
+    /// the first tick is inside the debounce window and emits nothing, and the
+    /// edge that woke us has already been consumed - so the next look was a
+    /// full interval away and a 200 ms debounce cost 500 ms.
+    pub fn settling(self: *const Poller) bool {
+        return self.dirty;
     }
 
     /// One poll. Returns the coalesced path list when the tree has settled,
@@ -272,9 +303,23 @@ pub const Watcher = struct {
     queue: *event.Queue,
     thread: ?std.Thread = null,
     stop_flag: std.atomic.Value(bool) = .init(false),
+    /// The doorbell, when this OS has one and the directories opened. Null
+    /// means every wait below is a plain sleep, which is what this did before
+    /// there was a doorbell at all.
+    bell: ?notify.Notify = null,
 
     pub fn init(gpa: Allocator, io: std.Io, queue: *event.Queue, opts: Options) Watcher {
-        return .{ .poller = Poller.init(gpa, io, opts), .queue = queue };
+        return .{
+            .poller = Poller.init(gpa, io, opts),
+            .queue = queue,
+            .bell = notify.open(gpa, opts.watch_dirs),
+        };
+    }
+
+    /// Whether the OS is telling us, rather than us asking. For a caller that
+    /// wants to say so, and for a test that wants to know which path it took.
+    pub fn native(self: *const Watcher) bool {
+        return self.bell != null;
     }
 
     pub fn start(self: *Watcher) !void {
@@ -292,28 +337,58 @@ pub const Watcher = struct {
 
     pub fn deinit(self: *Watcher) void {
         self.stop();
+        if (self.bell) |*b| b.deinit();
         self.poller.deinit();
         self.* = undefined;
     }
 
-    fn loop(self: *Watcher) void {
+    /// Sleeps, or waits on the doorbell, for up to `want` milliseconds. Returns
+    /// how long it actually waited, so the caller's clock stays honest when the
+    /// bell cuts the wait short - the debounce and the quiet period are both
+    /// measured on that clock.
+    ///
+    /// Either way it is broken into slices, so `stop` is noticed without
+    /// waiting the interval out: one long sleep made quitting take up to a poll
+    /// interval *plus* a whole `git status`, which reads as a hang on the way
+    /// out.
+    fn waitForChange(self: *Watcher, want: i64) ?i64 {
         const io = self.poller.io;
+        var waited: i64 = 0;
+        while (waited < want) {
+            const slice = @min(@as(i64, stop_check_ms), want - waited);
+            if (self.bell) |*b| {
+                const rang = b.wait(slice);
+                waited += slice;
+                if (self.stop_flag.load(.acquire)) return null;
+                // Answered at once rather than sleeping out the rest: being
+                // told is the whole point, and the debounce below still has to
+                // agree the write has landed before anything is drawn.
+                if (rang) return waited;
+            } else {
+                std.Io.sleep(io, .fromMilliseconds(slice), .awake) catch return null;
+                waited += slice;
+                if (self.stop_flag.load(.acquire)) return null;
+            }
+        }
+        return waited;
+    }
+
+    fn loop(self: *Watcher) void {
         const poll = self.poller.opts.poll_ms;
         var elapsed: i64 = 0;
         while (!self.stop_flag.load(.acquire)) {
-            // Slept in slices rather than one interval, so `stop` is noticed
-            // without waiting the interval out. One 500 ms sleep made quitting
-            // take up to that long *plus* a whole `git status` - the flag was
-            // read only at the top - which reads as a hang on the way out.
-            var slept: i64 = 0;
-            while (slept < poll) {
-                const slice = @min(@as(i64, stop_check_ms), poll - slept);
-                std.Io.sleep(io, .fromMilliseconds(slice), .awake) catch return;
-                if (self.stop_flag.load(.acquire)) return;
-                slept += slice;
-            }
-
-            elapsed += poll;
+            // Advanced by what was actually waited, not by the interval that
+            // was asked for. The doorbell cuts a wait short, and a clock that
+            // counted the full interval anyway would run ahead of the wall -
+            // which is the clock the debounce and the ten-second quiet period
+            // are both measured against.
+            // A settling change is come back for in a debounce, not in a poll
+            // interval: the edge that woke us is spent, so waiting the long
+            // interval out would charge every change the interval instead of
+            // the debounce it is actually owed.
+            const want = if (self.poller.settling()) self.poller.opts.debounce_ms else poll;
+            const waited = self.waitForChange(want) orelse return;
+            elapsed += waited;
             if (self.poller.tick(elapsed) catch null) |paths| {
                 self.queue.push(.{ .files_changed = paths }) catch {
                     event.Queue.freePayload(self.poller.gpa, .{ .files_changed = paths });
@@ -337,6 +412,47 @@ pub const Watcher = struct {
 };
 
 const testing = std.testing;
+
+test "the doorbell shortens the wait but never replaces the poll" {
+    // The contract the whole design rests on: an event decides *when* to ask,
+    // and `git status` is still what answers. A watcher with no directories to
+    // watch has no doorbell and must behave exactly as it did before there was
+    // one - which is what makes an unsupported OS, a network mount and a blown
+    // `inotify.max_user_watches` all degrade to latency rather than to
+    // silence.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
+    defer threaded.deinit();
+    var q = event.Queue.init(testing.allocator, threaded.io());
+    defer q.deinit();
+
+    var deaf = Watcher.init(testing.allocator, threaded.io(), &q, .{});
+    defer deaf.deinit();
+    try testing.expect(!deaf.native());
+
+    var heard = Watcher.init(testing.allocator, threaded.io(), &q, .{ .watch_dirs = &.{"."} });
+    defer heard.deinit();
+    // Only where the OS has a backend; everywhere else the poller is the whole
+    // story and that is a supported state, not a skipped test.
+    if (notify.supported) try testing.expect(heard.native());
+}
+
+test "a settling change is come back for in a debounce, not a poll interval" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
+    defer threaded.deinit();
+
+    var p = Poller.init(testing.allocator, threaded.io(), .{ .debounce_ms = 200 });
+    defer p.deinit();
+
+    // Nothing seen yet: the thread has a whole interval to wait.
+    try testing.expect(!p.settling());
+
+    // A change seen and not yet emitted. The edge that woke the thread is
+    // spent, so a doorbell cannot ring again for it - and waiting the full
+    // interval out would charge every change a poll interval instead of the
+    // debounce it is owed, which would make the doorbell *worse* than polling.
+    p.dirty = true;
+    try testing.expect(p.settling());
+}
 
 test "status lines yield the path" {
     try testing.expectEqualStrings("src/a.zig", statusPath(" M src/a.zig"));

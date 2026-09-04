@@ -572,6 +572,22 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     const sel = @min(v.index, entries.len -| 1);
     const blank = try chromeOf(f, box, title, foot, m.title, m.footer);
 
+    // The whole change, let into the right end of the top border - the same
+    // place and the same two colours the status row uses, so it reads as the
+    // number it is rather than as a second thing to learn. Drawn after the
+    // border, over the rule it would otherwise sit on, and only when there is
+    // room for it beside the title.
+    if (v.totals) |t| {
+        const plus = try std.fmt.allocPrint(f.arena, "+{d} ", .{t.added});
+        const minus = try std.fmt.allocPrint(f.arena, "{s}{d} ", .{ f.glyphs.del, t.removed });
+        const w = f.win.gwidth(plus) + f.win.gwidth(minus);
+        const right = box.col + box.content + 2;
+        if (right > box.col + m.title + 4 + w) {
+            f.put(box.top, right -| w, plus, f.theme.added_count);
+            f.put(box.top, right -| f.win.gwidth(minus), minus, f.theme.removed_count);
+        }
+    }
+
     f.put(box.top + 1, text_col, query, f.theme.prompt);
 
     const list_top = box.top + 2;

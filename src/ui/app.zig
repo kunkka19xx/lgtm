@@ -44,6 +44,7 @@ const snapshot = @import("../snapshot/snapshot.zig");
 const timeline = @import("../snapshot/timeline.zig");
 const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
+const viewport = @import("viewport.zig");
 const search = @import("search.zig");
 const fuzzy = @import("fuzzy.zig");
 const complete = @import("complete.zig");
@@ -119,13 +120,15 @@ pub const App = struct {
     prev_hunks: []hunk.Hunk = &.{},
 
     file_index: u32 = 0,
-    cursor: u32 = 0,
-    scroll: u32 = 0,
     quit: bool = false,
 
-    /// Byte offset of the cursor within its line's text, always on a grapheme
-    /// boundary. Zero on a row that is chrome, which has no text to be in.
-    col: u32 = 0,
+    /// Where the reader is and where the screen has got to catching up: the
+    /// cursor and its column, the scroll offset, the pane width, and the two
+    /// animations. Grouped because they are the one set of fields in this
+    /// struct that answer to each other and to nothing else, and because
+    /// `ui/viewport.zig` can then do the arithmetic over them against a table
+    /// of row heights rather than against a diff.
+    vp: viewport.Viewport = .{},
     /// The column the reader last asked for, kept across `j` and `k` the way
     /// vim keeps `curswant`: stepping down through a short line and back onto
     /// a long one returns to where the eye was, not to the short line's end.
@@ -302,16 +305,6 @@ pub const App = struct {
     presets_cfg: []const config.Preset = &.{},
     finder: search.State = .{},
     notice: Notice = .{},
-    /// The viewport catching up with where it has settled, in screen rows.
-    /// Zero except while a jump is in flight; see `ui/anim.zig`.
-    scroll_anim: anim.Scroll = .{},
-    /// The cursor block travelling to where it belongs. Every motion moves it,
-    /// which is the difference between this and `scroll_anim`: the viewport
-    /// only animates for a jump, because it moves under a step as a side
-    /// effect, but the cursor is what the reader is actually following.
-    cursor_anim: anim.Cursor = .{},
-    /// `Tab`: chrome hidden, the body gets the whole pane.
-    zen: bool = false,
     /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
     /// the pane continues on the next screen row; off, it is cut at the edge.
     wrap: bool = true,
@@ -336,15 +329,6 @@ pub const App = struct {
     /// `auto` resolves to, and the rows are a different list when it does -
     /// so this is what says whether they still match.
     split: bool = false,
-    /// The pane width, from the last resize the loop reported. Scrolling has
-    /// to count screen rows, and a wrapped row is more than one of them, so
-    /// the state that decides where the cursor goes needs to know how wide
-    /// the pane it is going onto is. Never read for anything else.
-    cols: u16 = 80,
-    /// How the screen counts a grapheme's columns; see `ui/wrap.zig`. Set by
-    /// the loop from the terminal's answer, because vaxis only knows it after
-    /// the capability query comes back.
-    width_method: wrap_mod.Method = .unicode,
     /// Set by `e`. The run loop owns the terminal, so it - not `run(cmd)` -
     /// is what can hand it to a child process.
     want_editor: bool = false,
@@ -446,8 +430,8 @@ pub const App = struct {
             .lines = lines,
         };
         try self.rebuildRows(.reset);
-        self.cursor = 0;
-        self.scroll = 0;
+        self.vp.cursor = 0;
+        self.vp.scroll = 0;
         self.notice.set("{s} - not in the review, {d} lines", .{ path, count });
     }
 
@@ -537,8 +521,8 @@ pub const App = struct {
         const f = self.current() orelse {
             self.rows = rows_mod.Rows.empty;
             self.fn_names = &.{};
-            self.cursor = 0;
-            self.scroll = 0;
+            self.vp.cursor = 0;
+            self.vp.scroll = 0;
             return;
         };
 
@@ -569,7 +553,7 @@ pub const App = struct {
         if (keep == .line) {
             if (try self.review.reanchorLine(f.path())) |ln| {
                 if (self.rowForFileLine(f, ln)) |r| {
-                    self.cursor = r;
+                    self.vp.cursor = r;
                     placed = true;
                 }
             }
@@ -577,19 +561,19 @@ pub const App = struct {
 
         if (!placed) switch (keep) {
             .reset => {
-                self.cursor = self.rows.firstLineRow();
-                self.scroll = 0;
+                self.vp.cursor = self.rows.firstLineRow();
+                self.vp.scroll = 0;
             },
             // A line that could not be placed keeps the row it had, which is
             // the old behaviour and still the least surprising answer.
             .row, .line => {
-                self.cursor = @min(self.cursor, self.rows.len() -| 1);
+                self.vp.cursor = @min(self.vp.cursor, self.rows.len() -| 1);
                 // Never leave the cursor on chrome. `moveTo` cannot put it
                 // there, but keeping a row index across a rebuild can - and
                 // the very first diff is the worst case, where there is no
                 // previous position at all and row 0 is the hunk header.
-                if (self.cursor < self.rows.firstLineRow()) {
-                    self.cursor = self.rows.firstLineRow();
+                if (self.vp.cursor < self.rows.firstLineRow()) {
+                    self.vp.cursor = self.rows.firstLineRow();
                 }
             },
         };
@@ -645,7 +629,7 @@ pub const App = struct {
     /// file, so neither has anything to carry into the next generation.
     fn cursorLine(self: *App) u32 {
         const f = self.current() orelse return 0;
-        const li = self.lineAt(self.cursor) orelse return 0;
+        const li = self.lineAt(self.vp.cursor) orelse return 0;
         if (li >= f.lines.new_no.len) return 0;
         return f.lines.new_no[li];
     }
@@ -670,12 +654,12 @@ pub const App = struct {
             .rows = self.rows,
             .file_index = self.file_index,
             .file_count = @intCast(self.files().len),
-            .cursor = self.cursor,
+            .cursor = self.vp.cursor,
             .cursor_drawn = self.drawnCursor(body),
-            .cursor_cell = if (self.cursorCell(body)) |t| self.cursor_anim.cell(t) else null,
+            .cursor_cell = if (self.cursorCell(body)) |t| self.vp.cursor_anim.cell(t) else null,
             .scroll = drawn.row,
             .skip = drawn.skip,
-            .col = self.col,
+            .col = self.vp.col,
             .fn_names = self.fn_names,
             .total_hunks = self.review.totalHunks(),
             .hunk_ordinal = self.hunkOrdinal(),
@@ -698,7 +682,7 @@ pub const App = struct {
             .mark_turn = self.review.mark_at.turn,
             .preview = self.preview != null,
             .mode = self.mode,
-            .zen = self.zen,
+            .zen = self.vp.zen,
             .wrap = self.wrap,
             .split = self.split,
             .side = self.side,
@@ -794,14 +778,14 @@ pub const App = struct {
 
     /// 1-based position of the cursor's hunk across the whole review.
     fn hunkOrdinal(self: *App) u32 {
-        const local = self.rows.hunkAt(self.cursor) orelse return 0;
+        const local = self.rows.hunkAt(self.vp.cursor) orelse return 0;
         return self.review.hunksBefore(self.file_index) + local + 1;
     }
 
     // -- commands ------------------------------------------------------------
 
     pub fn run(self: *App, cmd: keymap.Command, body: u16) !void {
-        const was_at = self.scroll;
+        const was_at = self.vp.scroll;
         const was_in = self.file_index;
         // Anything that is not itself a jump arrives at once: an animation the
         // reader has already moved past is latency, not motion. Another jump
@@ -810,8 +794,8 @@ pub const App = struct {
         if (!cmd.jumps()) self.settleScroll();
         switch (cmd) {
             .quit => self.quit = true,
-            .line_down => self.moveTo(self.cursor +| 1),
-            .line_up => self.moveTo(self.cursor -| 1),
+            .line_down => self.moveTo(self.vp.cursor +| 1),
+            .line_up => self.moveTo(self.vp.cursor -| 1),
             .page_down => self.page(1, body),
             .page_up => self.page(-1, body),
             // The first *line*, which is what the key says: row 0 is the hunk
@@ -822,8 +806,8 @@ pub const App = struct {
             // Within the line. Each sets both columns: this is the reader
             // saying where they want to be, which is what `j` and `k` then
             // try to honour on the next line.
-            .char_left => if (motion.charLeft(self.cursorText(), self.col)) |at| self.setCol(at),
-            .char_right => if (motion.charRight(self.cursorText(), self.col)) |at| self.setCol(at),
+            .char_left => if (motion.charLeft(self.cursorText(), self.vp.col)) |at| self.setCol(at),
+            .char_right => if (motion.charRight(self.cursorText(), self.vp.col)) |at| self.setCol(at),
             .word_next => self.stepWord(true, .word),
             .word_prev => self.stepWord(false, .word),
             .word_end => self.stepWordEnd(.word),
@@ -836,7 +820,7 @@ pub const App = struct {
             // The maximum rather than the offset, so the end stays sticky
             // down a column of ragged lines - vim's `$`, not "column 47".
             .line_end => {
-                self.col = motion.lineEnd(self.cursorText());
+                self.vp.col = motion.lineEnd(self.cursorText());
                 self.want_col = std.math.maxInt(u32);
             },
             .first_non_blank => self.setCol(motion.firstNonBlank(self.cursorText())),
@@ -895,6 +879,7 @@ pub const App = struct {
                 self.files_purpose = .comments;
                 self.buildPickList();
                 self.file_list.title = " comments ";
+                self.file_list.totals = null;
                 // This list's own keys, and not the shared footer's: they do
                 // nothing in the file or turn lists, and a footer naming a key
                 // that does nothing is worse than a shorter one. Still read
@@ -1035,7 +1020,7 @@ pub const App = struct {
             // across a screen that no longer exists draws a path through
             // nothing (`ui/anim.zig`).
             .toggle_zen => {
-                self.zen = !self.zen;
+                self.vp.zen = !self.vp.zen;
                 self.placeCursor();
             },
             // Writes an explicit layout rather than flipping a bool: `auto`
@@ -1050,7 +1035,7 @@ pub const App = struct {
                 const on = self.layout == .split;
                 const why: []const u8 = if (!on or self.split)
                     ""
-                else if (self.cols < rows_mod.min_split_width)
+                else if (self.vp.cols < rows_mod.min_split_width)
                     " - this pane is too narrow for it"
                 else
                     " - this file has nothing to put beside it";
@@ -1076,6 +1061,7 @@ pub const App = struct {
                 self.files_purpose = .browse;
                 self.buildPickList();
                 self.file_list.title = " every file ";
+                self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
                 self.mode = .finder;
@@ -1117,14 +1103,14 @@ pub const App = struct {
         }
         self.mode = .visual;
         self.visual_kind = kind;
-        self.anchor = self.cursor;
-        self.anchor_col = self.col;
+        self.anchor = self.vp.cursor;
+        self.anchor_col = self.vp.col;
     }
 
     fn leaveVisual(self: *App) void {
         self.mode = .normal;
-        self.anchor = self.cursor;
-        self.anchor_col = self.col;
+        self.anchor = self.vp.cursor;
+        self.anchor_col = self.vp.col;
     }
 
     /// The selected row range, low to high inclusive, or null outside visual
@@ -1133,17 +1119,17 @@ pub const App = struct {
     /// otherwise have to remember that.
     pub fn selection(self: *App) ?render.Selection {
         if (self.mode != .visual) return null;
-        const lo = @min(self.anchor, self.cursor);
-        const hi = @max(self.anchor, self.cursor);
+        const lo = @min(self.anchor, self.vp.cursor);
+        const hi = @max(self.anchor, self.vp.cursor);
         if (self.visual_kind == .line) return .{ .lo = lo, .hi = hi };
 
         // Charwise. Which end holds which column depends on which way the
         // selection was made, and on the same row it is the columns rather
         // than the rows that say.
-        const backwards = self.cursor < self.anchor or
-            (self.cursor == self.anchor and self.col < self.anchor_col);
-        const lo_col = if (backwards) self.col else self.anchor_col;
-        const hi_col = if (backwards) self.anchor_col else self.col;
+        const backwards = self.vp.cursor < self.anchor or
+            (self.vp.cursor == self.anchor and self.vp.col < self.anchor_col);
+        const lo_col = if (backwards) self.vp.col else self.anchor_col;
+        const hi_col = if (backwards) self.anchor_col else self.vp.col;
 
         // Vim's charwise selection includes the character under the cursor;
         // the renderer wants a half-open range, so the conversion happens
@@ -1199,10 +1185,19 @@ pub const App = struct {
     /// you are looking at is the one you are most likely to name.
     fn buildPickList(self: *App) void {
         self.pick_list.clearRetainingCapacity();
+        _ = self.pick_arena.reset(.retain_capacity);
+        const arena = self.pick_arena.allocator();
         const changed = self.review.files();
         for (changed) |f| {
+            // Copied, not borrowed. `f.path()` lives in the review's arena,
+            // which every re-diff resets - and the list outlives a re-diff,
+            // because the agent goes on writing while it is open. Borrowing
+            // showed as a row whose path was a fragment of whatever the arena
+            // had been reused for, which is the same failure the comment
+            // labels below were already copied to avoid.
+            const path = arena.dupe(u8, f.path()) catch return;
             self.pick_list.append(self.gpa, .{
-                .path = f.path(),
+                .path = path,
                 .added = f.added,
                 .removed = f.removed,
                 .status = f.status,
@@ -1214,8 +1209,6 @@ pub const App = struct {
             // the line and the text, which means the filter reaches all three:
             // typing part of a remark finds it.
             self.pick_list.clearRetainingCapacity();
-            _ = self.pick_arena.reset(.retain_capacity);
-            const arena = self.pick_arena.allocator();
             for (self.comments.items()) |n| {
                 var one: [256]u8 = undefined;
                 const body = compose_mod.flatten(&one, n.body);
@@ -1251,8 +1244,25 @@ pub const App = struct {
             if (seen) continue;
             // No counts: it is a path, not a change, and `+0 -0` beside it
             // would dress up a file that did not change as one that did.
+            // Borrowed on purpose: `project_paths` is session-lived and never
+            // moves, and copying fifty thousand of them into the arena would
+            // cost more than the bug it would be preventing.
             self.pick_list.append(self.gpa, .{ .path = p, .added = 0, .removed = 0, .in_review = false }) catch return;
         }
+    }
+
+    /// Added and removed across every file of the review.
+    ///
+    /// Summed here rather than kept on `Review`, because it is asked for once
+    /// when an overlay opens and never in a frame: a field would be a number
+    /// to keep in step with every re-diff for a caller that appears twice.
+    fn reviewTotals(self: *App) render.Totals {
+        var out: render.Totals = .{ .added = 0, .removed = 0 };
+        for (self.review.files()) |*f| {
+            out.added +|= f.added;
+            out.removed +|= f.removed;
+        }
+        return out;
     }
 
     /// Best effort, once. A repository that cannot be listed leaves the
@@ -1271,6 +1281,7 @@ pub const App = struct {
             self.files_purpose = .jump;
             self.buildPickList();
             self.file_list.title = " changed files ";
+            self.file_list.totals = self.reviewTotals();
             self.file_list.extra_keys = &.{};
             self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
             self.mode = .finder;
@@ -1605,7 +1616,7 @@ pub const App = struct {
     /// The word is copied into the finder's fixed buffer, so it does not
     /// outlive the diff arena it was read from.
     fn searchWord(self: *App, dir: search.Direction) !void {
-        const word = motion.wordAt(self.cursorText(), self.col) orelse {
+        const word = motion.wordAt(self.cursorText(), self.vp.col) orelse {
             // The same courtesy `f` gets: a key that moved nothing says why.
             self.notice.set("no word under the cursor", .{});
             return;
@@ -1635,7 +1646,7 @@ pub const App = struct {
 
         const start_file = self.file_index;
         var fi: u32 = start_file;
-        var from: ?u32 = self.lineAt(self.cursor);
+        var from: ?u32 = self.lineAt(self.vp.cursor);
         var wrapped = false;
 
         var step: usize = 0;
@@ -1682,11 +1693,11 @@ pub const App = struct {
 
         try fx.app.handle(.{ .resize = .{ .cols = 140, .rows = 40 } }, 36);
         try testing.expect(fx.app.split);
-        try testing.expect(fx.app.rows.pairAt(fx.app.cursor) != null);
+        try testing.expect(fx.app.rows.pairAt(fx.app.vp.cursor) != null);
 
         try fx.app.handle(.{ .resize = .{ .cols = 80, .rows = 40 } }, 36);
         try testing.expect(!fx.app.split);
-        try testing.expect(fx.app.rows.pairAt(fx.app.cursor) == null);
+        try testing.expect(fx.app.rows.pairAt(fx.app.vp.cursor) == null);
     }
 
     test "a re-layout keeps the reader on the line they were reading" {
@@ -1695,14 +1706,14 @@ pub const App = struct {
 
         // The last line of the file rather than the first, so a row index carried
         // across unchanged would be a different line if the models disagreed.
-        fx.app.cursor = 3;
+        fx.app.vp.cursor = 3;
         const line = fx.app.rows.lineAt(3).?;
 
         try fx.app.handle(.{ .resize = .{ .cols = 140, .rows = 40 } }, 36);
-        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.cursor).?);
+        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.vp.cursor).?);
 
         try fx.app.handle(.{ .resize = .{ .cols = 80, .rows = 40 } }, 36);
-        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.cursor).?);
+        try testing.expectEqual(line, fx.app.rows.lineAt(fx.app.vp.cursor).?);
     }
 
     /// The fixture's file is all context, which pairs each line against itself
@@ -1718,7 +1729,7 @@ pub const App = struct {
         l.new_no[1] = 0;
         l.new_no[2] = 2;
 
-        fx.app.cols = 120;
+        fx.app.vp.cols = 120;
         fx.app.layout = .split;
         fx.app.relayout(20);
         try testing.expect(fx.app.split);
@@ -1735,7 +1746,7 @@ pub const App = struct {
         try testing.expectEqual(@as(u32, 1), p.left.?);
         try testing.expectEqual(@as(u32, 2), p.right.?);
 
-        fx.app.cursor = 2;
+        fx.app.vp.cursor = 2;
         // The new file to begin with: it is the code that is there now, and it is
         // what a reference and a comment are almost always about.
         try testing.expectEqual(@as(u32, 2), fx.app.lineAt(2).?);
@@ -1745,7 +1756,7 @@ pub const App = struct {
         try testing.expectEqual(@as(u32, 2), fx.app.lineAt(2).?);
 
         // A context row is the same line on both sides, so neither key moves it.
-        fx.app.cursor = 1;
+        fx.app.vp.cursor = 1;
         try fx.press("H");
         try testing.expectEqual(@as(u32, 0), fx.app.lineAt(1).?);
     }
@@ -1756,7 +1767,7 @@ pub const App = struct {
         try splitReplacement(fx);
 
         const lines = fx.app.current().?.lines;
-        fx.app.cursor = 2;
+        fx.app.vp.cursor = 2;
 
         try fx.press("Y");
         try testing.expectEqualStrings(lines.text[2], fx.app.outgoing.items);
@@ -1776,7 +1787,7 @@ pub const App = struct {
         // row is blank. `L` cannot stand there, and must not blank the cursor.
         var del = try Fixture.withDeletion(testing.allocator, 1);
         defer del.deinit();
-        del.app.cols = 120;
+        del.app.vp.cols = 120;
         del.app.layout = .split;
         del.app.relayout(20);
 
@@ -1784,7 +1795,7 @@ pub const App = struct {
         try testing.expectEqual(@as(u32, 1), p.left.?);
         try testing.expect(p.right == null);
 
-        del.app.cursor = 2;
+        del.app.vp.cursor = 2;
         try testing.expectEqual(@as(u32, 1), del.app.lineAt(2).?);
         try del.press("L");
         try testing.expectEqual(@as(u32, 1), del.app.lineAt(2).?);
@@ -1826,13 +1837,13 @@ pub const App = struct {
         // A line far wider than a column of a sixty-four-column pane, which is
         // over the floor and so actually splits.
         fx.files[0].lines.text[1] = "    const value = compute(alpha, beta, gamma, delta, epsilon);";
-        fx.app.cols = 64;
+        fx.app.vp.cols = 64;
         fx.app.layout = .split;
         fx.app.relayout(8);
         try testing.expect(fx.app.split);
         try testing.expect(fx.app.wrap);
 
-        const sp = rows_mod.Split.of(fx.app.cols);
+        const sp = rows_mod.Split.of(fx.app.vp.cols);
         const col = rows_mod.gutter(fx.app.current().?, .split);
         const lines = fx.app.current().?.lines;
 
@@ -1845,7 +1856,7 @@ pub const App = struct {
                 sp.left -| col,
                 if (p.right) |li| lines.text[li] else null,
                 sp.right_width -| col,
-                fx.app.width_method,
+                fx.app.vp.width_method,
                 8,
             );
             // Both columns are given the same rows, so neither slides past the
@@ -1903,7 +1914,7 @@ pub const App = struct {
         const f = self.current() orelse return null;
         const path = f.path();
 
-        const hunk_index = self.rows.hunkAt(self.cursor);
+        const hunk_index = self.rows.hunkAt(self.vp.cursor);
         const id = if (hunk_index) |h|
             (if (h < f.hunks.len) f.hunks[h].id else hunk.no_id)
         else
@@ -1913,8 +1924,8 @@ pub const App = struct {
         // the range is the cursor row alone. Rows that are chrome, and lines
         // that exist only in HEAD, contribute nothing either way.
         const sel = self.selection();
-        const lo_row = if (sel) |s| s.lo else self.cursor;
-        const hi_row = if (sel) |s| s.hi else self.cursor;
+        const lo_row = if (sel) |s| s.lo else self.vp.cursor;
+        const hi_row = if (sel) |s| s.hi else self.vp.cursor;
 
         var first: u32 = 0;
         var last: u32 = 0;
@@ -2014,8 +2025,8 @@ pub const App = struct {
     fn appendLines(self: *App, out: *std.ArrayList(u8)) Allocator.Error!void {
         const f = self.current() orelse return;
         const sel = self.selection();
-        const lo_row = if (sel) |s| s.lo else self.cursor;
-        const hi_row = if (sel) |s| s.hi else self.cursor;
+        const lo_row = if (sel) |s| s.lo else self.vp.cursor;
+        const hi_row = if (sel) |s| s.hi else self.vp.cursor;
 
         var row = lo_row;
         while (row <= hi_row) : (row += 1) {
@@ -2063,8 +2074,8 @@ pub const App = struct {
             return;
         };
         const sel = self.selection();
-        const lo = if (sel) |s| s.lo else self.cursor;
-        const hi = if (sel) |s| s.hi else self.cursor;
+        const lo = if (sel) |s| s.lo else self.vp.cursor;
+        const hi = if (sel) |s| s.hi else self.vp.cursor;
 
         self.outgoing.clearRetainingCapacity();
         var rows: u32 = 0;
@@ -2176,13 +2187,13 @@ pub const App = struct {
     /// reviewer says constantly.
     fn commentLine(self: *App) ?Spot2 {
         const f = self.current() orelse return null;
-        const li = self.lineAt(self.cursor) orelse return null;
+        const li = self.lineAt(self.vp.cursor) orelse return null;
         if (li >= f.lines.len()) return null;
         const no = f.lines.new_no[li];
         if (no != 0) return .{ .path = f.path(), .line = no };
 
         // On a deletion: the first surviving line of the hunk it sits in.
-        const hi = self.rows.hunkAt(self.cursor) orelse return null;
+        const hi = self.rows.hunkAt(self.vp.cursor) orelse return null;
         if (hi >= f.hunks.len) return null;
         const h = f.hunks[hi];
         var i = h.lo;
@@ -2233,9 +2244,9 @@ pub const App = struct {
     /// reader looking at it, and only one of them was reachable before.
     fn commentUnderCursor(self: *App) ?*comments_mod.Comment {
         const f = self.current() orelse return null;
-        if (self.cursor < self.rows.len()) {
-            if (self.rows.items[self.cursor] == .note) {
-                const ni = self.rows.items[self.cursor].note;
+        if (self.vp.cursor < self.rows.len()) {
+            if (self.rows.items[self.vp.cursor] == .note) {
+                const ni = self.rows.items[self.vp.cursor].note;
                 var i: u32 = 0;
                 for (self.comments.list.items) |*n| {
                     if (!std.mem.eql(u8, n.path, f.path())) continue;
@@ -2654,6 +2665,7 @@ pub const App = struct {
                 self.files_purpose = .mention;
                 self.buildPickList();
                 self.file_list.title = " mention a file ";
+                self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
                 self.mode = .finder;
@@ -2860,11 +2872,11 @@ pub const App = struct {
         // particular line - so it is written once and returned from.
         const top: EditTarget = .{ .path = f.path(), .line = 0 };
 
-        const li = self.lineAt(self.cursor) orelse return top;
+        const li = self.lineAt(self.vp.cursor) orelse return top;
         if (li >= f.lines.len()) return top;
         if (f.lines.kind[li] != .del) return .{ .path = f.path(), .line = f.lines.new_no[li] };
 
-        const hi = self.rows.hunkAt(self.cursor) orelse return top;
+        const hi = self.rows.hunkAt(self.vp.cursor) orelse return top;
         if (hi >= f.hunks.len) return top;
         return .{ .path = f.path(), .line = f.hunks[hi].new_start };
     }
@@ -2872,15 +2884,15 @@ pub const App = struct {
     fn moveTo(self: *App, row: u32) void {
         const n = self.rows.len();
         if (n == 0) {
-            self.cursor = 0;
-            self.col = 0;
+            self.vp.cursor = 0;
+            self.vp.col = 0;
             return;
         }
-        self.cursor = @min(row, n - 1);
+        self.vp.cursor = @min(row, n - 1);
         // The column follows what was last asked for rather than what the
         // previous line happened to allow, which is the whole point of
         // keeping the two apart.
-        self.col = motion.clamp(self.cursorText(), self.want_col);
+        self.vp.col = motion.clamp(self.cursorText(), self.want_col);
     }
 
     // -- the column ----------------------------------------------------------
@@ -2889,7 +2901,7 @@ pub const App = struct {
     /// motion reads through this, so a header is a line of no characters
     /// rather than a special case at each call site.
     fn cursorText(self: *App) []const u8 {
-        return self.textOfRow(self.cursor);
+        return self.textOfRow(self.vp.cursor);
     }
 
     fn textOfRow(self: *App, row: u32) []const u8 {
@@ -2903,7 +2915,7 @@ pub const App = struct {
     /// reader saying where they want to be - the vertical motions are what
     /// keep `want_col` and let `col` give way.
     fn setCol(self: *App, at: u32) void {
-        self.col = at;
+        self.vp.col = at;
         self.want_col = at;
     }
 
@@ -2911,7 +2923,7 @@ pub const App = struct {
     /// rebuild needs it: the row can survive a re-diff while the text on it
     /// becomes shorter, or becomes something else entirely.
     fn clampCol(self: *App) void {
-        self.col = motion.clamp(self.cursorText(), self.col);
+        self.vp.col = motion.clamp(self.cursorText(), self.vp.col);
     }
 
     /// Applies a motion that may have nowhere to go on this line. `w` and `b`
@@ -2920,9 +2932,9 @@ pub const App = struct {
     fn stepWord(self: *App, forward: bool, width: motion.Width) void {
         const text = self.cursorText();
         const found = if (forward)
-            motion.wordNext(text, self.col, width)
+            motion.wordNext(text, self.vp.col, width)
         else
-            motion.wordPrev(text, self.col, width);
+            motion.wordPrev(text, self.vp.col, width);
         if (found) |at| return self.setCol(at);
 
         // Nothing left on this line: cross to the neighbouring one and take
@@ -2930,12 +2942,12 @@ pub const App = struct {
         // not a word - but an empty *line* is one, the way it is in vim, so a
         // blank between two paragraphs is a place the cursor can be.
         const last = self.rows.len() -| 1;
-        var row = self.cursor;
+        var row = self.vp.cursor;
         while (if (forward) row < last else row > 0) {
             row = if (forward) row + 1 else row - 1;
             if (self.lineAt(row) == null) continue;
             const next = self.textOfRow(row);
-            self.cursor = row;
+            self.vp.cursor = row;
             self.setCol(if (forward) motion.firstNonBlank(next) else motion.lastWordStart(next, width));
             return;
         }
@@ -2945,15 +2957,15 @@ pub const App = struct {
     /// an empty one rather than onto it, because an empty line has no word
     /// whose end the cursor could sit on.
     fn stepWordEnd(self: *App, width: motion.Width) void {
-        if (motion.wordEnd(self.cursorText(), self.col, width)) |at| return self.setCol(at);
+        if (motion.wordEnd(self.cursorText(), self.vp.col, width)) |at| return self.setCol(at);
 
         const last = self.rows.len() -| 1;
-        var row = self.cursor;
+        var row = self.vp.cursor;
         while (row < last) {
             row += 1;
             if (self.lineAt(row) == null) continue;
             const at = motion.firstWordEnd(self.textOfRow(row), width) orelse continue;
-            self.cursor = row;
+            self.vp.cursor = row;
             self.setCol(at);
             return;
         }
@@ -2963,7 +2975,7 @@ pub const App = struct {
     fn applyFind(self: *App, f: motion.Find) void {
         self.last_find = f;
         const text = self.cursorText();
-        if (motion.find(text, self.col, f)) |at| return self.setCol(at);
+        if (motion.find(text, self.vp.col, f)) |at| return self.setCol(at);
         // Saying so beats a key that looks broken: `f` waited for a character
         // and then nothing moved.
         self.notice.set("no '{u}' on this line", .{f.target});
@@ -3075,6 +3087,7 @@ pub const App = struct {
 
         self.files_purpose = .turns;
         self.file_list.title = " turns ";
+        self.file_list.totals = null;
         self.file_list.extra_keys = &.{};
         // Opened on the row the reader is already looking at, rather than at an
         // arbitrary top.
@@ -3563,7 +3576,7 @@ pub const App = struct {
             return;
         }
 
-        if (self.freshFrom(self.cursor, delta)) |row| {
+        if (self.freshFrom(self.vp.cursor, delta)) |row| {
             self.moveTo(row);
             return;
         }
@@ -3630,7 +3643,7 @@ pub const App = struct {
             return;
         }
 
-        if (self.riskFrom(self.cursor, delta)) |row| {
+        if (self.riskFrom(self.vp.cursor, delta)) |row| {
             self.moveTo(row);
             return;
         }
@@ -3704,7 +3717,7 @@ pub const App = struct {
         // returned to where it already was and the backward wrap was
         // unreachable.
         const n: i64 = @intCast(hs.len);
-        const here: ?u32 = self.rows.hunkAt(self.cursor);
+        const here: ?u32 = self.rows.hunkAt(self.vp.cursor);
         const raw: i64 = if (here) |h|
             @as(i64, @intCast(h)) + delta
         else
@@ -3723,7 +3736,7 @@ pub const App = struct {
 
         const target = hs[wrapIndex(raw, hs.len).index] + 1;
         // One hunk wraps onto itself; saying so every time would be noise.
-        if (target != self.cursor) self.noteWrap(delta, "hunk");
+        if (target != self.vp.cursor) self.noteWrap(delta, "hunk");
         self.moveTo(target);
     }
 
@@ -3791,14 +3804,14 @@ pub const App = struct {
             // A split row is as tall as its taller column, so the two stay
             // aligned and neither is cut off at the divider.
             if (self.rows.pairAt(row)) |p| {
-                const sp = rows_mod.Split.of(self.cols);
+                const sp = rows_mod.Split.of(self.vp.cols);
                 const col = rows_mod.gutter(f, .split);
                 return wrap_mod.pairHeight(
                     if (p.left) |li| f.lines.text[li] else null,
                     sp.left -| col,
                     if (p.right) |li| f.lines.text[li] else null,
                     sp.right_width -| col,
-                    self.width_method,
+                    self.vp.width_method,
                     cap,
                 );
             }
@@ -3807,132 +3820,110 @@ pub const App = struct {
         if (li >= f.lines.text.len) return 1;
         return wrap_mod.height(
             f.lines.text[li],
-            self.cols -| rows_mod.gutter(f, .flow),
-            self.width_method,
+            self.vp.cols -| rows_mod.gutter(f, .flow),
+            self.vp.width_method,
             cap,
             .follow,
         );
+    }
+
+    /// The body as `ui/viewport.zig` needs to see it. One adapter rather than
+    /// a row count and a height callback threaded through every call: the
+    /// viewport asks three questions about numbers, and this is where the
+    /// numbers come from.
+    const Body = struct {
+        app: *App,
+        rows_tall: u16,
+
+        pub fn count(self: Body) u32 {
+            return self.app.rows.len();
+        }
+        pub fn at(self: Body, row: u32) u16 {
+            return self.app.rowHeight(row, self.rows_tall);
+        }
+        pub fn body(self: Body) u16 {
+            return self.rows_tall;
+        }
+    };
+
+    fn bodyOf(self: *App, rows_tall: u16) Body {
+        return .{ .app = self, .rows_tall = rows_tall };
     }
 
     fn commentHeight(self: *App, row: u32, cap: u16) u16 {
         const ni = self.rows.items[row].note;
         const marks = self.commentMarks();
         if (ni >= marks.len) return 1;
-        const col: u16 = if (self.cols > 8) 6 else 0;
-        const width = self.cols -| col -| 2;
+        const col: u16 = if (self.vp.cols > 8) 6 else 0;
+        const width = self.vp.cols -| col -| 2;
         if (width == 0) return 1;
 
         var rows: u16 = 0;
         var lines = std.mem.splitScalar(u8, marks[ni].body, '\n');
         while (lines.next()) |line| {
-            rows +|= wrap_mod.height(line, width, self.width_method, cap, .flush);
+            rows +|= wrap_mod.height(line, width, self.vp.width_method, cap, .flush);
         }
         return @max(@min(rows, cap), 1);
     }
 
-    /// `<C-d>` and `<C-u>`: half a screen, and the *screen* is what moves.
-    ///
-    /// Moving only the cursor is what this did before, and it made the first
-    /// press of a page key do nothing visible - the cursor slid down inside a
-    /// stationary view and the text only started moving once it reached the
-    /// bottom margin. Vim moves both by the same amount, so the cursor keeps
-    /// its place on screen and the page turns under it, which is the whole
-    /// point of a page key.
-    fn page(self: *App, dir: i32, body: u16) void {
-        const half = @max(1, body / 2);
-        if (dir > 0) {
-            self.scroll = self.rowBelow(self.scroll, half, body);
-            self.moveTo(self.rowBelow(self.cursor, half, body));
-        } else {
-            self.scroll = self.rowAbove(self.scroll, half, body);
-            self.moveTo(self.rowAbove(self.cursor, half, body));
-        }
+    /// Arrive now, and put the cursor rather than travel it. Kept as methods
+    /// on `App` because the run loop calls them and has no viewport of its
+    /// own; each is the one line it looks like.
+    pub fn settleScroll(self: *App) void {
+        self.vp.settle();
     }
 
-    /// The row `screens` screen rows below `from`, and above for the other.
-    /// Both move at least one row: a page motion that cannot move because the
-    /// line under the cursor fills the pane is a key that does nothing.
+    pub fn placeCursor(self: *App) void {
+        self.vp.place();
+    }
+
+    pub fn clampScroll(self: *App, body: u16) void {
+        self.vp.clampScroll(self.bodyOf(body), self.nav.scrolloff);
+    }
+
+    fn drawnTop(self: *App, body: u16) viewport.Top {
+        return self.vp.drawnTop(self.bodyOf(body));
+    }
+
+    fn drawnCursor(self: *App, body: u16) u32 {
+        return self.vp.drawnCursor(self.bodyOf(body));
+    }
+
+    fn page(self: *App, dir: i32, body: u16) void {
+        self.moveTo(self.vp.pageTo(self.bodyOf(body), dir));
+    }
+
+    fn centerCursor(self: *App, body: u16) void {
+        self.vp.centre(self.bodyOf(body));
+    }
+
+    fn animateFrom(self: *App, was_at: u32, body: u16) void {
+        self.vp.animateFrom(self.bodyOf(body), was_at);
+    }
+
     fn rowBelow(self: *App, from: u32, screens: u16, body: u16) u32 {
-        const last = self.rows.len() -| 1;
-        var acc: u32 = 0;
-        var i = from;
-        while (i < last) {
-            i += 1;
-            acc += self.rowHeight(i, body);
-            if (acc >= screens) break;
-        }
-        return i;
+        return self.vp.rowBelow(self.bodyOf(body), from, screens);
     }
 
     fn rowAbove(self: *App, from: u32, screens: u16, body: u16) u32 {
-        var acc: u32 = 0;
-        var i = from;
-        while (i > 0) {
-            i -= 1;
-            acc += self.rowHeight(i, body);
-            if (acc >= screens) break;
-        }
-        return i;
+        return self.vp.rowAbove(self.bodyOf(body), from, screens);
     }
 
-    /// The scroll offset that puts the cursor's row half a pane down, counting
-    /// the screen rows a wrapped line takes rather than the one row it is.
-    fn centerCursor(self: *App, body: u16) void {
-        const half = body / 2;
-        var top = self.cursor;
-        var acc: u32 = 0;
-        while (top > 0) {
-            const above = self.rowHeight(top - 1, body);
-            if (acc + above > half) break;
-            acc += above;
-            top -= 1;
-        }
-        self.scroll = top;
-    }
-
-    /// Screen rows between two scroll positions, positive when `to` is below
-    /// `from`. Capped, because the only caller refuses to animate past two
-    /// screens and walking ten thousand rows to find that out is waste.
     fn screenRowsBetween(self: *App, from: u32, to: u32, body: u16) i32 {
-        const cap: u32 = @as(u32, anim.max_screens) * @as(u32, body) + 1;
-        var acc: u32 = 0;
-        var i = @min(from, to);
-        const end = @max(from, to);
-        while (i < end and acc <= cap) : (i += 1) acc += self.rowHeight(i, body);
-        const d: i32 = @intCast(@min(acc, cap));
-        return if (to >= from) d else -d;
-    }
-
-    /// Starts the viewport catching up, if it moved at all.
-    fn animateFrom(self: *App, was_at: u32, body: u16) void {
-        if (was_at == self.scroll) return;
-        self.scroll_anim.add(self.screenRowsBetween(was_at, self.scroll, body), body);
+        return self.vp.screenRowsBetween(self.bodyOf(body), from, to);
     }
 
     pub fn animating(self: *App, body: u16) bool {
-        if (self.scroll_anim.active()) return true;
+        if (self.vp.scroll_anim.active()) return true;
         const target = self.cursorCell(body) orelse return false;
-        return self.cursor_anim.travelling(target);
+        return self.vp.cursor_anim.travelling(target);
     }
 
     /// One frame of both animations. The viewport moves first, because where
     /// the cursor belongs on screen depends on where the viewport has got to.
     pub fn stepAnim(self: *App, dt_ms: f32, body: u16) void {
-        self.scroll_anim.step(dt_ms);
-        if (self.cursorCell(body)) |target| self.cursor_anim.step(target, dt_ms);
-    }
-
-    /// Arrive now. What the loop does when a key arrives mid-flight: an
-    /// animation the reader has already moved past is latency, not motion.
-    pub fn settleScroll(self: *App) void {
-        self.scroll_anim.settle();
-    }
-
-    /// The cursor is somewhere else entirely rather than somewhere further:
-    /// another file, a rebuilt diff, a pane that changed size. There is no
-    /// path between two unrelated screens to draw the block along.
-    pub fn placeCursor(self: *App) void {
-        self.cursor_anim.place();
+        self.vp.scroll_anim.step(dt_ms);
+        if (self.cursorCell(body)) |target| self.vp.cursor_anim.step(target, dt_ms);
     }
 
     /// Whether the reader has two columns, as far as the pane and the config
@@ -3944,11 +3935,11 @@ pub const App = struct {
         // had - only two columns too narrow to hold a line of code - and a
         // reader who pressed `|` in a wide pane and then shrank it wants the
         // view that still works, not the one they last named.
-        if (self.cols < rows_mod.min_split_width) return false;
+        if (self.vp.cols < rows_mod.min_split_width) return false;
         return switch (self.layout) {
             .flow => false,
             .split => true,
-            .auto => self.cols >= self.split_min_width,
+            .auto => self.vp.cols >= self.split_min_width,
         };
     }
 
@@ -3974,59 +3965,16 @@ pub const App = struct {
     /// the pane instead of the viewport landing somewhere near it.
     fn relayout(self: *App, body: u16) void {
         if (self.effectiveSplit() == self.split) return;
-        const line = self.lineAt(self.cursor);
-        const offset = self.cursor -| self.scroll;
+        const line = self.lineAt(self.vp.cursor);
+        const offset = self.vp.cursor -| self.vp.scroll;
         self.rebuildRows(.row) catch return;
         if (line) |li| {
-            if (self.rows.rowForLine(li)) |r| self.cursor = r;
+            if (self.rows.rowForLine(li)) |r| self.vp.cursor = r;
         }
-        self.scroll = self.cursor -| offset;
+        self.vp.scroll = self.vp.cursor -| offset;
         self.clampCol();
         self.clampScroll(body);
         self.placeCursor();
-    }
-
-    /// A position displaced by the animation: the row `up` screen rows above
-    /// `from`, and how many of that row's screen rows are above the result.
-    /// Negative `up` walks the other way.
-    ///
-    /// A wrapped line is several screen rows, so this is a walk rather than
-    /// arithmetic - and the walk is bounded by the displacement, which
-    /// `anim.Scroll` has already capped at two screens.
-    pub const Top = struct { row: u32, skip: u16 };
-
-    fn displaced(self: *App, from: u32, up: i32, body: u16) Top {
-        if (up == 0) return .{ .row = from, .skip = 0 };
-
-        if (up > 0) {
-            // Drawn above where it settles, which is what scrolling *down*
-            // looks like while the screen catches up.
-            var row = from;
-            var left: u32 = @intCast(up);
-            while (left > 0 and row > 0) {
-                row -= 1;
-                const h = self.rowHeight(row, body);
-                if (h > left) return .{ .row = row, .skip = @intCast(h - left) };
-                left -= h;
-            }
-            return .{ .row = row, .skip = 0 };
-        }
-
-        var row = from;
-        var left: u32 = @intCast(-up);
-        const last = self.rows.len() -| 1;
-        while (left > 0 and row < last) {
-            const h = self.rowHeight(row, body);
-            if (h > left) return .{ .row = row, .skip = @intCast(left) };
-            left -= h;
-            row += 1;
-        }
-        return .{ .row = row, .skip = 0 };
-    }
-
-    /// Where the body is drawn from while the viewport catches up.
-    fn drawnTop(self: *App, body: u16) Top {
-        return self.displaced(self.scroll, self.scroll_anim.rows(), body);
     }
 
     /// The cell the cursor belongs on this frame, in body coordinates: the
@@ -4049,11 +3997,11 @@ pub const App = struct {
         // standing in the other half would say the reader is pointing at a
         // line they are not.
         const half: ?rows_mod.Split.Column = if (self.rows.pairAt(row)) |p|
-            rows_mod.Split.of(self.cols).column(self.sideOn(p))
+            rows_mod.Split.of(self.vp.cols).column(self.sideOn(p))
         else
             null;
         const base: u16 = if (half) |h| h.at else 0;
-        const column: u16 = if (half) |h| h.width else self.cols;
+        const column: u16 = if (half) |h| h.width else self.vp.cols;
         const gutter = rows_mod.gutter(f, if (half == null) .flow else .split);
 
         // A hunk header or a rule has no line to find a column in, but the
@@ -4066,44 +4014,12 @@ pub const App = struct {
         if (li >= f.lines.len()) return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
 
         const avail = if (self.wrap) column -| gutter else 0;
-        const cell = wrap_mod.locate(f.lines.text[li], avail, self.width_method, self.col);
+        const cell = wrap_mod.locate(f.lines.text[li], avail, self.vp.width_method, self.vp.col);
         return .{
             .row = @floatFromInt(y + @as(i32, cell.row)),
             .col = @floatFromInt(base + @min(gutter + cell.col, column -| 1)),
         };
     }
-
-    /// Which row the cursor is *drawn* on while the viewport catches up.
-    ///
-    /// Displaced by the same amount as the viewport, so the cursor holds its
-    /// place on screen and the text slides underneath it - which is what a
-    /// page key does, and what the eye is tracking. Left at its settled row it
-    /// does the opposite: on the first frame the old screen is still showing
-    /// but the cursor is already half a page further down, so it snaps away
-    /// (often off the bottom edge, where it disappears altogether) and then
-    /// crawls back. Text and cursor moving in opposite directions is the one
-    /// thing that reads worse than not animating at all.
-    fn drawnCursor(self: *App, body: u16) u32 {
-        return self.displaced(self.cursor, self.scroll_anim.rows(), body).row;
-    }
-
-    /// Keeps the cursor inside the body with a margin, and never scrolls past
-    /// the end of the rows.
-    pub fn clampScroll(self: *App, body: u16) void {
-        const h: Heights = .{ .app = self, .cap = body };
-        self.scroll = scrollFor(h, self.cursor, self.scroll, self.rows.len(), body, self.nav.scrolloff);
-    }
-
-    /// What `scrollFor` asks about a row. A struct rather than a closure so
-    /// the scroll arithmetic stays a pure function with a fake in its tests.
-    const Heights = struct {
-        app: *App,
-        cap: u16,
-
-        pub fn at(self: Heights, row: u32) u16 {
-            return self.app.rowHeight(row, self.cap);
-        }
-    };
 
     pub fn handle(self: *App, ev: event.Event, body: u16) !void {
         switch (ev) {
@@ -4175,7 +4091,7 @@ pub const App = struct {
             .resize => |size| {
                 self.settleScroll();
                 self.placeCursor();
-                self.cols = size.cols;
+                self.vp.cols = size.cols;
                 // Before the clamp, because a `layout = "auto"` crossing its
                 // threshold changes how many rows there are to clamp against.
                 self.relayout(body);
@@ -4222,64 +4138,6 @@ pub fn wrapIndex(raw: i64, len: usize) struct { index: u32, wrapped: bool } {
     return .{ .index = @intCast(i), .wrapped = i != raw };
 }
 
-/// `heights.at(row)` is the screen rows that row occupies, which is one for
-/// every row until a line wraps. Passed in rather than computed here so this
-/// stays arithmetic: `App.Heights` measures the real thing, and the tests
-/// below hand it a table.
-pub fn scrollFor(
-    heights: anytype,
-    cursor: u32,
-    scroll: u32,
-    rows_len: u32,
-    body: u16,
-    scrolloff: u32,
-) u32 {
-    if (body == 0 or rows_len == 0) return 0;
-    const last = rows_len - 1;
-    const margin: u32 = @min(scrolloff, body / 3);
-    var out = scroll;
-
-    // The row a margin above the cursor has to be on screen.
-    const want_top = cursor -| margin;
-    if (want_top < out) out = want_top;
-
-    // So does the one a margin below it - but never at the cursor's expense.
-    // Walking up from there is what makes the margin a number of *rows* while
-    // the room it needs is a number of screen rows.
-    const target = @min(cursor +| margin, last);
-    var lo = target;
-    var acc: u32 = heights.at(target);
-    while (lo > 0) {
-        const above = heights.at(lo - 1);
-        if (acc + above > body) break;
-        acc += above;
-        lo -= 1;
-    }
-    if (out < lo) out = @min(lo, cursor);
-
-    // And never blank rows below the last one: the largest offset that still
-    // fills the body, found by walking back from the end for the same reason.
-    var max_scroll = rows_len;
-    var tail: u32 = 0;
-    while (max_scroll > 0) {
-        const h = heights.at(max_scroll - 1);
-        if (tail + h > body) break;
-        tail += h;
-        max_scroll -= 1;
-    }
-    if (max_scroll > last) max_scroll = last;
-    if (out > max_scroll) out = max_scroll;
-    return out;
-}
-
-/// Every row one screen row tall: what `scrollFor` sees with wrapping off, and
-/// what its arithmetic tests measure against.
-pub const flat_heights = struct {
-    pub fn at(_: @This(), _: u32) u16 {
-        return 1;
-    }
-}{};
-
 const testing = std.testing;
 
 // Zig collects tests from a file only when a `test` block references it.
@@ -4307,71 +4165,6 @@ test {
 }
 
 // -- pure arithmetic: no fixture, no rows, no terminal -------------------
-
-test "scrolling keeps the cursor inside the body with a margin" {
-    // Cursor near the top pins the view to the top rather than showing rows
-    // that do not exist above it.
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 0, 0, 100, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 2, 0, 100, 22, 3));
-
-    // Moving down past the bottom margin scrolls by exactly what is needed:
-    // cursor 20 with a 3-row margin needs rows 21-23 visible, and 2+22-1 = 23.
-    try testing.expectEqual(@as(u32, 2), scrollFor(flat_heights, 20, 0, 100, 22, 3));
-    // Moving back up above the top margin scrolls back.
-    try testing.expectEqual(@as(u32, 7), scrollFor(flat_heights, 10, 20, 100, 22, 3));
-}
-
-test "scrolling never runs past the last row" {
-    // A cursor at the end still leaves a full body on screen, not a screen
-    // half full of blanks.
-    try testing.expectEqual(@as(u32, 78), scrollFor(flat_heights, 99, 90, 100, 22, 3));
-    // Fewer rows than the body means no scrolling at all.
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 3, 0, 5, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 4, 3, 5, 22, 3));
-}
-
-test "a tall row costs the screen rows it takes, not the one row it is" {
-    // Row 3 wraps onto five screen rows; everything else is one.
-    const Table = struct {
-        hs: []const u16,
-        pub fn at(self: @This(), row: u32) u16 {
-            return if (row < self.hs.len) self.hs[row] else 1;
-        }
-    };
-    const t: Table = .{ .hs = &.{ 1, 1, 1, 5, 1, 1, 1, 1, 1, 1 } };
-
-    // Rows 0-9 are exactly ten screen rows, so a ten-row body shows them all.
-    try testing.expectEqual(@as(u32, 0), scrollFor(t, 5, 0, 10, 10, 0));
-
-    // The last row cannot be reached without scrolling the tall one off:
-    // rows 4-9 are six screen rows, rows 3-9 are eleven.
-    try testing.expectEqual(@as(u32, 4), scrollFor(t, 9, 0, 10, 10, 0));
-
-    // Flat rows in the same shape need no scroll at all, which is the whole
-    // difference this arithmetic exists to make.
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 9, 0, 10, 10, 0));
-}
-
-test "a row taller than the body is shown from its top rather than skipped" {
-    const Table = struct {
-        hs: []const u16,
-        pub fn at(self: @This(), row: u32) u16 {
-            return if (row < self.hs.len) self.hs[row] else 1;
-        }
-    };
-    // Row 2 is a generated line: twenty screen rows in a body of ten.
-    const t: Table = .{ .hs = &.{ 1, 1, 20, 1, 1, 1 } };
-    try testing.expectEqual(@as(u32, 2), scrollFor(t, 2, 0, 6, 10, 3));
-}
-
-test "degenerate sizes do not underflow" {
-    // A one-row body has no room for a margin; the arithmetic must still hold.
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 0, 0, 0, 22, 3));
-    try testing.expectEqual(@as(u32, 0), scrollFor(flat_heights, 5, 0, 10, 0, 3));
-    _ = scrollFor(flat_heights, 0, 0, 1, 1, 3);
-    _ = scrollFor(flat_heights, 9, 0, 10, 1, 3);
-    _ = scrollFor(flat_heights, 0, 9, 10, 2, 3);
-}
 
 test "a ring step wraps at both ends and reports only the wrap" {
     // The shared arithmetic behind `]f`, `]h` and the search's walk across
@@ -4555,7 +4348,7 @@ const Fixture = struct {
     }
 
     fn expectCursor(self: *Fixture, row: u32) !void {
-        try testing.expectEqual(row, self.app.cursor);
+        try testing.expectEqual(row, self.app.vp.cursor);
     }
 
     fn expectFile(self: *Fixture, index: u32) !void {
@@ -4592,26 +4385,26 @@ test "the column moves within the line and stops at both ends" {
 
     // Row 1 is `fn alpha() {`.
     try fx.expectCursor(1);
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 
     try fx.press("l");
     try fx.press("l");
-    try testing.expectEqual(@as(u32, 2), fx.app.col);
+    try testing.expectEqual(@as(u32, 2), fx.app.vp.col);
     try fx.press("h");
-    try testing.expectEqual(@as(u32, 1), fx.app.col);
+    try testing.expectEqual(@as(u32, 1), fx.app.vp.col);
 
     // `h` at the first column is a key that does nothing, not an underflow.
     try fx.press("h");
     try fx.press("h");
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 
     // `$` is the last character, never the position after it.
     try fx.press("$");
-    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try testing.expectEqual(@as(u32, 11), fx.app.vp.col);
     try fx.press("l");
-    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try testing.expectEqual(@as(u32, 11), fx.app.vp.col);
     try fx.press("0");
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 }
 
 test "word motions step by class and carry into the next line" {
@@ -4620,24 +4413,24 @@ test "word motions step by class and carry into the next line" {
 
     // `fn alpha() {` - a class change is a boundary, so `(` is its own word.
     try fx.press("w");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
     try fx.press("w");
-    try testing.expectEqual(@as(u32, 8), fx.app.col);
+    try testing.expectEqual(@as(u32, 8), fx.app.vp.col);
     try fx.press("e");
-    try testing.expectEqual(@as(u32, 9), fx.app.col);
+    try testing.expectEqual(@as(u32, 9), fx.app.vp.col);
 
     // Off the end of the line, `w` carries into the next one rather than
     // stopping - and lands on its first non-blank, past the indentation.
     try fx.press("$");
     try fx.press("w");
     try fx.expectCursor(2);
-    try testing.expectEqual(@as(u32, 4), fx.app.col);
+    try testing.expectEqual(@as(u32, 4), fx.app.vp.col);
 
     // And `b` comes back to the last word of the line above.
     try fx.press("0");
     try fx.press("b");
     try fx.expectCursor(1);
-    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try testing.expectEqual(@as(u32, 11), fx.app.vp.col);
 }
 
 test "an empty line is a word, and a hunk header is not" {
@@ -4651,7 +4444,7 @@ test "an empty line is a word, and a hunk header is not" {
     try fx.press("$");
     try fx.press("w");
     try fx.expectCursor(2);
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 
     // And from the blank line, on to the next line that has something.
     try fx.press("w");
@@ -4683,25 +4476,25 @@ test "W steps over punctuation that w stops at" {
     // Row 1 is `fn alpha() {`. `w` stops at the paren; `W` does not see it.
     try fx.press("w");
     try fx.press("w");
-    try testing.expectEqual(@as(u32, 8), fx.app.col);
+    try testing.expectEqual(@as(u32, 8), fx.app.vp.col);
 
     try fx.press("0");
     try fx.press("W");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
     try fx.press("W");
-    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try testing.expectEqual(@as(u32, 11), fx.app.vp.col);
 
     // `E` runs to the end of the blob rather than to the end of `alpha`.
     try fx.press("0");
     try fx.press("E");
-    try testing.expectEqual(@as(u32, 1), fx.app.col);
+    try testing.expectEqual(@as(u32, 1), fx.app.vp.col);
     try fx.press("E");
-    try testing.expectEqual(@as(u32, 9), fx.app.col);
+    try testing.expectEqual(@as(u32, 9), fx.app.vp.col);
 
     // And `B` comes back over the whole of it.
     try fx.press("$");
     try fx.press("B");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
 }
 
 test "the wanted column survives a short line and comes back on a long one" {
@@ -4713,14 +4506,14 @@ test "the wanted column survives a short line and comes back on a long one" {
     try fx.press("j");
     try fx.press("j");
     try fx.expectCursor(3);
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 
     // Back up, and the column the reader asked for is where they land - the
     // short line clamped the cursor without forgetting what was wanted.
     try fx.press("k");
-    try testing.expectEqual(@as(u32, 15), fx.app.col);
+    try testing.expectEqual(@as(u32, 15), fx.app.vp.col);
     try fx.press("k");
-    try testing.expectEqual(@as(u32, 11), fx.app.col);
+    try testing.expectEqual(@as(u32, 11), fx.app.vp.col);
 }
 
 test "f waits for a character, and Escape gives up on it" {
@@ -4731,29 +4524,29 @@ test "f waits for a character, and Escape gives up on it" {
     try fx.press("f");
     try testing.expect(fx.app.pending_find != null);
     try fx.press("(");
-    try testing.expectEqual(@as(u32, 8), fx.app.col);
+    try testing.expectEqual(@as(u32, 8), fx.app.vp.col);
     try testing.expect(fx.app.pending_find == null);
 
     try fx.press("0");
     try fx.press("t");
     try fx.press("(");
-    try testing.expectEqual(@as(u32, 7), fx.app.col);
+    try testing.expectEqual(@as(u32, 7), fx.app.vp.col);
 
     // `;` repeats it and `,` reverses it.
     try fx.press("0");
     try fx.press("f");
     try fx.press("a");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
     try fx.press(";");
-    try testing.expectEqual(@as(u32, 7), fx.app.col);
+    try testing.expectEqual(@as(u32, 7), fx.app.vp.col);
     try fx.press(",");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
 
     // A character that is not on the line says so rather than moving.
     try fx.press("f");
     try fx.press("z");
     try fx.expectNotice("no 'z'");
-    try testing.expectEqual(@as(u32, 3), fx.app.col);
+    try testing.expectEqual(@as(u32, 3), fx.app.vp.col);
 
     // Escape abandons a pending find, so a mistyped `f` does not eat the key
     // after it.
@@ -4761,7 +4554,7 @@ test "f waits for a character, and Escape gives up on it" {
     try fx.press("<Esc>");
     try testing.expect(fx.app.pending_find == null);
     try fx.press("0");
-    try testing.expectEqual(@as(u32, 0), fx.app.col);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.col);
 }
 
 test "v selects characters, V selects lines, and each toggles the other" {
@@ -4826,7 +4619,7 @@ test "a charwise selection points the agent at the words, not at a column" {
 test "a jump animates and a single row does not" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.budget_ms = 250;
 
     // Nothing to animate: the fixture is four rows in a 22-row body, so no
     // motion in it scrolls at all.
@@ -4835,11 +4628,11 @@ test "a jump animates and a single row does not" {
 
     // A jump that does scroll starts the viewport catching up, displaced by
     // the screen rows it travelled.
-    fx.app.scroll = 0;
-    fx.app.cursor = 3;
+    fx.app.vp.scroll = 0;
+    fx.app.vp.cursor = 3;
     fx.app.animateFrom(2, body_rows);
     try testing.expect(fx.app.animating(body_rows));
-    try testing.expectEqual(@as(i32, -2), fx.app.scroll_anim.rows());
+    try testing.expectEqual(@as(i32, -2), fx.app.vp.scroll_anim.rows());
 
     // And it settles on its own.
     var guard: u32 = 0;
@@ -4850,22 +4643,22 @@ test "a jump animates and a single row does not" {
 test "stepping is instant and only a jump is animated" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.budget_ms = 250;
 
     // A wrapped line makes one `j` worth three screen rows, which is exactly
     // the case that used to start an animation per keystroke: a held `j` then
     // spends its life cancelling the last one, which reads as stutter and
     // costs a frame of input latency per key.
     fx.files[0].lines.text[1] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
-    fx.app.scroll = 0;
-    fx.app.cursor = 1;
+    fx.app.vp.cols = 30;
+    fx.app.vp.scroll = 0;
+    fx.app.vp.cursor = 1;
     try fx.app.run(.line_down, 4);
     try testing.expect(!fx.app.animating(body_rows));
 
     // The same movement asked for as a jump does animate.
-    fx.app.scroll = 0;
-    fx.app.cursor = 1;
+    fx.app.vp.scroll = 0;
+    fx.app.vp.cursor = 1;
     try fx.app.run(.page_down, 4);
     try testing.expect(fx.app.animating(body_rows));
 }
@@ -4877,14 +4670,14 @@ test "the cursor travels for every motion, not only for a jump" {
     // Placed where it belongs the first time it is drawn: there is nowhere to
     // travel from yet.
     const first = fx.app.cursorCell(body_rows).?;
-    _ = fx.app.cursor_anim.cell(first);
+    _ = fx.app.vp.cursor_anim.cell(first);
     try testing.expect(!fx.app.animating(body_rows));
 
     // A column motion is a motion: the cursor has ground to cover, and the
     // viewport - which only animates for a jump - has none.
     try fx.press("$");
     try testing.expect(fx.app.animating(body_rows));
-    try testing.expect(!fx.app.scroll_anim.active());
+    try testing.expect(!fx.app.vp.scroll_anim.active());
 
     // And it gets there, a cell at a time.
     var guard: u32 = 0;
@@ -4895,7 +4688,7 @@ test "the cursor travels for every motion, not only for a jump" {
     // lands on it exactly, so an exact comparison here was only ever passing
     // for the distances that happened to divide evenly.
     const want = fx.app.cursorCell(body_rows).?;
-    const got = fx.app.cursor_anim.at.?;
+    const got = fx.app.vp.cursor_anim.at.?;
     try testing.expectEqual(@round(want.row), @round(got.row));
     try testing.expectEqual(@round(want.col), @round(got.col));
 }
@@ -4907,7 +4700,7 @@ test "a row with no line still has a cell for the cursor to be on" {
     // Row 0 is the hunk header. `j` steps through chrome like any other row,
     // and a cursor with nowhere to be blinks out for a frame and then
     // teleports - which is what a held `j` used to look like.
-    fx.app.cursor = 0;
+    fx.app.vp.cursor = 0;
     const cell = fx.app.cursorCell(body_rows).?;
     try testing.expectEqual(@as(f32, 0), cell.row);
     try testing.expectEqual(@as(f32, @floatFromInt(rows_mod.gutter(&fx.files[0], .flow))), cell.col);
@@ -4916,49 +4709,49 @@ test "a row with no line still has a cell for the cursor to be on" {
 test "the cursor keeps its place on screen while the text slides under it" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.budget_ms = 250;
 
     // Settled, the drawn cursor is the cursor. Far enough from the top that
     // the walk has room: displaced past the first row it clamps there, and the
     // gap closes because the screen has run out of file rather than because
     // anything moved wrongly.
-    fx.app.scroll = 2;
-    fx.app.cursor = 3;
+    fx.app.vp.scroll = 2;
+    fx.app.vp.cursor = 3;
     try testing.expectEqual(@as(u32, 3), fx.app.drawnCursor(body_rows));
 
     // Mid-flight, both are displaced by the same amount, so the cursor's
     // screen position - the gap between them - does not change. Left at its
     // settled row it would snap half a page away on the first frame and crawl
     // back, which is the text and the cursor moving opposite ways.
-    fx.app.scroll_anim.offset = 2;
+    fx.app.vp.scroll_anim.offset = 2;
     const top = fx.app.drawnTop(body_rows);
     const cur = fx.app.drawnCursor(body_rows);
     try testing.expectEqual(@as(u32, 0), top.row);
     try testing.expectEqual(@as(u32, 1), cur);
-    try testing.expectEqual(fx.app.cursor - fx.app.scroll, cur - top.row);
+    try testing.expectEqual(fx.app.vp.cursor - fx.app.vp.scroll, cur - top.row);
 }
 
 test "a second jump joins the first rather than cancelling it" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.budget_ms = 250;
     // Tall enough to have somewhere to scroll to: three of the four rows wrap
     // onto three screen rows each in a narrow pane.
     for (0..3) |i| fx.files[0].lines.text[i] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
 
-    fx.app.scroll = 0;
-    fx.app.cursor = 1;
+    fx.app.vp.scroll = 0;
+    fx.app.vp.cursor = 1;
     try fx.app.run(.page_down, 4);
     try testing.expect(fx.app.animating(body_rows));
-    const first = fx.app.scroll_anim.offset;
+    const first = fx.app.vp.scroll_anim.offset;
 
     // Another jump arriving mid-flight adds to what is left: the reader asked
     // to be further away, not to wait twice as long.
-    fx.app.scroll = 0;
-    fx.app.cursor = 1;
+    fx.app.vp.scroll = 0;
+    fx.app.vp.cursor = 1;
     try fx.app.run(.page_down, 4);
-    try testing.expect(fx.app.scroll_anim.offset > first);
+    try testing.expect(fx.app.vp.scroll_anim.offset > first);
 
     // Anything that is not a jump arrives at once instead.
     try fx.app.run(.line_down, 4);
@@ -4989,22 +4782,22 @@ test "the drawn viewport is where the settled one is, once it arrives" {
 
     // Settled: the row drawn first is the row scrolled to, with nothing of it
     // above the top of the pane.
-    fx.app.scroll = 2;
+    fx.app.vp.scroll = 2;
     const settled = fx.app.drawnTop(body_rows);
     try testing.expectEqual(@as(u32, 2), settled.row);
     try testing.expectEqual(@as(u16, 0), settled.skip);
 
     // Mid-flight, drawn two screen rows above it - which on unwrapped lines is
     // two rows earlier and no partial row.
-    fx.app.scroll_anim.budget_ms = 250;
-    fx.app.scroll_anim.offset = 2;
+    fx.app.vp.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.offset = 2;
     const flying = fx.app.drawnTop(body_rows);
     try testing.expectEqual(@as(u32, 0), flying.row);
     try testing.expectEqual(@as(u16, 0), flying.skip);
 
     // It never walks off the top: displaced further than there are rows above
     // it, the first row is as far as it goes.
-    fx.app.scroll_anim.offset = 20;
+    fx.app.vp.scroll_anim.offset = 20;
     try testing.expectEqual(@as(u32, 0), fx.app.drawnTop(body_rows).row);
 }
 
@@ -5014,23 +4807,23 @@ test "a wrapped row is crossed a screen row at a time, not all at once" {
 
     // Make row 1 three screen rows tall in a narrow pane.
     fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
     try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
 
     // Settled on row 2, displaced by one screen row: the top is still row 1,
     // with two of its three screen rows above the pane. Stepping by whole
     // rows could only ever show all of it or none of it.
-    fx.app.scroll = 2;
-    fx.app.scroll_anim.budget_ms = 250;
-    fx.app.scroll_anim.offset = 1;
+    fx.app.vp.scroll = 2;
+    fx.app.vp.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.offset = 1;
     const one = fx.app.drawnTop(body_rows);
     try testing.expectEqual(@as(u32, 1), one.row);
     try testing.expectEqual(@as(u16, 2), one.skip);
 
     // Two rows up, one of them above; three, and the whole row is on screen.
-    fx.app.scroll_anim.offset = 2;
+    fx.app.vp.scroll_anim.offset = 2;
     try testing.expectEqual(@as(u16, 1), fx.app.drawnTop(body_rows).skip);
-    fx.app.scroll_anim.offset = 3;
+    fx.app.vp.scroll_anim.offset = 3;
     const three = fx.app.drawnTop(body_rows);
     try testing.expectEqual(@as(u32, 1), three.row);
     try testing.expectEqual(@as(u16, 0), three.skip);
@@ -5048,7 +4841,7 @@ test "the distance between two scroll positions is measured in screen rows" {
 
     // Wrapped, the tall row costs what it draws: row 1 is three screen rows.
     fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
     try testing.expectEqual(@as(i32, 4), fx.app.screenRowsBetween(1, 3, body_rows));
 }
 
@@ -5057,26 +4850,26 @@ test "a relayout places the cursor rather than walking it across a new screen" {
     defer fx.deinit();
 
     // Give the cursor somewhere to have been drawn.
-    _ = fx.app.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
-    try testing.expect(fx.app.cursor_anim.at != null);
+    _ = fx.app.vp.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
+    try testing.expect(fx.app.vp.cursor_anim.at != null);
 
     // `zw` changes what every line is worth in screen rows, so the cell the
     // cursor was on is not a cell on this screen: there is no path between
     // the two to draw a block along.
     try fx.press("zw");
-    try testing.expect(fx.app.cursor_anim.at == null);
+    try testing.expect(fx.app.vp.cursor_anim.at == null);
 
     // `Tab` changes the body's height, which moves every row under it, and is
     // the same case.
-    _ = fx.app.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
+    _ = fx.app.vp.cursor_anim.cell(fx.app.cursorCell(body_rows).?);
     try fx.app.run(.toggle_zen, body_rows);
-    try testing.expect(fx.app.cursor_anim.at == null);
+    try testing.expect(fx.app.vp.cursor_anim.at == null);
 }
 
 test "crossing into another file arrives rather than sliding" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    fx.app.scroll_anim.budget_ms = 250;
+    fx.app.vp.scroll_anim.budget_ms = 250;
 
     // The rows under a new file are different rows; sliding between two
     // unrelated screens is an animation of nothing.
@@ -5095,7 +4888,7 @@ test "a line wider than the pane is as many screen rows as it needs" {
     // two-digit number and two spaces.
     try testing.expectEqual(@as(u16, 6), rows_mod.gutter(&fx.files[0], .flow));
     fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
 
     // 24 columns of text, so a 68-character line is three rows.
     try testing.expectEqual(@as(u16, 3), fx.app.rowHeight(1, body_rows));
@@ -5104,9 +4897,9 @@ test "a line wider than the pane is as many screen rows as it needs" {
 
     // Wide enough and it is one row again, and so is every row with wrapping
     // off - which is what makes `zw` a rendering switch and not a row model.
-    fx.app.cols = 200;
+    fx.app.vp.cols = 200;
     try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
     fx.app.wrap = false;
     try testing.expectEqual(@as(u16, 1), fx.app.rowHeight(1, body_rows));
 }
@@ -5116,7 +4909,7 @@ test "half a page is half a screen, not half the rows on it" {
     defer fx.deinit();
 
     fx.files[0].lines.text[0] = "a line long enough that a narrow pane has to break it more than once";
-    fx.app.cols = 30;
+    fx.app.vp.cols = 30;
 
     // Row 1 is three screen rows, so it alone is more than half of a six-row
     // body: a page down from the header lands on it rather than past it.
@@ -5200,7 +4993,7 @@ test "hunk stepping crosses into the next file by default" {
     try testing.expect(fx.app.files().len > 1);
 
     // To the last hunk of the first file.
-    while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < fx.app.rows.hunk_rows.len) {
+    while (fx.app.rows.hunkAt(fx.app.vp.cursor).? + 1 < fx.app.rows.hunk_rows.len) {
         try fx.press("]h");
     }
     try fx.expectFile(0);
@@ -5208,7 +5001,7 @@ test "hunk stepping crosses into the next file by default" {
     // One more leaves the file rather than looping inside it.
     try fx.press("]h");
     try fx.expectFile(1);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
     // Crossing a boundary mid-review is not a wrap and must not claim to be.
     try fx.expectNoNotice();
 
@@ -5216,7 +5009,7 @@ test "hunk stepping crosses into the next file by default" {
     try fx.press("[h");
     try fx.expectFile(0);
     const hs = fx.app.rows.hunk_rows;
-    try testing.expectEqual(hs[hs.len - 1] + 1, fx.app.cursor);
+    try testing.expectEqual(hs[hs.len - 1] + 1, fx.app.vp.cursor);
 }
 
 test "the whole review wraps at its far end, and says so" {
@@ -5238,14 +5031,14 @@ test "hunk stepping stays in the file when config says so" {
     fx.app.nav.hunk_crosses_files = false;
 
     const in_file = fx.app.rows.hunk_rows.len;
-    while (fx.app.rows.hunkAt(fx.app.cursor).? + 1 < in_file) {
+    while (fx.app.rows.hunkAt(fx.app.vp.cursor).? + 1 < in_file) {
         try fx.press("]h");
     }
 
     try fx.press("]h");
     // Same file, back at its first hunk.
     try fx.expectFile(0);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
     if (in_file > 1) {
         try fx.expectNotice("wrapped to first hunk");
     }
@@ -5263,12 +5056,12 @@ test "prev hunk steps back a hunk rather than to the top of this one" {
     if (hunks < 2) return; // nothing to step between
 
     try fx.press("]h");
-    const second = fx.app.cursor;
+    const second = fx.app.vp.cursor;
     try testing.expectEqual(fx.app.rows.hunk_rows[1] + 1, second);
 
     try fx.press("[h");
-    try testing.expect(fx.app.cursor != second);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.cursor);
+    try testing.expect(fx.app.vp.cursor != second);
+    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
 }
 
 test "file stepping wraps at both ends, and says so" {
@@ -5301,18 +5094,18 @@ test "the leader forms reach the same commands as the bracket forms" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    const start = fx.app.cursor;
+    const start = fx.app.vp.cursor;
     for ([_][2][]const u8{
         .{ "<Space>nh", "]h" },
         .{ "<Space>ph", "[h" },
     }) |pair| {
-        fx.app.cursor = start;
+        fx.app.vp.cursor = start;
         try fx.press(pair[0]);
-        const by_leader = fx.app.cursor;
+        const by_leader = fx.app.vp.cursor;
 
-        fx.app.cursor = start;
+        fx.app.vp.cursor = start;
         try fx.press(pair[1]);
-        try testing.expectEqual(by_leader, fx.app.cursor);
+        try testing.expectEqual(by_leader, fx.app.vp.cursor);
     }
 
     try fx.press("<Space>nf");
@@ -5348,13 +5141,13 @@ test "keys under the overlay do nothing while it is up" {
     defer fx.deinit();
 
     try fx.press("j");
-    const moved = fx.app.cursor;
+    const moved = fx.app.vp.cursor;
     try testing.expect(moved > 0);
 
     try fx.press("?");
     try fx.press("j");
     try fx.press("j");
-    try testing.expectEqual(moved, fx.app.cursor);
+    try testing.expectEqual(moved, fx.app.vp.cursor);
     // Those keys went into the filter instead, which is what makes the popup
     // searchable - and `q` types rather than quitting the app.
     try fx.press("q");
@@ -5508,7 +5301,7 @@ test "keys under the file list filter it rather than reaching the review" {
     defer fx.deinit();
 
     try fx.press("j");
-    const moved = fx.app.cursor;
+    const moved = fx.app.vp.cursor;
     try fx.press("<Space>f");
 
     // `j` and `q` are a motion and a quit in the review; in here they are
@@ -5601,12 +5394,12 @@ test "a search that finds nothing leaves the cursor put and says why" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    const before = fx.app.cursor;
+    const before = fx.app.vp.cursor;
     try fx.press("/");
     try fx.typeIn("nowhere");
     try fx.press("<CR>");
 
-    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expectEqual(before, fx.app.vp.cursor);
     try testing.expect(fx.app.finder.failed);
     try fx.expectNotice("not found");
 }
@@ -5646,11 +5439,11 @@ test "Tab toggles the chrome away and back" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
 
-    try testing.expect(!fx.app.zen);
+    try testing.expect(!fx.app.vp.zen);
     try fx.press("<Tab>");
-    try testing.expect(fx.app.zen);
+    try testing.expect(fx.app.vp.zen);
     try fx.press("<Tab>");
-    try testing.expect(!fx.app.zen);
+    try testing.expect(!fx.app.vp.zen);
 }
 
 test "e targets the new-file line, and the hunk position on a deleted one" {
@@ -5663,12 +5456,12 @@ test "e targets the new-file line, and the hunk position on a deleted one" {
     try testing.expectEqual(@as(u32, 1), t.line);
 
     // A header carries no line, so there is nothing to open at.
-    fx.app.cursor = 0;
+    fx.app.vp.cursor = 0;
     try testing.expectEqual(@as(u32, 0), fx.app.editTarget().?.line);
 
     var del = try Fixture.withDeletion(testing.allocator, 1);
     defer del.deinit();
-    del.app.cursor = 2; // the deleted line
+    del.app.vp.cursor = 2; // the deleted line
     // It has no line in the file on disk; the hunk's position is where the
     // deletion happened, which is the closest honest answer.
     try testing.expectEqual(@as(u32, 1), del.app.editTarget().?.line);
@@ -5714,13 +5507,13 @@ test "keeping the row across a re-diff never parks the cursor on chrome" {
     // Row 0 is the hunk header. A rebuild that keeps the row must not leave
     // the cursor there - which is exactly the first diff, where there is no
     // previous position and the kept row is 0.
-    fx.app.cursor = 0;
+    fx.app.vp.cursor = 0;
     try fx.app.rebuildRows(.row);
     try fx.expectCursor(1);
-    try testing.expect(fx.app.rows.lineAt(fx.app.cursor) != null);
+    try testing.expect(fx.app.rows.lineAt(fx.app.vp.cursor) != null);
 
     // A position further down is left exactly where it was.
-    fx.app.cursor = 3;
+    fx.app.vp.cursor = 3;
     try fx.app.rebuildRows(.row);
     try fx.expectCursor(3);
 }
@@ -5733,17 +5526,17 @@ test "a resize re-lays out rather than leaving the old scroll behind" {
     // scrolled, then grew, must not keep an offset that now hangs the body
     // off the end of the review - the failure is a screen of blank rows with
     // the cursor nowhere on it.
-    fx.app.cursor = 3;
-    fx.app.scroll = 3;
+    fx.app.vp.cursor = 3;
+    fx.app.vp.scroll = 3;
     try fx.app.handle(.{ .resize = .{ .cols = 100, .rows = 40 } }, 22);
-    try testing.expectEqual(@as(u32, 0), fx.app.scroll);
+    try testing.expectEqual(@as(u32, 0), fx.app.vp.scroll);
 
     // Shrinking to a body shorter than the review scrolls to keep the cursor
     // visible, and never past the last row.
     try fx.app.handle(.{ .resize = .{ .cols = 40, .rows = 6 } }, 2);
-    try testing.expectEqual(@as(u32, 2), fx.app.scroll);
-    try testing.expect(fx.app.cursor >= fx.app.scroll);
-    try testing.expect(fx.app.cursor < fx.app.scroll + 2);
+    try testing.expectEqual(@as(u32, 2), fx.app.vp.scroll);
+    try testing.expect(fx.app.vp.cursor >= fx.app.vp.scroll);
+    try testing.expect(fx.app.vp.cursor < fx.app.vp.scroll + 2);
 
     // The cursor itself is the reader's place in the file and a resize is not
     // a motion: it does not move.
@@ -6002,7 +5795,7 @@ test "a deleted line points at its hunk and says why" {
     // References resolve against the new file. This line is not
     // in it, so the enclosing hunk is the closest honest answer - and the
     // agent is told that is what happened.
-    fx.app.cursor = 2;
+    fx.app.vp.cursor = 2;
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1 (deleted lines in this hunk)", fx.app.payload());
 }
@@ -6012,7 +5805,7 @@ test "a selection spanning a deletion keeps the lines that still exist" {
     defer fx.deinit();
 
     // Rows 1-3 are lines 1, deleted, 3. The range is what survives.
-    fx.app.cursor = 1;
+    fx.app.vp.cursor = 1;
     try fx.press("Vjj");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#1 a.zig:1-3", fx.app.payload());
@@ -6093,7 +5886,7 @@ test "a file too large to render inline opens on zo" {
     try fx.expectNotice("opened");
     // On a line, not on chrome, and at the top: the summary row it was on is
     // not a line, so there is nowhere else honest to land.
-    try testing.expect(fx.app.rows.items[fx.app.cursor] == .line);
+    try testing.expect(fx.app.rows.items[fx.app.vp.cursor] == .line);
 }
 
 test "opening a large file gives its hunks change ids" {
@@ -6458,9 +6251,9 @@ test "an unconfirmed restore writes nothing, and any key but y is no" {
     // And a pending question owns the next key outright - `j` answers it
     // rather than moving the cursor.
     fx.app.pending_restore = ask;
-    const before = fx.app.cursor;
+    const before = fx.app.vp.cursor;
     try fx.app.handle(.{ .key = .{ .codepoint = 'j', .mods = .{} } }, body_rows);
-    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expectEqual(before, fx.app.vp.cursor);
     try testing.expect(fx.app.pending_restore == null);
 }
 
@@ -6568,11 +6361,11 @@ test "; still belongs to f and t the moment either is used" {
 test "; with nothing behind it does nothing rather than guessing" {
     var fx = try Fixture.init(testing.allocator);
     defer fx.deinit();
-    const before = fx.app.cursor;
+    const before = fx.app.vp.cursor;
     try fx.press(";");
-    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expectEqual(before, fx.app.vp.cursor);
     try fx.press(",");
-    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expectEqual(before, fx.app.vp.cursor);
 }
 
 test "every walk has an opposite, or ',' would be a dead key on it" {
@@ -6628,11 +6421,11 @@ test "* on a line with no word says so instead of moving" {
 
     try fx.press("j");
     try fx.press("j"); // `}`, which has nothing to search for
-    const before = fx.app.cursor;
+    const before = fx.app.vp.cursor;
     try fx.press("*");
 
     try fx.expectNotice("no word");
-    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expectEqual(before, fx.app.vp.cursor);
     // And it left the previous search alone rather than clearing it.
     try testing.expect(!fx.app.finder.active());
 }

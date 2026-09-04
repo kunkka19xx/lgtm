@@ -20,6 +20,7 @@ const metrics = @import("../io/metrics.zig");
 const proc = @import("../io/proc.zig");
 const tty_mod = @import("../io/tty.zig");
 const watch = @import("../io/watch.zig");
+const git = @import("../core/git.zig");
 
 const bridge = @import("../bridge/bridge.zig");
 
@@ -83,8 +84,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         .gutter => .gutter,
         .line => .line,
     };
-    app.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
-    app.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
+    app.vp.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
+    app.vp.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
     app.presets_cfg = opts.cfg.presets;
     app.comments_inline = opts.cfg.ui.comments == .inline_;
@@ -126,7 +127,16 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // The reader services SIGWINCH on its own wake, because the handler is
     // only allowed to set a flag - see `io/input.zig`.
     reader.winsize = &winsize;
-    var watcher = watch.Watcher.init(gpa, io, &queue, .{ .quiet_ms = watch.default_quiet_ms });
+    // The directories git tracks, for the doorbell. Asked once: a new one
+    // appearing is caught by its parent, which is why the ancestors are in the
+    // set too. A failure here is not one - `notify.open` is handed nothing and
+    // the watcher polls, which is what it did before there was a doorbell.
+    const watch_dirs: [][]const u8 = git.trackedDirs(gpa, io) catch &.{};
+    defer if (watch_dirs.len > 0) git.freePaths(gpa, @constCast(watch_dirs));
+    var watcher = watch.Watcher.init(gpa, io, &queue, .{
+        .quiet_ms = watch.default_quiet_ms,
+        .watch_dirs = watch_dirs,
+    });
     if (!opts.once) {
         winsize.register() catch {};
         try reader.start();
@@ -154,7 +164,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     try vx.resize(gpa, w, ws);
     // Resize events keep this in step from here on; the app needs the width
     // because a wrapped row is more screen rows than one (`ui/wrap.zig`).
-    app.cols = ws.cols;
+    app.vp.cols = ws.cols;
 
     // Before the first diff, so lgtm's own state never appears in it. Repairs
     // a `.lgtm/` left behind by a version that did not write the ignore; a no-op
@@ -190,14 +200,14 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
                 try vx.resize(gpa, w, ws);
                 try app.handle(
                     .{ .resize = .{ .cols = ws.cols, .rows = ws.rows } },
-                    render.bodyHeight(ws.rows, app.zen),
+                    render.bodyHeight(ws.rows, app.vp.zen),
                 );
             }
         } else |_| {}
 
         // Once for the iteration: every use below is the same answer, and a
         // resize inside `applyEvents` is picked up by the next pass.
-        const body = render.bodyHeight(ws.rows, app.zen);
+        const body = render.bodyHeight(ws.rows, app.vp.zen);
         app.clampScroll(body);
 
         try drawFrame(&app, &vx, w, body);
@@ -337,7 +347,7 @@ fn applyEvents(
             ws.* = .{ .cols = ev.resize.cols, .rows = ev.resize.rows, .x_pixel = 0, .y_pixel = 0 };
             try vx.resize(gpa, w, ws.*);
         }
-        try app.handle(ev, render.bodyHeight(ws.rows, app.zen));
+        try app.handle(ev, render.bodyHeight(ws.rows, app.vp.zen));
     }
 }
 
@@ -415,7 +425,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
     const win = vx.window();
     // Only known once the terminal has answered the capability query, so it is
     // read per frame rather than captured at startup.
-    app.width_method = vx.screen.width_method;
+    app.vp.width_method = vx.screen.width_method;
 
     if (app.view(body)) |v| {
         var shown = v;

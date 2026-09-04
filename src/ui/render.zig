@@ -34,6 +34,7 @@ pub const HelpView = frame_mod.HelpView;
 pub const ComposeView = frame_mod.ComposeView;
 pub const PresetEntry = frame_mod.PresetEntry;
 pub const Placement = frame_mod.Placement;
+pub const Totals = frame_mod.Totals;
 pub const Highlight = frame_mod.Highlight;
 pub const CommentMark = frame_mod.CommentMark;
 pub const FileEntry = frame_mod.FileEntry;
