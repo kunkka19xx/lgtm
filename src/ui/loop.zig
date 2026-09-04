@@ -167,6 +167,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
     // mark picked up after it, when there are files to attach it to.
     app.snap = snapshot.Store.open(gpa, io, environ);
+    // After `open`, which builds the store: the cap is policy the config owns
+    // and the store only applies.
+    if (app.snap) |*store| store.keep = opts.cfg.snapshot.keep;
 
     try app.rediff();
     app.restoreMark();

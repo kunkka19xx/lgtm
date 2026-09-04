@@ -3464,14 +3464,25 @@ pub const App = struct {
     /// The same call `m` makes, with a different reason and without touching
     /// `reviewed_turn`: a turn nobody has read must not mark itself read, or
     /// the gutter would go blank exactly when it had something to say.
+    /// Every path the snapshot has to carry, which is not the review's list.
+    ///
+    /// `[review] ignore` keeps a file off the screen; it must never keep one
+    /// out of the safety net. Staging only what the review shows wrote HEAD's
+    /// copy of an ignored file into the turn - or nothing at all, for an
+    /// untracked one - so a restore silently reverted or deleted work the
+    /// reader had never been shown. Ask git, which cannot drift from the
+    /// filter because it has never heard of it.
+    ///
+    /// Caller frees with `git.freePaths`.
+    fn snapshotPaths(self: *App) ?[][]const u8 {
+        return git.snapshotPaths(self.gpa, self.io) catch null;
+    }
+
     fn snapshotTurn(self: *App) bool {
         var store = &(if (self.snap) |*s| s else return false).*;
-        const fs = self.files();
-        if (fs.len == 0) return false;
-
-        var paths = self.gpa.alloc([]const u8, fs.len) catch return false;
-        defer self.gpa.free(paths);
-        for (fs, 0..) |*f, i| paths[i] = f.path();
+        const paths = self.snapshotPaths() orelse return false;
+        defer git.freePaths(self.gpa, paths);
+        if (paths.len == 0) return false;
 
         return store.take(paths, "turn") != null;
     }
@@ -3481,12 +3492,9 @@ pub const App = struct {
     /// is still perfectly good for this session without them.
     fn snapshotMark(self: *App) bool {
         var store = &(if (self.snap) |*s| s else return false).*;
-        const fs = self.files();
-        if (fs.len == 0) return false;
-
-        var paths = self.gpa.alloc([]const u8, fs.len) catch return false;
-        defer self.gpa.free(paths);
-        for (fs, 0..) |*f, i| paths[i] = f.path();
+        const paths = self.snapshotPaths() orelse return false;
+        defer git.freePaths(self.gpa, paths);
+        if (paths.len == 0) return false;
 
         if (store.take(paths, "mark") == null) return false;
         store.markReviewed();
@@ -3501,13 +3509,11 @@ pub const App = struct {
     /// day it is not.
     pub fn takeBaseline(self: *App) void {
         var store = &(if (self.snap) |*s| s else return).*;
-        const fs = self.files();
         // No early return on a clean tree. The baseline is what gives the
         // first turn a parent to be diffed from, and without one it opens
         // empty - which is what a clean start used to do.
-        var paths = self.gpa.alloc([]const u8, fs.len) catch return;
-        defer self.gpa.free(paths);
-        for (fs, 0..) |*f, i| paths[i] = f.path();
+        const paths = self.snapshotPaths() orelse return;
+        defer git.freePaths(self.gpa, paths);
         _ = store.baseline(paths);
     }
 

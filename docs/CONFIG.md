@@ -112,6 +112,30 @@ compose = "bottom"
 scroll_ms = 0        # instant
 ```
 
+## `[snapshot]`
+
+| Key | Default | |
+|---|---|---|
+| `keep` | `36` | Turns of the current session kept before the oldest are pruned. Minimum 4 |
+
+```toml
+[snapshot]
+keep = 36
+```
+
+Pruning deletes refs; the objects go when `git gc` next runs. **Two turns are
+pinned whatever `keep` says:** the baseline, `0 original`, which is the tree as
+it was before the agent ran and the one snapshot nothing else can reconstruct;
+and the turn the mark sits on, which is what `✓`, "since the mark" and `]m` all
+point at. So lowering `keep` costs the middle of a long session and neither of
+its ends. Other sessions are never pruned - they are somebody's afternoon, and
+git shares the objects anyway.
+
+Snapshots carry **every** changed file git reports, including ones
+`[review] ignore` keeps off the screen. That is deliberate: a file hidden from
+the review is still a file an agent can destroy, and the two kinds of ignoring
+are different questions. `.gitignore` is still respected.
+
 ## `[review]`
 
 | Key | |

@@ -430,33 +430,49 @@ fn drawLine(
     // The sign and the number go on the first row only. A continuation row
     // repeating them would read as a second line of the file - and a first row
     // scrolled off the top takes them with it.
+    // A note in the last gutter column - the one between the line number and
+    // the code, which is the only one a marker can have without the code
+    // moving. Resolved before anything is drawn, because it decides where the
+    // mark's bar starts and that is true even when this row is off the top.
+    var note_style: ?vaxis.Style = null;
+    const no_new = lines.new_no[li];
+    if (!old and no_new != 0 and col > 0) {
+        for (v.notes) |m| {
+            if (m.line != no_new) continue;
+            note_style = withBg(switch (m.state) {
+                .open => t.comment_open,
+                .sent => t.comment_sent,
+                .stale => t.comment_stale,
+            }, bg);
+            break;
+        }
+    }
+
+    // The sign, the number and the note's dot go on the first row only. A
+    // continuation row repeating the number would read as a second line of the
+    // file, and the dot is a point - the same reason the marker on a note's
+    // own body is drawn once however far the note wraps.
     if (onScreen(f, row)) |at| {
         f.put(at, 0, prefix, kind_style);
+        if (note_style) |st| f.put(at, col - 1, g.comment_mark, st);
+    }
 
-        // A note is marked in the last gutter column, after the prefix has
-        // been drawn over it - the column between the line number and the
-        // code is the only one a marker can have without the code moving.
-        var noted = false;
-        const no_new = lines.new_no[li];
-        if (!old and no_new != 0 and col > 0) {
-            for (v.notes) |m| {
-                if (m.line != no_new) continue;
-                f.put(at, col - 1, g.comment_mark, withBg(switch (m.state) {
-                    .open => t.comment_open,
-                    .sent => t.comment_sent,
-                    .stale => t.comment_stale,
-                }, bg));
-                noted = true;
-                break;
-            }
-        }
-
-        // A change newer than the mark. The flow view has a column of its own
-        // for it, between the sign and the number; the split view shares the
-        // note's, and a note wins there. A note is something the reader put
-        // where it is on purpose, and `]m` walks them to the mark anyway.
+    // The mark's bar is not a point, and goes on every screen row the line
+    // takes. Stopping it at the first row drew a dashed column down the gutter
+    // of any wrapped run, which is the opposite of what a bar is for: `]m`
+    // uses one rather than a symbol precisely so a run of fresh lines reads as
+    // one block, and at half a pane almost everything wraps.
+    //
+    // The flow view has a column of its own for it, between the sign and the
+    // number. The split view shares the note's, so the dot heads the column
+    // and the bar picks up on the row below rather than being dropped for the
+    // whole line - a marker column with a hole in it is what this exists to
+    // avoid.
+    if (fresh and col > 1) {
         const mark_col: u16 = if (side == null) 1 else col -| 1;
-        if (fresh and col > 1 and !(side != null and noted)) {
+        var r: i32 = if (side != null and note_style != null) row + 1 else row;
+        while (r < row + height) : (r += 1) {
+            const at = onScreen(f, r) orelse continue;
             f.put(at, mark_col, g.fresh_mark, withBg(t.fresh, bg));
         }
     }

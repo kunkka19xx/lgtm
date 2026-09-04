@@ -354,6 +354,50 @@ pub fn changedPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
     return list.toOwnedSlice(gpa);
 }
 
+/// Every path the working tree has changed against HEAD, tracked and not.
+///
+/// What the snapshot store stages. Deliberately *not* the review's file list:
+/// `[review] ignore` is a display preference, and a file kept off the screen is
+/// still a file the agent can destroy. Staging only what the review shows put
+/// HEAD's copy of an ignored file into the snapshot - or, for an untracked one,
+/// nothing at all - so restoring a turn reverted or deleted work the reader had
+/// never been told was at risk.
+///
+/// `.gitignore` is still respected, because `--exclude-standard` is git's own
+/// answer and hard boundary 5 is about `node_modules`, not about a pattern the
+/// reader typed to keep their review tidy.
+///
+/// Two subprocesses rather than one: `git diff HEAD` cannot see a new file, and
+/// a new file is exactly what an agent makes.
+pub fn snapshotPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |p| gpa.free(p);
+        list.deinit(gpa);
+    }
+    try collectPaths(gpa, io, &list, &.{ "git", "diff", "HEAD", "--name-only" });
+    try collectPaths(gpa, io, &list, &.{ "git", "ls-files", "--others", "--exclude-standard" });
+    return list.toOwnedSlice(gpa);
+}
+
+fn collectPaths(
+    gpa: Allocator,
+    io: std.Io,
+    out: *std.ArrayList([]const u8),
+    argv: []const []const u8,
+) Error!void {
+    const res = try proc.run(gpa, io, argv, max_diff_bytes);
+    defer res.deinit(gpa);
+    if (res.exit_code != 0) return error.GitFailed;
+
+    var it = std.mem.splitScalar(u8, res.stdout, '\n');
+    while (it.next()) |line| {
+        const p = std.mem.trim(u8, line, " \t\r");
+        if (p.len == 0) continue;
+        try out.append(gpa, try gpa.dupe(u8, p));
+    }
+}
+
 /// A ceiling on the mention list. At this many paths one filter pass is a few
 /// milliseconds against an 8 ms frame budget; past it the box stutters as you
 /// type, which is worse than an incomplete list you can still filter.

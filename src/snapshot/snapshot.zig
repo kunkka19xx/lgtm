@@ -24,8 +24,19 @@
 //
 // **The paths come from the caller, already ignore-clean.** `update-index
 // --add` is plumbing and will happily stage `node_modules`. What keeps hard
-// boundary 5 true is that the path list is the watcher's, which is
-// `git status --porcelain`'s, which is `.gitignore`-clean by construction.
+// boundary 5 true is that the path list is git's own, from
+// `core/git.zig`'s `snapshotPaths` - `git diff HEAD` plus
+// `ls-files --others --exclude-standard`, which is `.gitignore`-clean by
+// construction.
+//
+// It is deliberately *not* the review's file list. `[review] ignore` is a
+// display preference, and a file kept off the screen is still a file the agent
+// can destroy; staging only what the review showed put HEAD's copy of an
+// ignored file into the turn, or nothing at all for an untracked one, so a
+// restore reverted or deleted work nobody had been warned about. The two kinds
+// of ignoring look alike and are not: git's is about what belongs in the
+// repository, the reader's is about what belongs on their screen, and only the
+// first has any business here.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -44,13 +55,24 @@ pub const state_path = ".lgtm/state.json";
 /// does not turn up in today's timeline as though it were part of it.
 pub const session_gap_ms: i64 = 4 * 60 * 60 * 1000;
 
-/// How many turns of the current session are kept.
+/// How many turns of the current session are kept. `[snapshot] keep`.
 ///
 /// A cap rather than an age, because what makes an old turn worth deleting is
 /// that nobody will scroll that far, not that time passed. Pruning is ref
 /// deletion; the objects go when `git gc` next runs, which is git's business
 /// and not ours.
-pub const default_keep: u32 = 100;
+///
+/// Thirty-six rather than the hundred this started at, which was a number
+/// picked when nobody had run a session long enough to test it. A hundred-turn
+/// list is not a list - the reader who found this had a hundred rows and
+/// sixty-five more below them, and no row in it was the one they wanted. The
+/// two ends are pinned whatever the cap says (`toPrune`), so lowering it costs
+/// the middle of a long session and nothing a reader was going to reach for.
+pub const default_keep: u32 = 36;
+
+/// The floor `[snapshot] keep` may be set to. A safety net that holds four
+/// turns is a safety net for the last four minutes.
+pub const min_keep: u32 = 4;
 
 /// Room for `<seconds>-<suffix>`, which is what a session id is.
 pub const max_session = 32;
@@ -119,16 +141,29 @@ pub fn continues(state: *const State, now_ms: i64) bool {
 ///
 /// Other sessions are left alone. They are somebody's afternoon, they cost
 /// almost nothing because git shares the objects, and deleting them is how a
-/// safety net becomes the thing that lost the work. Only the current session's
-/// oldest turns are pruned, and never the baseline: `<session>/0` is the tree
-/// as it was before the agent ran, which is the one snapshot nobody can
-/// reconstruct from any other.
+/// safety net becomes the thing that lost the work.
+///
+/// Two turns of this session are pinned however far back they fall.
+///
+/// The **baseline**, `<session>/0`, is the tree as it was before the agent ran
+/// - the one snapshot nobody can reconstruct from any other.
+///
+/// The **marked** turn is where the reader stopped reading, and `✓`, "since
+/// the mark" and `]m` all point at it. A cap low enough to be useful is a cap
+/// low enough to walk past a mark that has stood since this morning, and
+/// pruning it would break the one feature whose whole job is to remember
+/// something older than the reader's attention span. It costs one ref.
+///
+/// Pruning a turn in the middle leaves no hole in the data: the snapshots are
+/// a commit chain, so every object stays reachable from the newest ref. What
+/// goes is the *name*, which is what the list enumerates.
 pub fn toPrune(
     gpa: Allocator,
     refs: []const []const u8,
     session: []const u8,
     latest: u32,
     keep: u32,
+    reviewed: u32,
 ) Allocator.Error![][]const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     errdefer out.deinit(gpa);
@@ -137,7 +172,7 @@ pub fn toPrune(
 
     for (refs) |ref| {
         const turn = turnOf(ref, session) orelse continue;
-        if (turn == 0) continue;
+        if (turn == 0 or turn == reviewed) continue;
         if (turn < oldest_kept) try out.append(gpa, ref);
     }
     return out.toOwnedSlice(gpa);
@@ -462,7 +497,8 @@ pub const Store = struct {
             listed.refs,
             self.state.name(),
             self.state.latest_turn,
-            self.keep,
+            @max(self.keep, min_keep),
+            self.state.reviewed_turn,
         ) catch return;
         defer self.gpa.free(doomed);
         for (doomed) |ref| gitobj.deleteRef(self.gpa, self.io, ref);
@@ -560,7 +596,7 @@ test "pruning keeps the recent turns, the baseline, and every other session" {
         "refs/heads/main", // not ours at all
     };
 
-    const doomed = try toPrune(gpa, &refs, "s1", 4, 2);
+    const doomed = try toPrune(gpa, &refs, "s1", 4, 2, 0);
     defer gpa.free(doomed);
 
     // latest 4, keep 2 -> turns below 2 go, except turn 0.
@@ -573,17 +609,42 @@ test "the baseline is never pruned, however long the session runs" {
     // `<session>/0` is the working tree as it was before the agent ran, and it
     // is the one snapshot no other snapshot can reconstruct (5.5).
     const refs = [_][]const u8{ "refs/lgtm/s1/0", "refs/lgtm/s1/1", "refs/lgtm/s1/500" };
-    const doomed = try toPrune(gpa, &refs, "s1", 500, 1);
+    const doomed = try toPrune(gpa, &refs, "s1", 500, 1, 0);
     defer gpa.free(doomed);
 
     for (doomed) |ref| try testing.expect(!std.mem.endsWith(u8, ref, "/0"));
     try testing.expectEqual(@as(usize, 1), doomed.len);
 }
 
+test "the marked turn survives a cap that walked past it" {
+    const gpa = testing.allocator;
+    const refs = [_][]const u8{
+        "refs/lgtm/s1/0",
+        "refs/lgtm/s1/3", // where the reader stopped reading, hours ago
+        "refs/lgtm/s1/4",
+        "refs/lgtm/s1/5",
+        "refs/lgtm/s1/40",
+    };
+
+    // Latest 40, keep 2: everything below 38 is doomed - except the baseline,
+    // and except turn 3, which is what `✓`, "since the mark" and `]m` all
+    // point at. A cap low enough to be useful walks past a mark that has stood
+    // since the morning, and taking it would break the one feature whose job
+    // is to remember something older than the reader's attention.
+    const doomed = try toPrune(gpa, &refs, "s1", 40, 2, 3);
+    defer gpa.free(doomed);
+
+    try testing.expectEqual(@as(usize, 2), doomed.len);
+    for (doomed) |ref| {
+        try testing.expect(!std.mem.endsWith(u8, ref, "/0"));
+        try testing.expect(!std.mem.endsWith(u8, ref, "/3"));
+    }
+}
+
 test "nothing is pruned before there is more than the cap" {
     const gpa = testing.allocator;
     const refs = [_][]const u8{ "refs/lgtm/s1/0", "refs/lgtm/s1/1", "refs/lgtm/s1/2" };
-    const doomed = try toPrune(gpa, &refs, "s1", 2, default_keep);
+    const doomed = try toPrune(gpa, &refs, "s1", 2, default_keep, 0);
     defer gpa.free(doomed);
     try testing.expectEqual(@as(usize, 0), doomed.len);
 }

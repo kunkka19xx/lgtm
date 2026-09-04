@@ -27,6 +27,7 @@ const Allocator = std.mem.Allocator;
 const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
 const rows = @import("ui/rows.zig");
+const snapshot = @import("snapshot/snapshot.zig");
 const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
 const toml = @import("toml.zig");
@@ -126,8 +127,17 @@ pub const Nav = struct {
     mark_on_submit: bool = true,
 };
 
+/// `[snapshot]`. The safety net's one dial.
+pub const Snapshot = struct {
+    /// Turns of the current session kept before the oldest are pruned. The
+    /// baseline and the marked turn are pinned whatever this says, so lowering
+    /// it costs the middle of a long session and neither of its ends.
+    keep: u32 = snapshot.default_keep,
+};
+
 pub const Config = struct {
     nav: Nav = .{},
+    snapshot: Snapshot = .{},
     ui: Ui = .{},
     diff: Diff = .{},
     /// The resolved theme: a bundled palette, then whatever slots the file
@@ -163,7 +173,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, diff, keys, theme, presets, review };
+const Section = enum { nav, ui, diff, snapshot, keys, theme, presets, review };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -274,6 +284,19 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.nav.scrolloff = @intCast(n);
+                } else self.unknownKey(src, line, section, key);
+            },
+            .snapshot => {
+                if (std.mem.eql(u8, key, "keep")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    // A net that holds four turns holds the last four minutes.
+                    // The ceiling is where a list stops being one and a session
+                    // that long has other problems.
+                    if (n < snapshot.min_keep or n > 10_000) {
+                        self.note(src, line, "snapshot.keep must be between {d} and 10000", .{snapshot.min_keep});
+                        return;
+                    }
+                    self.cfg.snapshot.keep = @intCast(n);
                 } else self.unknownKey(src, line, section, key);
             },
             .diff => {
@@ -1023,6 +1046,30 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
     // line was trying to change.
     try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
     try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
+}
+
+test "snapshot.keep has a floor, because a net that small is not one" {
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expectEqual(snapshot.default_keep, d.cfg.snapshot.keep);
+
+    var ok = loadText(
+        \\[snapshot]
+        \\keep = 200
+    );
+    defer ok.deinit();
+    try testing.expectEqual(@as(u32, 200), ok.cfg.snapshot.keep);
+    try testing.expectEqual(@as(usize, 0), ok.problems.items.len);
+
+    // Reported and ignored, not clamped in silence: the reader asked for a
+    // safety net two turns deep and should be told they cannot have one.
+    var tiny = loadText(
+        \\[snapshot]
+        \\keep = 2
+    );
+    defer tiny.deinit();
+    try testing.expectEqual(snapshot.default_keep, tiny.cfg.snapshot.keep);
+    try testing.expectEqual(@as(usize, 1), tiny.problems.items.len);
 }
 
 test "diff.layout takes flow, split, and the format's own name for flow" {

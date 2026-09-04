@@ -291,7 +291,11 @@ pub const Review = struct {
         }
 
         // Buffers are the source of truth; the diff is an overlay on them.
+        const load_span = metrics.span(.source_load);
         self.sources = source.load(arena, self.io, null, parsed.diff) catch null;
+        load_span.end();
+
+        const attach_span = metrics.span(.attach);
         if (self.sources) |srcs| {
             for (parsed.diff.files) |*f| {
                 const s = srcs.find(f.path()) orelse continue;
@@ -303,6 +307,7 @@ pub const Review = struct {
                 };
             }
         }
+        attach_span.end();
 
         var index: u32 = 0;
         if (keep_path) |p| {

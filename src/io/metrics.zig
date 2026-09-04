@@ -31,6 +31,14 @@ pub const Kind = enum {
     /// claim made for it is that it is a pass over lines already in memory,
     /// and a claim like that should be checkable.
     test_risk,
+    /// Reading both sides of every changed file: the HEAD blobs out of
+    /// `cat-file --batch`, the working copies off disk. Split from
+    /// `git_subprocess`, which only covers the diff itself, because the two
+    /// have completely different fixes if either turns out to be the cost.
+    source_load,
+    /// Verifying every diff line against the buffer it came from, and
+    /// indexing line starts. Pure CPU over bytes already in memory.
+    attach,
     lex,
     layout,
     render,
