@@ -152,17 +152,15 @@ Measured on macOS arm64, ReleaseFast, in this repository:
 
 | | |
 |---|---|
-| Binary | 726 KB, one dependency (`libSystem`) |
-| Peak RSS | 1.6 MB |
-| Cold start | under 10 ms |
-| Frame | 0.11 ms at 80x26 |
-| Re-anchoring comments | 100% across the fixture set |
+| Binary | 766 KB, one dependency (`libSystem`) |
+| Frame | 0.30 ms at 80x26 |
+| Re-diff | 40 ms: one `git diff` plus the parse |
+| Re-anchoring comments | 100% across the fixture set (24/24), 1.8 ms per 50 |
 
 Everything durable is a plain file in `.lgtm/` - comments as jsonl, reviews as
 markdown. Kill it and restart it; you lose scroll position.
 
-Snapshots, when they land, live in git's own object store under
-`refs/lgtm/**`. That namespace is invisible to `git branch` and `git status`,
+Snapshots live in git's own object store under `refs/lgtm/**`. That namespace is invisible to `git branch` and `git status`,
 but `git log --all` walks every ref, so those commits will show up there. They
 are ordinary objects: `git show refs/lgtm/<session>/3:src/auth.zig` reads a file
 out of one without lgtm installed, and deleting the refs is all it takes to be
