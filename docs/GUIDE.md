@@ -247,6 +247,7 @@ documents itself. What follows is the defaults.
 | `;` `,` | repeat the last jump, either way (see below) |
 | `<C-d>` `<C-u>` | half a page |
 | `gg` `G` | first and last line |
+| `}` `{` | next and previous break: a blank line, or a hunk edge |
 | `zz` | centre the cursor line |
 
 ### Jumping

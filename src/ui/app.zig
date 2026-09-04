@@ -851,6 +851,8 @@ pub const App = struct {
             } else if (self.last_find) |f| self.applyFind(f.flip()),
             .next_hunk => try self.stepHunk(1),
             .prev_hunk => try self.stepHunk(-1),
+            .next_break => self.stepBreak(1),
+            .prev_break => self.stepBreak(-1),
             .next_file => {
                 self.clearPreview();
                 try self.stepFile(1);
@@ -1732,6 +1734,62 @@ pub const App = struct {
 
         // And an ordinary middle turn does not.
         try testing.expect(!fx.app.turnKept(18, 22, 40, marked));
+    }
+
+    test "a break is a blank line or a piece of chrome, and a note is neither" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Row 0 is the hunk header: chrome, and a gap the eye already stops at.
+        try testing.expect(fx.app.isBreak(0));
+        // Rows 1..3 are the file's lines, none of them blank.
+        try testing.expect(!fx.app.isBreak(1));
+        try testing.expect(!fx.app.isBreak(2));
+
+        // A line that is nothing but whitespace is blank: it renders as a gap, so
+        // it has to behave as one.
+        fx.files[0].lines.text[1] = "   \t ";
+        try testing.expect(fx.app.isBreak(2));
+    }
+
+    test "the paragraph motions cross a run of blanks as one gap" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Rows: 0 header, 1 code, 2 blank, 3 blank. Two blank lines between two
+        // functions is one gap, not two - which is why vim separates paragraphs
+        // by "one or more" blank lines, and why pressing `}` twice should cross
+        // two gaps rather than the two halves of one.
+        fx.files[0].lines.text[1] = "";
+        fx.files[0].lines.text[2] = "";
+        fx.app.vp.cursor = 1;
+
+        fx.app.stepBreak(1);
+        try testing.expectEqual(@as(u32, 2), fx.app.vp.cursor);
+        // Already inside the run: the next `}` steps out of it, finds no further
+        // break, and stops at the end rather than refusing.
+        fx.app.stepBreak(1);
+        try testing.expectEqual(fx.app.rows.len() - 1, fx.app.vp.cursor);
+    }
+
+    test "the paragraph motions stop at the ends rather than wrapping" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // `]h` and `]f` wrap and say so; these do not. vim's paragraph motions
+        // stop at the ends of the buffer, and one that silently returned to the
+        // top would be a different key wearing the same glyph.
+        fx.app.vp.cursor = fx.app.rows.len() - 1;
+        fx.app.stepBreak(1);
+        try testing.expectEqual(fx.app.rows.len() - 1, fx.app.vp.cursor);
+
+        // Backwards, the header is the first break there is; past it the motion
+        // lands on the first row that holds a line rather than on chrome.
+        fx.app.vp.cursor = 1;
+        fx.app.stepBreak(-1);
+        try testing.expectEqual(@as(u32, 0), fx.app.vp.cursor);
+        fx.app.stepBreak(-1);
+        try testing.expectEqual(fx.app.rows.firstLineRow(), fx.app.vp.cursor);
     }
 
     test "a run is folded only when every turn in it is unremarkable" {
@@ -4032,6 +4090,78 @@ pub const App = struct {
             if (li < fresh.len and fresh[li]) return row;
         }
         return null;
+    }
+
+    /// Whether a row is a break: `{` and `}` land on these.
+    ///
+    /// Two kinds, and the pair is the point. A **blank line of code**, which is
+    /// what `{` and `}` mean everywhere else and what a reader reaches for
+    /// without thinking. And **chrome** - a hunk header, the rule between two
+    /// hunks, a summarised file - because those are gaps the eye already stops
+    /// at, and a paragraph motion that walked straight past a visible break in
+    /// the page would read as broken.
+    ///
+    /// A note is not one. It hangs *under* the line it belongs to and is part
+    /// of reading that line, not a gap between two.
+    fn isBreak(self: *App, row: u32) bool {
+        if (row >= self.rows.len()) return false;
+        if (self.rows.items[row] == .note) return false;
+        const li = self.lineAt(row) orelse return true;
+        const f = self.current() orelse return false;
+        if (li >= f.lines.text.len) return false;
+        return std.mem.trim(u8, f.lines.text[li], " \t\r").len == 0;
+    }
+
+    /// `}` and `{`.
+    ///
+    /// **A run of breaks is one break.** Two blank lines between functions is
+    /// one gap, not two, and a hunk header sitting against the rule above it
+    /// is one edge - vim separates paragraphs by "one or more" blank lines for
+    /// the same reason, and a motion that stopped twice in the same gap would
+    /// need pressing twice to cross it.
+    ///
+    /// No wrap, unlike `]h` and `]f`. vim's paragraph motions stop at the ends
+    /// of the buffer and a reader who knows them knows that; one that silently
+    /// returned to the top would be a different key wearing the same glyph.
+    /// Stopping means landing on the last row rather than refusing, which is
+    /// also what vim does.
+    fn stepBreak(self: *App, delta: i32) void {
+        const n = self.rows.len();
+        if (n == 0) return;
+        const last = n - 1;
+        const back = delta < 0;
+
+        var row = self.vp.cursor;
+        // Out of the gap the cursor is already standing in, so `}` pressed
+        // twice crosses two gaps rather than the two halves of one.
+        while (self.isBreak(row)) {
+            if (back) {
+                if (row == 0) return self.landOn(self.rows.firstLineRow());
+                row -= 1;
+            } else {
+                if (row >= last) return self.landOn(last);
+                row += 1;
+            }
+        }
+        // Then to the near edge of the next one.
+        while (true) {
+            if (back) {
+                if (row == 0) return self.landOn(self.rows.firstLineRow());
+                row -= 1;
+            } else {
+                if (row >= last) return self.landOn(last);
+                row += 1;
+            }
+            if (self.isBreak(row)) return self.landOn(row);
+        }
+    }
+
+    /// Arrive at a row the way a jump does: the column resets to the start of
+    /// the line, which is what every paragraph motion does and what makes two
+    /// `}` in a row read as one movement rather than two.
+    fn landOn(self: *App, row: u32) void {
+        self.want_col = 0;
+        self.moveTo(row);
     }
 
     fn stepHunk(self: *App, delta: i32) !void {

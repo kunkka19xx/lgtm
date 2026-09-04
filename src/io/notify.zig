@@ -98,8 +98,19 @@ const backend = switch (builtin.os.tag) {
 
 /// `std.posix` in 0.16 has no `close`: descriptors are `std.Io.File` there,
 /// and these are raw queue and directory descriptors that never become one.
+///
+/// Per OS, because `std.c.close` is only reachable where libc is linked -
+/// which macOS and the BSDs always do and Linux does not. Going through
+/// `std.os.linux` there is the same syscall without the dependency, and a
+/// switch on `builtin.os.tag` analyses only the arm it takes.
 fn closeFd(fd: std.posix.fd_t) void {
-    _ = std.c.close(fd);
+    switch (builtin.os.tag) {
+        .linux => _ = std.os.linux.close(fd),
+        .macos, .ios, .tvos, .watchos, .visionos, .driverkit, .maccatalyst => _ = std.c.close(fd),
+        .freebsd, .netbsd, .openbsd, .dragonfly => _ = std.c.close(fd),
+        // No backend, so nothing was ever opened to close.
+        else => {},
+    }
 }
 
 const Unsupported = struct {
@@ -191,8 +202,14 @@ const Inotify = struct {
         std.os.linux.IN.MODIFY | std.os.linux.IN.MOVED_TO | std.os.linux.IN.MOVED_FROM |
         std.os.linux.IN.CLOSE_WRITE | std.os.linux.IN.MOVE_SELF | std.os.linux.IN.DELETE_SELF;
 
+    /// The raw syscalls rather than a `std.posix` wrapper: 0.16 has none for
+    /// inotify, and these return a `usize` that is an errno when it is
+    /// negative. A failure at any point here means the caller polls, so every
+    /// one of them is a `return null` rather than an error to carry upwards.
     fn open(gpa: Allocator, dirs: []const []const u8) ?Notify {
-        const fd = std.posix.inotify_init1(std.os.linux.IN.NONBLOCK | std.os.linux.IN.CLOEXEC) catch return null;
+        const rc = std.os.linux.inotify_init1(std.os.linux.IN.NONBLOCK | std.os.linux.IN.CLOEXEC);
+        if (std.os.linux.errno(rc) != .SUCCESS) return null;
+        const fd: std.posix.fd_t = @intCast(rc);
         var ok = false;
         defer if (!ok) closeFd(fd);
 
@@ -203,7 +220,11 @@ const Inotify = struct {
             @memcpy(buf[0..path.len], path);
             buf[path.len] = 0;
             const z: [*:0]const u8 = @ptrCast(&buf);
-            _ = std.posix.inotify_add_watchZ(fd, z, mask) catch continue;
+            const w = std.os.linux.inotify_add_watch(fd, z, mask);
+            // A directory that will not open is skipped, not fatal: a
+            // permission error on one path is not a reason to give up
+            // notification for the rest.
+            if (std.os.linux.errno(w) != .SUCCESS) continue;
             added += 1;
         }
         if (added == 0) return null;

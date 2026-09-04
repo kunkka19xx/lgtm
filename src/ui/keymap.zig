@@ -107,6 +107,15 @@ pub const Command = enum {
     undo_restore,
     next_fresh,
     prev_fresh,
+    /// `}` and `{`: the next and previous break in the body.
+    ///
+    /// vim's paragraph motions, over what a diff has instead of paragraphs. A
+    /// break is a blank line of code or a piece of chrome - a hunk header, the
+    /// rule between two hunks - because those are the gaps a reader's eye
+    /// already stops at. Blank lines alone would be useless in a hunk that has
+    /// none; hunk headers alone would be `]h` under two more keys.
+    next_break,
+    prev_break,
     /// Walk the weakened tests: a removed test declaration, an added skip.
     /// `w` for weakened, and it is the one letter in that family still free.
     next_risk,
@@ -182,6 +191,8 @@ pub const Command = enum {
             .prev_comment => .next_comment,
             .next_fresh => .prev_fresh,
             .prev_fresh => .next_fresh,
+            .next_break => .prev_break,
+            .prev_break => .next_break,
             .next_risk => .prev_risk,
             .prev_risk => .next_risk,
             .next_turn => .prev_turn,
@@ -210,6 +221,8 @@ pub const Command = enum {
             .center,
             .next_hunk,
             .prev_hunk,
+            .next_break,
+            .prev_break,
             .search_next,
             .search_prev,
             .search_word,
@@ -494,6 +507,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('['), c('w') }, .command = .prev_risk, .desc = "previous weakened test (wraps)", .hint = null, .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('w') }, .command = .next_risk, .group = .jump },
     .{ .chords = &.{ leader, c('p'), c('w') }, .command = .prev_risk, .group = .jump },
+    .{ .chords = &.{c('}')}, .command = .next_break, .desc = "next and previous break: a blank line or a hunk edge", .hint = null, .group = .move },
+    .{ .chords = &.{c('{')}, .command = .prev_break, .desc = "next and previous break: a blank line or a hunk edge", .hint = null, .group = .move },
     .{ .chords = &.{ c(']'), c('m') }, .command = .next_fresh, .desc = "next change since the mark (wraps)", .hint = null, .group = .turns },
     .{ .chords = &.{ c('['), c('m') }, .command = .prev_fresh, .desc = "previous change since the mark (wraps)", .hint = null, .group = .turns },
     .{ .chords = &.{ leader, c('n'), c('m') }, .command = .next_fresh, .group = .turns },
