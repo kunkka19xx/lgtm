@@ -18,7 +18,7 @@
 //      space is added here, so no caller can forget it, and the user is the
 //      one who decides when to press Enter.
 //
-// v0.1 ships tmux and OSC 52. WezTerm, kitty and Zellij are v0.2 (PLAN.md) and
+// v0.1 ships tmux and OSC 52. WezTerm, kitty and Zellij are later (SPEC.md 6.3) and
 // are absent rather than stubbed: a union variant whose `sendText` returns
 // `error.Unsupported` is a backend `detect` would have to be careful never to
 // return, which is more machinery than the three lines they will each need.

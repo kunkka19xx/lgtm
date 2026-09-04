@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Replays recorded edit sequences and reports the re-anchor hit rate. This is
-// the go/no-go gate for review notes (docs/PLAN.md phase 1): below roughly 90%
+// the go/no-go gate for review comments: below roughly 90%
 // the feature gets redesigned rather than built on.
 
 const std = @import("std");
@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 1;
     }
     if (rate < gate_hit_rate) {
-        try w.print("\nGATE FAILED: {d:.1}% is below the {d:.0}% required by docs/PLAN.md phase 1.\n", .{ rate * 100, gate_hit_rate * 100 });
+        try w.print("\nGATE FAILED: {d:.1}% is below the {d:.0}% review comments need.\n", .{ rate * 100, gate_hit_rate * 100 });
         try w.writeAll("Stop and redesign review notes before building on this.\n");
         try w.flush();
         return 1;

@@ -291,7 +291,7 @@ const Ctx = struct {
 /// `paths` must come from `git status --porcelain --untracked-files=all` or
 /// something equally ignore-clean. `update-index --add` is plumbing and will
 /// happily stage `node_modules`; what keeps boundary 5 true is the path list,
-/// not this call (SNAPSHOTS.md, PLAN.md v0.2 item 2).
+/// not this call (SNAPSHOTS.md 3.1 rule 5).
 pub fn writeSnapshot(
     gpa: Allocator,
     io: std.Io,

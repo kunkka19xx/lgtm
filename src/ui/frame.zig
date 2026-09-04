@@ -334,11 +334,18 @@ pub const FileEntry = struct {
     /// `+0 -0` beside them would be a fact about a file that did not change
     /// dressed up as a change.
     in_review: bool = true,
-    /// The row is not a file, so it gets no filetype icon and no leading
-    /// indent. The turn list draws its own rail in that column, and a `▏` for
-    /// "unknown filetype" beside `working tree` is the widget asserting
-    /// something about a row that is not a path at all.
+    /// The row is not a file, so it gets no filetype icon: `working tree` and
+    /// `baseline` are not paths, and an "unknown filetype" glyph beside them
+    /// is the widget asserting something about a row that has no filetype.
     plain: bool = false,
+    /// Where the icon comes from, when the label is not itself a path.
+    ///
+    /// A turn's row is composed - `5   docs/perf.md  1m ago  3 files` - so
+    /// looking up its filetype would read the extension of the whole sentence
+    /// and find `files`. The row still names a real file and the icon is still
+    /// worth having: it is the same argument the file list makes, that shape
+    /// and hue together find the one you want without reading a name.
+    icon_path: []const u8 = "",
 };
 
 /// Everything the `F` overlay draws. Its own view for the same reason

@@ -102,7 +102,7 @@ const testing = std.testing;
 
 test "an icon is chosen by extension, by name, or not at all" {
     try testing.expectEqualStrings("\u{e6a9}", forPath("src/ui/app.zig", true).?.glyph);
-    try testing.expectEqualStrings("\u{e73e}", forPath("docs/PLAN.md", true).?.glyph);
+    try testing.expectEqualStrings("\u{e73e}", forPath("docs/GUIDE.md", true).?.glyph);
     try testing.expectEqualStrings("\u{f308}", forPath("build/Dockerfile", true).?.glyph);
     // And a filetype colour with it, which is what makes the column scannable
     // before any name is read.

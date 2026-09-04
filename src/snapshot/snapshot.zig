@@ -253,6 +253,23 @@ pub fn readPaths(
     return blobs;
 }
 
+/// Whether a path is one lgtm may write during a restore.
+///
+/// Restore is the only thing in the tool that writes to the reader's files, so
+/// the path it is handed gets checked rather than trusted. git's own paths are
+/// repo-relative and cannot escape, which makes this insurance rather than a
+/// fix - and insurance is exactly what the one destructive operation should be
+/// carrying.
+pub fn writablePath(path: []const u8) bool {
+    if (path.len == 0) return false;
+    if (std.fs.path.isAbsolute(path)) return false;
+    if (std.mem.indexOf(u8, path, "..") != null) return false;
+    // Never our own state, and never git's.
+    if (std.mem.startsWith(u8, path, ".git/")) return false;
+    if (std.mem.startsWith(u8, path, ".lgtm/")) return false;
+    return true;
+}
+
 // -- the store -------------------------------------------------------------
 
 pub const Store = struct {
@@ -621,4 +638,22 @@ test "the baseline flag survives the state file" {
     // field existed says, and the safe answer: the floor stays at turn 1 and
     // `[t` reports no baseline rather than walking to a ref nobody wrote.
     try testing.expect(!parse("{ \"session\": \"s1\" }").has_baseline);
+}
+
+test "restore refuses any path that is not plainly inside the repository" {
+    // The only thing in the tool that writes to the reader's files, so the
+    // path is checked rather than trusted. git's own paths cannot escape,
+    // which makes this insurance - and insurance is what the one destructive
+    // operation should carry.
+    try testing.expect(writablePath("src/auth.zig"));
+    try testing.expect(writablePath("a/b/c.txt"));
+
+    try testing.expect(!writablePath(""));
+    try testing.expect(!writablePath("/etc/passwd"));
+    try testing.expect(!writablePath("../outside.zig"));
+    try testing.expect(!writablePath("src/../../outside.zig"));
+    // Never git's own state, and never ours: restoring either would break the
+    // thing doing the restoring.
+    try testing.expect(!writablePath(".git/config"));
+    try testing.expect(!writablePath(".lgtm/state.json"));
 }

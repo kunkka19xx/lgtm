@@ -5,7 +5,7 @@
 // underneath them.
 //
 // The whole feature rests on `core/anchor.zig`, which is why that was built
-// first and gated on its own (PLAN.md phase 1): a comment that drifts to the
+// first and gated on its own, before any of this was written: a comment that drifts to the
 // wrong line is worse than no comment at all, and finding that out with 300 lines
 // of anchoring was far cheaper than with a comment UI attached. It passed at 100%
 // across the fixture set, so this file can be written as if re-anchoring works

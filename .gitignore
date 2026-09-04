@@ -5,3 +5,9 @@ zig-pkg/
 .DS_Store
 CLAUDE.md
 .make/
+
+# Only the user-facing pair ships. Everything else in docs/ is internal: the
+# design documents, the roadmap, the working journal. They stay on disk.
+docs/*.md
+!docs/GUIDE.md
+!docs/CONFIG.md

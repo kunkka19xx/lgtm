@@ -90,6 +90,16 @@ pub const Command = enum {
     /// The turn list. Stepping is the primary way in (§5.3); this is for when
     /// the target is further away than stepping.
     turn_list,
+    /// Restore: the one thing in the tool that writes to the reader's files.
+    /// Live only while a turn is on screen, because that is the only moment
+    /// there is a version to restore *from* - and it asks before it writes,
+    /// snapshots before it asks, and says how to undo it afterwards.
+    restore_file,
+    /// Undo the last restore, one step, this session only. The manual path -
+    /// walk to the turn `R` snapshotted into and restore from it - is the real
+    /// mechanism and still works; this is the shortcut for the case where you
+    /// have just done it and want it back.
+    undo_restore,
     next_fresh,
     prev_fresh,
     /// A file over `large_file_lines` renders as a summary row; these open it
@@ -393,6 +403,8 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('m')}, .command = .mark_here, .desc = "mark: everything after this is new", .hint = null, .group = .jump },
     .{ .chords = &.{ c(']'), c('t') }, .command = .next_turn, .desc = "next turn, ending at the working tree", .hint = null, .group = .jump },
     .{ .chords = &.{ c('['), c('t') }, .command = .prev_turn, .desc = "previous turn - what the agent had written by then", .hint = null, .group = .jump },
+    .{ .chords = &.{c('u')}, .command = .undo_restore, .desc = "undo the last restore", .hint = null, .group = .jump },
+    .{ .chords = &.{c('R')}, .command = .restore_file, .desc = "restore this file from the turn on screen", .hint = null, .group = .jump },
     .{ .chords = &.{ leader, c('l'), c('t') }, .command = .turn_list, .desc = "list the turns the agent has written", .group = .jump },
     .{ .chords = &.{ leader, c('n'), c('t') }, .command = .next_turn, .group = .jump },
     .{ .chords = &.{ leader, c('p'), c('t') }, .command = .prev_turn, .group = .jump },

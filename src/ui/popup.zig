@@ -612,7 +612,8 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // draw it: the shape and the hue together are what let a reader find
         // the Zig file without reading a name. The path keeps the status
         // colour, so the row still says what happened to it.
-        if (if (e.plain) null else devicon.forPath(e.path, icons)) |icon| {
+        const icon_of = if (e.icon_path.len > 0) e.icon_path else e.path;
+        if (if (e.plain) null else devicon.forPath(icon_of, icons)) |icon| {
             const hue = switch (icon.hue) {
                 .red => f.theme.hues.red,
                 .green => f.theme.hues.green,

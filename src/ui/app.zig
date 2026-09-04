@@ -203,6 +203,48 @@ pub const App = struct {
     /// a row *means* belongs to whoever built it.
     pick_turns: std.ArrayList(u32) = .empty,
 
+    /// A restore waiting for the reader to say yes.
+    ///
+    /// The next key is the answer, the way the key after `f` is its target
+    /// rather than a command. One deliberate keystroke is the right amount of
+    /// friction here *because* the operation is undoable: a snapshot is taken
+    /// before anything is written, so the state being overwritten is one `[t`
+    /// away. If it were not recoverable this would ask for a typed word.
+    pending_restore: ?struct {
+        turn: u32,
+        path: [4096]u8 = undefined,
+        path_len: u16 = 0,
+
+        fn name(self: *const @This()) []const u8 {
+            return self.path[0..self.path_len];
+        }
+    } = null,
+
+    /// The last restore, for `u`.
+    ///
+    /// Session-only by design. The turn is on disk, but "the last thing you
+    /// restored" is not, and a `u` that survived a restart would undo
+    /// something the reader had long since forgotten doing.
+    ///
+    /// One step, and then gone: a second `u` says there is nothing to undo,
+    /// rather than walking back through a history. Going the other way is the
+    /// same move the notice already names - `[t` to the turn this made, then
+    /// `R` - because that is the mechanism, and this is only its shortcut.
+    last_restore: ?struct {
+        /// The turn holding the file as it was before the restore.
+        turn: u32,
+        path: [4096]u8 = undefined,
+        path_len: u16 = 0,
+        /// What the restore wrote. If the file no longer hashes to this,
+        /// something else has changed it since - the agent, an editor - and
+        /// undoing would not be undoing, it would be overwriting that.
+        wrote: u64 = 0,
+
+        fn name(self: *const @This()) []const u8 {
+            return self.path[0..self.path_len];
+        }
+    } = null,
+
     files_purpose: enum {
         /// `<Space>f`: the changed files, and Enter goes to one.
         jump,
@@ -867,6 +909,8 @@ pub const App = struct {
             .compose_mention,
             .compose_newline,
             => {},
+            .restore_file => try self.restoreAsk(),
+            .undo_restore => try self.undoRestore(body),
             .turn_list => {
                 if (self.mode == .finder) return self.closeFiles();
                 try self.openTurnList();
@@ -2559,7 +2603,17 @@ pub const App = struct {
                 .added = if (turn.number == 0) 0 else turn.added,
                 .removed = if (turn.number == 0) 0 else turn.removed,
                 .in_review = turn.number != 0,
-                .plain = true,
+                // The icon comes from the file the turn mostly touched, not
+                // from the composed label. A turn that changed nothing, and
+                // the baseline, name no file and get none.
+                // Copied, not borrowed. `turn.path` points into the `git log`
+                // output that this function frees on the way out, and the row
+                // outlives the call - the label survived only because
+                // `allocPrint` had already copied it. A dangling path read as
+                // a generic file icon instead of a Zig one, which is how it
+                // was noticed rather than how it would usually show.
+                .icon_path = if (turn.number == 0) "" else arena.dupe(u8, turn.path) catch "",
+                .plain = turn.number == 0 or turn.files == 0,
                 .current = if (self.review.viewing) |v| v == turn.number else false,
             }) catch return;
             self.pick_turns.append(self.gpa, turn.number) catch return;
@@ -2576,6 +2630,193 @@ pub const App = struct {
         }
         self.file_list.open(at);
         self.mode = .finder;
+    }
+
+    /// Asks whether to overwrite a file with the version in the turn on screen.
+    ///
+    /// Every refusal here is a case where writing would be wrong rather than
+    /// merely unwanted: no turn to restore from, no file under the cursor, a
+    /// turn that never contained it, a file already identical, a path that
+    /// could reach outside the repository, or a store that cannot take the
+    /// snapshot this is only safe because of.
+    fn restoreAsk(self: *App) !void {
+        const turn = self.review.viewing orelse {
+            var k: [32]u8 = undefined;
+            self.notice.set("nothing to restore from - {s} walks back to a turn", .{
+                self.keyFor(.prev_turn, .normal, &k),
+            });
+            return;
+        };
+        const f = self.current() orelse return;
+        const path = f.path();
+        if (!snapshot.writablePath(path)) {
+            self.notice.set("refusing to write {s}", .{path});
+            return;
+        }
+
+        const ref = self.review.viewRef() orelse return;
+        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{path}) catch {
+            self.notice.set("could not read {s} from turn {d}", .{ path, turn });
+            return;
+        };
+        defer {
+            for (blobs) |b| self.gpa.free(b);
+            self.gpa.free(blobs);
+        }
+        if (blobs.len == 0 or blobs[0].len == 0) {
+            self.notice.set("turn {d} had no {s}", .{ turn, path });
+            return;
+        }
+
+        // Already identical is not a no-op worth performing: it would take a
+        // snapshot and rewrite a file to the bytes already in it, and then
+        // report success for having done nothing.
+        const on_disk = fs_mod.readFile(self.io, self.gpa, path, 1 << 24) catch &.{};
+        defer if (on_disk.len > 0) self.gpa.free(on_disk);
+        if (std.mem.eql(u8, on_disk, blobs[0])) {
+            self.notice.set("{s} is already what turn {d} had", .{ path, turn });
+            return;
+        }
+
+        var pending: @TypeOf(self.pending_restore.?) = .{ .turn = turn };
+        const n = @min(path.len, pending.path.len);
+        @memcpy(pending.path[0..n], path[0..n]);
+        pending.path_len = @intCast(n);
+        self.pending_restore = pending;
+        self.notice.set("overwrite {s} with turn {d}? y to confirm, any other key cancels", .{ path, turn });
+    }
+
+    /// The answer. Anything but `y` is no, because the safe reading of an
+    /// ambiguous keystroke is the one that does not write.
+    fn restoreAnswer(self: *App, key: event.Key, body: u16) !void {
+        const ask = self.pending_restore.?;
+        self.pending_restore = null;
+        if (key.codepoint != 'y' or key.mods.ctrl) {
+            self.notice.set("restore cancelled - nothing was written", .{});
+            return;
+        }
+
+        // Snapshot first, always (SNAPSHOTS.md 5.4). Without one this would be
+        // the only unrecoverable action in the tool, so a store that cannot
+        // take it is a reason to refuse rather than to proceed carefully.
+        if (!self.snapshotTurn()) {
+            self.notice.set("refusing: could not snapshot first, so this could not be undone", .{});
+            return;
+        }
+        const undo_turn = if (self.snap) |s| s.state.latest_turn else 0;
+
+        const ref_turn = ask.turn;
+        var ref_buf: [128]u8 = undefined;
+        const store = if (self.snap) |*s| s else return;
+        const ref = gitobj.refFor(&ref_buf, store.state.name(), ref_turn) catch return;
+
+        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{ask.name()}) catch {
+            self.notice.set("could not read turn {d}", .{ref_turn});
+            return;
+        };
+        defer {
+            for (blobs) |b| self.gpa.free(b);
+            self.gpa.free(blobs);
+        }
+        if (blobs.len == 0) return;
+
+        fs_mod.writeFile(self.io, ask.name(), blobs[0]) catch {
+            self.notice.set("could not write {s}", .{ask.name()});
+            return;
+        };
+
+        // What `u` will need: the turn holding the state this just replaced,
+        // and a hash of what was written, so undoing can tell "put back what
+        // I replaced" from "overwrite whatever has happened since".
+        var mem: @TypeOf(self.last_restore.?) = .{
+            .turn = undo_turn,
+            .wrote = std.hash.Wyhash.hash(0, blobs[0]),
+        };
+        const nm = @min(ask.path_len, mem.path.len);
+        @memcpy(mem.path[0..nm], ask.name()[0..nm]);
+        mem.path_len = @intCast(nm);
+        self.last_restore = mem;
+
+        // Back to the working tree, because that is what just changed and it
+        // is the only place the reader can act on it.
+        self.review.showWorking();
+        try self.rediff();
+        self.clampScroll(body);
+        var k: [32]u8 = undefined;
+        self.notice.set("restored {s} from turn {d} - {s} to turn {d} undoes it", .{
+            ask.name(), ref_turn, self.keyFor(.prev_turn, .normal, &k), undo_turn,
+        });
+    }
+
+    /// Puts back what the last restore replaced.
+    ///
+    /// No confirmation, unlike `R`: the reader is undoing something they chose
+    /// a moment ago, and this snapshots first like every other write, so it is
+    /// as reversible as the thing it reverses. What it does check is that the
+    /// file is still what the restore left there - if something has changed it
+    /// since, this would not be an undo, and the reader should be told rather
+    /// than have the change taken from under them.
+    fn undoRestore(self: *App, body: u16) !void {
+        const last = self.last_restore orelse {
+            var k: [32]u8 = undefined;
+            self.notice.set("nothing to undo - {s} restores a file from a turn", .{
+                self.keyFor(.restore_file, .normal, &k),
+            });
+            return;
+        };
+        if (self.readOnly()) return;
+
+        const on_disk = fs_mod.readFile(self.io, self.gpa, last.name(), 1 << 24) catch &.{};
+        defer if (on_disk.len > 0) self.gpa.free(on_disk);
+        if (std.hash.Wyhash.hash(0, on_disk) != last.wrote) {
+            self.last_restore = null;
+            self.notice.set("{s} has changed since - undoing would overwrite that, not the restore", .{last.name()});
+            return;
+        }
+
+        const store = if (self.snap) |*s| s else return;
+        var ref_buf: [128]u8 = undefined;
+        const ref = gitobj.refFor(&ref_buf, store.state.name(), last.turn) catch return;
+        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{last.name()}) catch {
+            self.notice.set("turn {d} is gone - nothing to put back", .{last.turn});
+            self.last_restore = null;
+            return;
+        };
+        defer {
+            for (blobs) |b| self.gpa.free(b);
+            self.gpa.free(blobs);
+        }
+        if (blobs.len == 0) {
+            self.last_restore = null;
+            return;
+        }
+
+        // Snapshot first, the same rule every write here obeys - which is also
+        // what makes the *other* direction available afterwards.
+        if (!self.snapshotTurn()) {
+            self.notice.set("refusing: could not snapshot first, so this could not be undone", .{});
+            return;
+        }
+        const back_turn = store.state.latest_turn;
+
+        fs_mod.writeFile(self.io, last.name(), blobs[0]) catch {
+            self.notice.set("could not write {s}", .{last.name()});
+            return;
+        };
+        const name = last.name();
+        var name_buf: [4096]u8 = undefined;
+        @memcpy(name_buf[0..name.len], name);
+        const shown = name_buf[0..name.len];
+
+        // One step. A second `u` has nothing to undo; going forward again is
+        // the move the notice names, which is the mechanism this shortcuts.
+        self.last_restore = null;
+        try self.rediff();
+        self.clampScroll(body);
+        var k: [32]u8 = undefined;
+        self.notice.set("undid the restore of {s} - {s} to turn {d} puts it back", .{
+            shown, self.keyFor(.prev_turn, .normal, &k), back_turn,
+        });
     }
 
     /// The comment list's own footer keys, read from the keymap so a remap
@@ -2655,6 +2896,13 @@ pub const App = struct {
 
         if (turn.number == 0) {
             return std.fmt.allocPrint(arena, "{s} baseline   before the agent ran  {s}", .{ rail, when }) catch "baseline";
+        }
+        // A turn that changed nothing still happened - the snapshot restore
+        // takes before it writes is one, and so is any quiet period the agent
+        // spent thinking. It gets a word rather than a blank path and "0
+        // files", which reads as a row that failed to load.
+        if (turn.files == 0) {
+            return std.fmt.allocPrint(arena, "{s} {d: <3} no change  {s}", .{ rail, turn.number, when }) catch "turn";
         }
         return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}", .{
             rail,
@@ -3233,6 +3481,14 @@ pub const App = struct {
                 // `f` and its three siblings each take the next key as the
                 // character to search for, never as a command. Escape gives up
                 // on one, so a mistyped `f` is not a key that eats the next.
+                // A restore waiting on its answer takes the next key, and
+                // takes it before anything else can claim it: while this is
+                // pending there is no command the reader could mean.
+                if (self.pending_restore != null) {
+                    try self.restoreAnswer(k, body);
+                    self.clampScroll(body);
+                    return;
+                }
                 if (self.pending_find) |p| {
                     self.pending_find = null;
                     if (k.codepoint != event.code.escape) {
@@ -5510,4 +5766,102 @@ test "the turn list says why when there is nothing to list" {
     try fx.press("<Space>lt");
     try fx.expectNotice("snapshots are off");
     try fx.expectMode(.normal);
+}
+
+test "restore refuses when there is no turn to restore from" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // The working tree is not a version of anything: there is nothing to
+    // restore *from*, and the message says which key finds one.
+    try fx.press("R");
+    try fx.expectNotice("nothing to restore from");
+    try testing.expect(fx.app.pending_restore == null);
+}
+
+test "an unconfirmed restore writes nothing, and any key but y is no" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    // Set up the question directly: reaching it needs a snapshot store, and
+    // what is asserted here is the answer, not how it was asked.
+    var ask: @TypeOf(fx.app.pending_restore.?) = .{ .turn = 2 };
+    const path = "a.zig";
+    @memcpy(ask.path[0..path.len], path);
+    ask.path_len = path.len;
+    fx.app.pending_restore = ask;
+
+    // `n`, but the rule is broader: the safe reading of an ambiguous key is
+    // the one that does not write, so only `y` proceeds.
+    try fx.app.handle(.{ .key = .{ .codepoint = 'n', .mods = .{} } }, body_rows);
+    try fx.expectNotice("cancelled");
+    try testing.expect(fx.app.pending_restore == null);
+
+    // And a pending question owns the next key outright - `j` answers it
+    // rather than moving the cursor.
+    fx.app.pending_restore = ask;
+    const before = fx.app.cursor;
+    try fx.app.handle(.{ .key = .{ .codepoint = 'j', .mods = .{} } }, body_rows);
+    try testing.expectEqual(before, fx.app.cursor);
+    try testing.expect(fx.app.pending_restore == null);
+}
+
+test "confirming without a store refuses rather than writing unrecoverably" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    var ask: @TypeOf(fx.app.pending_restore.?) = .{ .turn = 1 };
+    const path = "a.zig";
+    @memcpy(ask.path[0..path.len], path);
+    ask.path_len = path.len;
+    fx.app.pending_restore = ask;
+
+    // No snapshot store, so the pre-restore state could not be recorded. That
+    // is a reason to refuse: without it this would be the only unrecoverable
+    // action in the tool (SNAPSHOTS.md 5.4).
+    try fx.app.handle(.{ .key = .{ .codepoint = 'y', .mods = .{} } }, body_rows);
+    try fx.expectNotice("could not snapshot first");
+    try testing.expect(fx.app.pending_restore == null);
+}
+
+test "undo has nothing to undo until a restore happens" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+    try fx.press("u");
+    try fx.expectNotice("nothing to undo");
+}
+
+test "undo refuses once something else has changed the file" {
+    // The guard that makes `u` an undo rather than an overwrite. If the agent
+    // wrote to the file after the restore, putting the old bytes back is not
+    // undoing the reader's action - it is discarding the agent's.
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var last: @TypeOf(fx.app.last_restore.?) = .{ .turn = 2 };
+    const path = "docs/GUIDE.md"; // a file that exists, with content we know
+    @memcpy(last.path[0..path.len], path);
+    last.path_len = path.len;
+    // A hash the file cannot have: whatever is on disk, it is not this.
+    last.wrote = 0xdead_beef_dead_beef;
+    fx.app.last_restore = last;
+
+    try fx.press("u");
+    try fx.expectNotice("has changed since");
+    // And it forgets, rather than leaving a key armed that will refuse again.
+    try testing.expect(fx.app.last_restore == null);
+}
+
+test "undo is one step: after it there is nothing left to undo" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var last: @TypeOf(fx.app.last_restore.?) = .{ .turn = 1 };
+    const path = "a.zig";
+    @memcpy(last.path[0..path.len], path);
+    last.path_len = path.len;
+    fx.app.last_restore = last;
+
+    // No store, so this cannot get as far as writing - but it must still
+    // clear or keep the memory deliberately rather than by accident. Here the
+    // file does not exist, so the hash check is what stops it.
+    try fx.press("u");
+    try testing.expect(fx.app.last_restore == null);
 }

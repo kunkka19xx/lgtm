@@ -76,6 +76,13 @@ and say so when they can no longer be placed.
 git knows about - an unchanged one opens whole, outside the review, still
 readable and commentable. A file too large to render inline opens with `zo`.
 
+**Get your work back.** lgtm snapshots the working tree when the agent goes
+quiet, into git's own object store under `refs/lgtm/**`. `]t` and `[t` walk
+those turns, `<Space>lt` lists them, and `R` restores a file from one - after
+taking a snapshot first, so the restore itself is undoable. The first snapshot
+is taken before the agent has written anything, which is the one nothing else
+could recover: uncommitted work is invisible to git until you lose it.
+
 **Come back to what's new.** Submitting a review marks the working tree as
 read, and `m` does it by hand. When the agent revises, the lines that arrived
 since carry a bar in the gutter and `]m` walks them, so round two is the twelve
@@ -84,11 +91,16 @@ lines that answer you rather than the eight hundred you already read.
 `?` shows every key, generated from your bindings rather than from this page,
 so a remapped keymap documents itself.
 
+## Docs
+
+- **[Guide](docs/GUIDE.md)** — install, the loop, every key
+- **[Configuration](docs/CONFIG.md)** — every setting, every command name, every theme slot
+
 ## Configure
 
 `~/.config/lgtm/config.toml`, then `.lgtm/config.toml` in the repo, merged key
 by key. A bad key is reported on the status line; it never stops the tool
-starting.
+starting. [Full reference](docs/CONFIG.md).
 
 ```toml
 [review]
