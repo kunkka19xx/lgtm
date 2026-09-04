@@ -53,6 +53,13 @@ pub const Options = struct {
     /// the saved target and the inference, and replaces the saved one, because
     /// it was typed just now and the inference was a guess.
     pane: ?[]const u8 = null,
+    /// `--base <ref>`: what the review is *against*. Null is `HEAD`, which is
+    /// the working-tree review this tool is otherwise entirely about.
+    base: ?[]const u8 = null,
+    /// `--target <ref>`: what the review is *of*. Null is the working tree.
+    /// Setting it makes the review static, and the three things that watch the
+    /// working tree turn themselves off.
+    target: ?[]const u8 = null,
 };
 
 /// Runs the review UI until the user quits.
@@ -95,6 +102,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         .centre => .centre,
     };
     app.review.ignore = opts.cfg.ignore;
+    if (opts.base) |b| app.review.base = b;
+    app.review.target = opts.target;
     app.theme = opts.cfg.theme;
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
@@ -111,15 +120,18 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // started is still reachable.
     var br = bridge.detect(environ);
     var saved: SavedTarget = .{};
-    if (br == .tmux) {
+    // Every multiplexer, not only tmux: `--pane` and the remembered target are
+    // about "which pane is the agent in", which is the same question whichever
+    // of the three is answering it.
+    if (br.panes()) |panes| {
         var saved_buf: [bridge.max_pane_id]u8 = undefined;
         if (bridge.loadTarget(io, gpa, &saved_buf)) |p| {
-            br.tmux.setPane(p);
+            panes.setPane(p);
             saved.set(p);
         }
         // Typed just now, so it beats what a previous run inferred. Not
         // recorded as saved: the first send that works is what persists it.
-        if (opts.pane) |p| br.tmux.setPane(p);
+        if (opts.pane) |p| panes.setPane(p);
     }
 
     var reader = input.Reader.init(&term, &queue);
@@ -137,10 +149,14 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         .quiet_ms = watch.default_quiet_ms,
         .watch_dirs = watch_dirs,
     });
+    // A static review has nothing to watch: both sides are trees, and a
+    // watcher on a working tree the reader cannot see would re-diff away the
+    // thing they came to read.
+    const live = opts.target == null;
     if (!opts.once) {
         winsize.register() catch {};
         try reader.start();
-        watcher.start() catch {};
+        if (live) watcher.start() catch {};
     }
     defer {
         if (!opts.once) {
@@ -176,13 +192,20 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // The store needs an environment to run git in, which only this layer has.
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
     // mark picked up after it, when there are files to attach it to.
-    app.snap = snapshot.Store.open(gpa, io, environ);
-    // After `open`, which builds the store: the cap is policy the config owns
-    // and the store only applies.
-    if (app.snap) |*store| store.keep = opts.cfg.snapshot.keep;
+    // Off for a static review, along with the mark below. Both are about the
+    // working tree changing, and in a two-tree review nothing does: a turn
+    // snapshotted while the reader is looking at two commits would record work
+    // that has no relationship to what is on their screen, and a mark would
+    // say "since I last looked" about a tree they are not looking at.
+    if (live) {
+        app.snap = snapshot.Store.open(gpa, io, environ);
+        // After `open`, which builds the store: the cap is policy the config
+        // owns and the store only applies.
+        if (app.snap) |*store| store.keep = opts.cfg.snapshot.keep;
+    }
 
     try app.rediff();
-    app.restoreMark();
+    if (live) app.restoreMark();
     // After the first diff, because the path list is what it needs, and before
     // the agent has had a chance to write anything - which is the whole point.
     app.takeBaseline();
@@ -289,7 +312,18 @@ fn deliver(
             // The one case the user can act on, so it says what to do rather
             // than what went wrong. Inference has already declined: the window
             // holds more than the two panes it can be sure about.
-            error.NoTarget => app.notice.set("no agent pane: restart with --pane %N", .{}),
+            // Both halves follow the terminal the reader is in: kitty calls
+            // its splits windows, and `%3` is not an id anywhere but tmux. A
+            // message using another terminal's vocabulary sends someone
+            // looking through documentation for a word it does not contain.
+            error.NoTarget => app.notice.set("no agent {s}: restart with --pane {s}", .{
+                br.unit(),
+                switch (br.*) {
+                    .tmux => "%N",
+                    .herdr => "w1:p1",
+                    else => "N",
+                },
+            }),
             error.Multiline => app.notice.set("refusing to send a multi-line payload", .{}),
             else => app.notice.set("bridge: {t}", .{err}),
         }

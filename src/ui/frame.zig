@@ -160,6 +160,16 @@ pub const View = struct {
     /// which mark it is. Zero and zero when there is none.
     fresh_total: u32 = 0,
     mark_turn: u32 = 0,
+    /// What the review is against and of, when either is not the default.
+    /// Empty means `HEAD` and the working tree, which is every ordinary
+    /// session and costs the badge nothing.
+    ///
+    /// Drawn on the badge rather than in a notice for the same reason `TURN 2`
+    /// is: a diff against `main` looks exactly like a diff against HEAD, and
+    /// reading one as the other is the failure this view can cause. It is a
+    /// *state*, not an answer to a keystroke.
+    base: []const u8 = "",
+    target: []const u8 = "",
     /// The turn on screen, or null for the working tree. The mode row says so
     /// on every frame it is set, and not optionally: a turn's diff looks
     /// exactly like the working tree's, and reading old code as current is the

@@ -19,8 +19,11 @@ const usage =
     \\
     \\usage: lgtm [options]
     \\
+    \\  --base <ref>     review against this ref instead of HEAD
+    \\  --target <ref>   review this ref instead of the working tree (static)
     \\  --config <path>  read this file instead of the usual two
-    \\  --pane <id>      send to this multiplexer pane (e.g. %3)
+    \\  --pane <id>      send here: a tmux pane (%3), a herdr pane (w1:p1),
+    \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
     \\  --theme-preview  draw every bundled theme and exit
     \\  --once           render one frame and exit, for screenshots and CI
@@ -54,6 +57,8 @@ pub fn main(init: std.process.Init) !void {
     var config_path: ?[]const u8 = null;
     var theme_name: ?[]const u8 = null;
     var pane: ?[]const u8 = null;
+    var base: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
     var want_preview = false;
     var want_version = false;
     var args = init.minimal.args.iterate();
@@ -79,7 +84,19 @@ pub fn main(init: std.process.Init) !void {
             };
         } else if (std.mem.eql(u8, arg, "--pane")) {
             pane = args.next() orelse {
-                try w.print("lgtm: --pane needs a pane id\n\n{s}", .{usage});
+                try w.print("lgtm: --pane needs a pane or window id\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--base")) {
+            base = args.next() orelse {
+                try w.print("lgtm: --base needs a ref\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
+        } else if (std.mem.eql(u8, arg, "--target")) {
+            target = args.next() orelse {
+                try w.print("lgtm: --target needs a ref\n\n{s}", .{usage});
                 try w.flush();
                 return;
             };
@@ -144,6 +161,8 @@ pub fn main(init: std.process.Init) !void {
         .cfg = cfg.cfg,
         .problems = cfg.summary(&problem_buf),
         .pane = pane,
+        .base = base,
+        .target = target,
     });
 
     if (want_profile) try metrics.report(w);

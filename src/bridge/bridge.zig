@@ -18,26 +18,46 @@
 //      space is added here, so no caller can forget it, and the user is the
 //      one who decides when to press Enter.
 //
-// v0.1 ships tmux and OSC 52. WezTerm, kitty and Zellij are later and
-// are absent rather than stubbed: a union variant whose `sendText` returns
-// `error.Unsupported` is a backend `detect` would have to be careful never to
-// return, which is more machinery than the three lines they will each need.
+// tmux, herdr, WezTerm, kitty, Ghostty and OSC 52. Zellij is later and is absent rather
+// than stubbed: a union variant whose `sendText` returns `error.Unsupported` is a
+// backend `detect` would have to be careful never to return, which is more
+// machinery than the three lines it will need.
+//
+// The five are the same shape and deliberately so - an argv, a
+// subprocess, one named failure worth degrading on, and an inference that
+// refuses to guess past two panes. What differs is only what each calls a
+// pane and how each says a pane has gone, which is why those two things live
+// in the backend files and everything else lives here.
+//
+// herdr is the one built for agents rather than for people, and it shows in
+// the one place that matters here: `send-text` is a separate verb from
+// `send-keys`, so raw text goes in and nothing is pressed. Everywhere else
+// that separation is ours to maintain - `tmux send-keys -l` will happily press
+// Enter if a newline reaches it, which is what hard rule 1 exists to prevent.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const fs = @import("../io/fs.zig");
+const ghostty = @import("ghostty.zig");
+const herdr = @import("herdr.zig");
+const kitty = @import("kitty.zig");
 const osc52 = @import("osc52.zig");
 const tmux = @import("tmux.zig");
+const wezterm = @import("wezterm.zig");
 
-/// Pane ids are short; the target is held inline rather than allocated.
-pub const max_pane_id = tmux.max_pane_id;
+/// Pane ids are short in every multiplexer; the target is held inline rather
+/// than allocated. The widest of the three, so one buffer serves all.
+pub const max_pane_id = @max(
+    @max(tmux.max_pane_id, herdr.max_pane_id),
+    @max(ghostty.max_pane_id, @max(wezterm.max_pane_id, kitty.max_window_id)),
+);
 
 pub const Error = error{
     /// The payload contains a newline. Never sent, never truncated.
     Multiline,
-    /// tmux is the backend but no pane has been chosen and none could be
-    /// inferred. The caller says how to choose one.
+    /// A multiplexer is the backend but no pane has been chosen and none
+    /// could be inferred. The caller says how to choose one.
     NoTarget,
 } || Allocator.Error || std.Io.Writer.Error;
 
@@ -64,39 +84,77 @@ pub const Ctx = struct {
 /// Pane ids are `%` and a small integer, so the target is held inline. It
 /// outlives every arena in the program and is far too small to be worth a
 /// lifetime.
-pub const Tmux = struct {
-    pane_buf: [tmux.max_pane_id]u8 = undefined,
+/// The chosen pane and our own, for whichever multiplexer is in front. One
+/// type rather than three: the fields are identical and only the subprocess
+/// that consumes them differs, so three copies would be three places to fix
+/// the next time inference changes.
+pub const Panes = struct {
+    pane_buf: [max_pane_id]u8 = undefined,
     pane_len: usize = 0,
-    /// Our own pane, from `$TMUX_PANE`, so inference can exclude it.
-    self_buf: [tmux.max_pane_id]u8 = undefined,
+    /// Our own pane, from the multiplexer's env var, so inference can exclude
+    /// it.
+    self_buf: [max_pane_id]u8 = undefined,
     self_len: usize = 0,
     /// Inference runs once. A window with three panes cannot be guessed at,
     /// and re-running `list-panes` on every keystroke to fail the same way is
     /// a subprocess per keystroke.
     tried: bool = false,
 
-    pub fn pane(self: *const Tmux) ?[]const u8 {
+    pub fn pane(self: *const Panes) ?[]const u8 {
         return if (self.pane_len == 0) null else self.pane_buf[0..self.pane_len];
     }
 
-    pub fn selfPane(self: *const Tmux) []const u8 {
+    pub fn selfPane(self: *const Panes) []const u8 {
         return self.self_buf[0..self.self_len];
     }
 
-    pub fn setPane(self: *Tmux, id: []const u8) void {
+    pub fn setPane(self: *Panes, id: []const u8) void {
         self.pane_len = @min(id.len, self.pane_buf.len);
         @memcpy(self.pane_buf[0..self.pane_len], id[0..self.pane_len]);
     }
 };
 
+/// Kept for the callers that still say `Tmux`; the type is shared now.
+pub const Tmux = Panes;
+
 pub const Bridge = union(enum) {
-    tmux: Tmux,
+    tmux: Panes,
+    herdr: Panes,
+    wezterm: Panes,
+    kitty: Panes,
+    ghostty: Panes,
     osc52: void,
 
     pub fn name(self: Bridge) []const u8 {
         return switch (self) {
             .tmux => "tmux",
+            .herdr => "herdr",
+            .wezterm => "wezterm",
+            .kitty => "kitty",
+            .ghostty => "ghostty",
             .osc52 => "clipboard",
+        };
+    }
+
+    /// What this backend calls the thing a send goes to.
+    ///
+    /// Not decoration. kitty's splits are *windows* - "pane" there means
+    /// nothing, and a message telling a kitty user to pick a pane sends them
+    /// looking through documentation for a word kitty does not use. tmux and
+    /// WezTerm both say pane. The one flag stays `--pane` because it is one
+    /// flag; the prose around it follows the terminal the reader is in.
+    pub fn unit(self: Bridge) []const u8 {
+        return switch (self) {
+            .kitty => "window",
+            .tmux, .herdr, .wezterm, .ghostty, .osc52 => "pane",
+        };
+    }
+
+    /// The pane state, for the backends that have any.
+    pub fn panes(self: *Bridge) ?*Panes {
+        return switch (self.*) {
+            .tmux, .herdr, .wezterm, .kitty, .ghostty => |*p| p,
+            .osc52 => null,
         };
     }
 
@@ -111,28 +169,68 @@ pub const Bridge = union(enum) {
                 try osc52.copy(cx.gpa, cx.w, payload);
                 return .{ .copied = null };
             },
-            .tmux => |*t| {
-                const target = try self.tmuxTarget(cx) orelse return error.NoTarget;
-                tmux.send(cx.gpa, cx.io, target, payload) catch |err| {
-                    // A pane that has gone is the common one and the one worth
-                    // naming; anything else is tmux itself failing. Both
-                    // degrade, because losing the text is worse than losing
-                    // the destination.
-                    // Forget the target *and* the fact that inference has
-                    // run: a pane that died is often replaced, and finding
-                    // the replacement should not cost a restart. Bounded -
-                    // the retry sets `tried` again on its way through.
-                    t.pane_len = 0;
-                    t.tried = false;
-                    try self.clipboard(cx, payload);
-                    return .{ .copied = switch (err) {
-                        error.PaneGone => "pane is gone",
-                        else => "tmux failed",
-                    } };
-                };
-                return .{ .sent = target };
+            .tmux, .herdr, .wezterm, .kitty, .ghostty => {
+                const dest = try self.target(cx) orelse return error.NoTarget;
+                const why = self.deliver(cx, dest, payload) orelse return .{ .sent = dest };
+
+                // A pane that has gone is the common failure and the one worth
+                // naming; the rest is the multiplexer itself. All of them
+                // degrade, because losing the text is worse than losing the
+                // destination.
+                //
+                // Forget the target *and* the fact that inference has run: a
+                // pane that died is often replaced, and finding the
+                // replacement should not cost a restart. Bounded - the retry
+                // sets `tried` again on its way through.
+                const p = self.panes().?;
+                p.pane_len = 0;
+                p.tried = false;
+                try self.clipboard(cx, payload);
+                return .{ .copied = why };
             },
         }
+    }
+
+    /// Hands the payload to whichever multiplexer is in front. Null is
+    /// success; a string is what went wrong, in words the status line can
+    /// show.
+    ///
+    /// The three failures are not the same three, which is the whole reason
+    /// this is a switch and not one call: kitty can refuse because remote
+    /// control is off, and that is a *setting* the reader can change rather
+    /// than a pane that died. Saying "kitty failed" there would send them
+    /// looking for the wrong thing.
+    fn deliver(self: *Bridge, cx: Ctx, dest: []const u8, payload: []const u8) ?[]const u8 {
+        switch (self.*) {
+            .tmux => tmux.send(cx.gpa, cx.io, dest, payload) catch |err| return switch (err) {
+                error.PaneGone => "pane is gone",
+                else => "tmux failed",
+            },
+            .herdr => herdr.send(cx.gpa, cx.io, dest, payload) catch |err| return switch (err) {
+                error.PaneGone => "pane is gone",
+                else => "herdr failed",
+            },
+            .wezterm => wezterm.send(cx.gpa, cx.io, dest, payload) catch |err| return switch (err) {
+                error.PaneGone => "pane is gone",
+                else => "wezterm failed",
+            },
+            .kitty => kitty.send(cx.gpa, cx.io, dest, payload) catch |err| return switch (err) {
+                error.WindowGone => "window is gone",
+                error.NotAllowed => "kitty: set allow_remote_control yes",
+                else => "kitty failed",
+            },
+            .ghostty => ghostty.send(cx.gpa, cx.io, dest, payload) catch |err| return switch (err) {
+                error.PaneGone => "pane is gone",
+                // Named, because both causes are things the reader can fix and
+                // neither is about their splits: a Ghostty older than 1.3 has
+                // no AppleScript dictionary, and macOS refuses one app
+                // scripting another until it is allowed in Automation.
+                error.Unavailable => "ghostty: needs 1.3+ and Automation access",
+                else => "ghostty failed",
+            },
+            .osc52 => return "no multiplexer",
+        }
+        return null;
     }
 
     /// `y` and `Y`: the clipboard, always, whatever the backend is. A
@@ -176,6 +274,10 @@ pub const Bridge = union(enum) {
             // `load-buffer -w` is the same tmux whose `set-clipboard` is
             // likely to be `on` and forwarding the escape anyway.
             .tmux => tmux.copy(cx.gpa, cx.io, text) catch return error.Failed,
+            // Neither intercepts the escape the way tmux's `set-clipboard
+            // external` does, so the escape below is the right route and
+            // there is nothing above it to try.
+            .herdr, .wezterm, .kitty, .ghostty => return error.Unsupported,
             // The escape *is* this backend. There is nothing above it to try,
             // and it is the right answer outside a multiplexer: it is the one
             // route that survives SSH.
@@ -185,32 +287,88 @@ pub const Bridge = union(enum) {
 
     /// The chosen pane, inferring one on first use. Null when the window holds
     /// more than the two panes the inference can be sure about.
-    fn tmuxTarget(self: *Bridge, cx: Ctx) Allocator.Error!?[]const u8 {
-        const t = &self.tmux;
-        if (t.pane()) |p| return p;
-        if (t.tried) return null;
-        t.tried = true;
+    ///
+    /// Inference runs once per backend and per death. Three panes cannot be
+    /// guessed at, and re-listing on every keystroke to fail the same way is a
+    /// subprocess per keystroke.
+    fn target(self: *Bridge, cx: Ctx) Allocator.Error!?[]const u8 {
+        const p = self.panes() orelse return null;
+        if (p.pane()) |chosen| return chosen;
+        if (p.tried) return null;
+        p.tried = true;
 
         var scratch: std.heap.ArenaAllocator = .init(cx.gpa);
         defer scratch.deinit();
-        const panes = tmux.list(cx.gpa, scratch.allocator(), cx.io, false) catch return null;
-        const found = tmux.soleOther(panes, t.selfPane()) orelse return null;
-        t.setPane(found);
-        return t.pane();
+        const arena = scratch.allocator();
+        const mine = p.selfPane();
+        const found = switch (self.*) {
+            .tmux => tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, false) catch return null, mine),
+            .herdr => herdr.soleOther(herdr.list(cx.gpa, arena, cx.io) catch return null, mine),
+            .wezterm => wezterm.soleOther(wezterm.list(cx.gpa, arena, cx.io) catch return null, mine),
+            .kitty => kitty.soleOther(kitty.list(cx.gpa, arena, cx.io) catch return null, mine),
+            // Ghostty injects no per-pane id, so "ours" is the terminal that
+            // is focused the first time this is asked - which is the moment
+            // just after the reader typed `lgtm` into it. The one inference
+            // here resting on a habit rather than an identifier, and the
+            // reason `--pane` exists.
+            .ghostty => blk: {
+                var self_buf: [max_pane_id]u8 = undefined;
+                const me = ghostty.front(cx.gpa, cx.io, &self_buf) orelse "";
+                break :blk ghostty.soleOther(ghostty.list(cx.gpa, arena, cx.io) catch return null, me);
+            },
+            .osc52 => null,
+        } orelse return null;
+        p.setPane(found);
+        return p.pane();
     }
 };
 
-/// Env vars only, and infallible by construction.
+/// Env vars only, and infallible by construction: OSC 52 is always reachable,
+/// so there is always a working bridge.
+///
+/// **Innermost first, which is not alphabetical.** tmux inside WezTerm sets
+/// both `$TMUX` and `$WEZTERM_PANE`, and there the pane the agent is in is a
+/// *tmux* pane - asking WezTerm to type into its own pane would put the text
+/// into tmux's status line or into whichever pane tmux happens to be showing.
+/// Whichever multiplexer is innermost owns the panes, and both tmux and herdr
+/// nest inside a terminal rather than the other way about. tmux is ahead of
+/// herdr on the same reasoning: herdr runs terminals, and a tmux inside one of
+/// them is the thing actually holding the agent's pane.
 pub fn detect(environ: *const std.process.Environ.Map) Bridge {
-    const in_tmux = if (environ.get("TMUX")) |v| v.len > 0 else false;
-    if (!in_tmux) return .osc52;
+    if (nonEmpty(environ, "TMUX")) return .{ .tmux = panesFrom(environ, "TMUX_PANE") };
+    if (nonEmpty(environ, "HERDR_ENV")) return .{ .herdr = panesFrom(environ, "HERDR_PANE_ID") };
+    if (nonEmpty(environ, "WEZTERM_PANE")) return .{ .wezterm = panesFrom(environ, "WEZTERM_PANE") };
+    if (nonEmpty(environ, "KITTY_WINDOW_ID")) return .{ .kitty = panesFrom(environ, "KITTY_WINDOW_ID") };
+    // Last of the five, and the only one with nothing to put in `Panes`:
+    // Ghostty says *that* you are in it and never *where*, so self-exclusion
+    // is deferred to the first inference.
+    if (isGhostty(environ)) return .{ .ghostty = .{} };
+    return .osc52;
+}
 
-    var t: Tmux = .{};
-    if (environ.get("TMUX_PANE")) |p| {
-        t.self_len = @min(p.len, t.self_buf.len);
-        @memcpy(t.self_buf[0..t.self_len], p[0..t.self_len]);
+/// `$GHOSTTY_RESOURCES_DIR` is injected by Ghostty itself; `$TERM_PROGRAM` is
+/// the conventional one and survives a shell that clears the first. Either
+/// will do, because the question is only which backend to try.
+fn isGhostty(environ: *const std.process.Environ.Map) bool {
+    if (nonEmpty(environ, "GHOSTTY_RESOURCES_DIR")) return true;
+    const tp = environ.get("TERM_PROGRAM") orelse return false;
+    return std.mem.eql(u8, tp, "ghostty");
+}
+
+fn nonEmpty(environ: *const std.process.Environ.Map, key: []const u8) bool {
+    return if (environ.get(key)) |v| v.len > 0 else false;
+}
+
+/// Our own pane id, so inference can exclude it. Absent is fine: `soleOther`
+/// then refuses anything but a window holding exactly one pane, which is the
+/// safe way to be wrong.
+fn panesFrom(environ: *const std.process.Environ.Map, key: []const u8) Panes {
+    var p: Panes = .{};
+    if (environ.get(key)) |v| {
+        p.self_len = @min(v.len, p.self_buf.len);
+        @memcpy(p.self_buf[0..p.self_len], v[0..p.self_len]);
     }
-    return .{ .tmux = t };
+    return p;
 }
 
 /// The payload as it goes out: newline refused, carriage returns dropped, one
@@ -245,9 +403,27 @@ pub fn loadTarget(io: std.Io, gpa: Allocator, buf: []u8) ?[]const u8 {
 }
 
 /// Split from the read so the validation has a test that touches no file.
+///
+/// Two shapes, because the three multiplexers do not agree on what a pane id
+/// looks like: tmux writes `%12`, WezTerm and kitty write a bare integer. The
+/// file does not say which wrote it and does not need to - a target saved
+/// under one multiplexer and read under another simply will not match
+/// anything, and the inference that runs next is the better answer than
+/// sending text somewhere arbitrary.
+///
+/// What the check is actually for is a file the user has edited by hand into
+/// something that is not an id at all.
 fn parseTarget(bytes: []const u8, buf: []u8) ?[]const u8 {
     const id = std.mem.trim(u8, bytes, " \t\r\n");
-    if (id.len == 0 or id.len > buf.len or id[0] != tmux.pane_sigil) return null;
+    if (id.len == 0 or id.len > buf.len) return null;
+    const digits = if (id[0] == tmux.pane_sigil) id[1..] else id;
+    if (digits.len == 0) return null;
+    // Digits, and the two characters herdr's `w1:p1` adds. Loose on purpose:
+    // the check is for a file someone has hand-edited into prose, not a
+    // parser for four id grammars that would reject the next one.
+    for (digits) |c| {
+        if (!std.ascii.isDigit(c) and c != ':' and c != 'w' and c != 'p') return null;
+    }
     @memcpy(buf[0..id.len], id);
     return buf[0..id.len];
 }
@@ -351,17 +527,65 @@ test "a send with no multiplexer lands on the clipboard and says so" {
     }, "one\ntwo"));
 }
 
-test "a saved target is a pane id, and nothing else is accepted" {
-    var buf: [tmux.max_pane_id]u8 = undefined;
+test "a saved target is a pane id in either spelling, and nothing else" {
+    var buf: [max_pane_id]u8 = undefined;
+    // tmux's.
     try testing.expectEqualStrings("%12", parseTarget("%12\n", &buf).?);
     try testing.expectEqualStrings("%12", parseTarget("  %12  ", &buf).?);
+    // WezTerm's and kitty's, which are bare integers. Rejecting these was the
+    // bug the moment there was a second multiplexer: the target was saved and
+    // then silently thrown away on the next run.
+    try testing.expectEqualStrings("12", parseTarget("12\n", &buf).?);
+    try testing.expectEqualStrings("0", parseTarget("0", &buf).?);
+    // herdr's, which is a workspace and a pane.
+    try testing.expectEqualStrings("w1:p1", parseTarget("w1:p1\n", &buf).?);
 
     // Anything else is ignored in favour of the inference that runs next,
     // which is the better answer than sending text somewhere arbitrary.
     try testing.expect(parseTarget("", &buf) == null);
     try testing.expect(parseTarget("\n", &buf) == null);
-    try testing.expect(parseTarget("12", &buf) == null);
+    try testing.expect(parseTarget("%", &buf) == null);
+    try testing.expect(parseTarget("agent", &buf) == null);
+    try testing.expect(parseTarget("%1a", &buf) == null);
     try testing.expect(parseTarget("%" ++ ("0" ** 64), &buf) == null);
+}
+
+test "the vocabulary follows the terminal, because they do not agree" {
+    // kitty's splits are windows. A message telling a kitty user to pick a
+    // pane sends them looking for a word kitty's documentation does not use.
+    try testing.expectEqualStrings("window", (Bridge{ .kitty = .{} }).unit());
+    try testing.expectEqualStrings("pane", (Bridge{ .tmux = .{} }).unit());
+    try testing.expectEqualStrings("pane", (Bridge{ .wezterm = .{} }).unit());
+    try testing.expectEqualStrings("pane", (Bridge{ .herdr = .{} }).unit());
+    try testing.expectEqualStrings("pane", (Bridge{ .ghostty = .{} }).unit());
+}
+
+test "detection prefers the multiplexer that owns the panes" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+
+    try testing.expect(detect(&env) == .osc52);
+
+    try env.put("TERM_PROGRAM", "ghostty");
+    try testing.expect(detect(&env) == .ghostty);
+
+    try env.put("KITTY_WINDOW_ID", "4");
+    try testing.expect(detect(&env) == .kitty);
+
+    try env.put("WEZTERM_PANE", "7");
+    try testing.expect(detect(&env) == .wezterm);
+
+    // herdr is a multiplexer of its own and owns panes inside whatever
+    // terminal it was launched from.
+    try env.put("HERDR_ENV", "1");
+    try testing.expect(detect(&env) == .herdr);
+
+    // tmux inside any of them sets `$TMUX`, and there the agent's pane is a
+    // *tmux* pane: asking the outer one to type into its own pane would put
+    // the review into whichever pane tmux happens to be showing. Innermost
+    // wins.
+    try env.put("TMUX", "/tmp/tmux-501/default,123,0");
+    try testing.expect(detect(&env) == .tmux);
 }
 
 test "a pane longer than the inline buffer is truncated, not overrun" {

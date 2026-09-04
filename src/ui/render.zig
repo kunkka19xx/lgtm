@@ -322,13 +322,23 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
             try std.fmt.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
     else if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
         "VISUAL LINE"
+    else if (v.base.len > 0)
+        // `main` for a live review against a branch, `main..HEAD` for a static
+        // one - the arrow is what says the right-hand side is a tree rather
+        // than the tree on disk, and that nothing here is going to move.
+        (if (v.target.len > 0)
+            try std.fmt.allocPrint(f.arena, "{s}..{s}", .{ v.base, v.target })
+        else
+            try std.fmt.allocPrint(f.arena, "{s}", .{v.base}))
     else
         modeLabel(v.mode);
 
     // Flush against the left edge: a leading space reads as the pill being
     // indented rather than as the bar starting there.
     var walk_key: [32]u8 = undefined;
-    const badge = if (v.viewing != null) t.turn_badge else t.mode_badge;
+    // The accent, the same as a turn's: both say the diff on screen is not the
+    // one this tool is otherwise always showing.
+    const badge = if (v.viewing != null or v.base.len > 0) t.turn_badge else t.mode_badge;
     var col: u16 = try f.print(row, 0, badge, " {s} ", .{label});
 
     col += 2;

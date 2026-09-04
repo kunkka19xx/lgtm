@@ -384,8 +384,53 @@ load-buffer` instead, so this should not happen; if it does, check that `tmux`
 is on your `PATH`.
 
 **Nothing is sent to the agent** — `lgtm` needs to know which pane your agent is
-in. It infers the only other pane; with more than two it will say so rather than
-guess. Start it with `--pane %N` to be explicit.
+in. It infers the only other one; with more than two it will say so rather than
+guess. Start it with `--pane` to be explicit: `%3` in tmux, `w1:p1` in herdr,
+`3` in WezTerm and kitty. kitty calls its splits *windows* rather than panes, and `lgtm` says so
+too — the flag is still `--pane`, because it is one flag.
+
+**kitty says `set allow_remote_control yes`** — kitty refuses to let any process
+type into your terminal until you allow it. Put `allow_remote_control yes` in
+`kitty.conf` and restart it. Until then `<CR>` degrades to the clipboard, which
+still works; it is a paste away rather than a keystroke away.
+
+### Which terminals it can type into
+
+| | how | |
+|---|---|---|
+| **tmux** | `send-keys` | also carries the clipboard, because tmux's default `set-clipboard external` swallows an application's OSC 52 |
+| **herdr** | `herdr pane send-text` | pane ids are `w1:p1`. Built for agents, so `send-text` inserts and never submits |
+| **WezTerm** | `wezterm cli send-text` | detected by `$WEZTERM_PANE` |
+| **kitty** | `kitten @ send-text` | needs `allow_remote_control yes` in `kitty.conf` — off by default, on purpose |
+| **Ghostty** | AppleScript | **macOS, Ghostty 1.3+.** Needs Automation access the first time — macOS will ask |
+| **anything else** | OSC 52 | `<CR>` copies instead of sending. Still a paste away |
+
+**Alacritty, iTerm2, Terminal.app** and the rest have no way for one program to
+type into another's split, so `lgtm` falls back to the clipboard there. **Run
+tmux or herdr inside them** and you get the full loop — which is what most
+people already do, and why both are detected ahead of the terminal they are
+running in.
+
+**Ghostty is a special case.** It gained an AppleScript dictionary in 1.3, so
+`lgtm` can type into another split — on macOS, and after you allow it in
+System Settings → Privacy & Security → Automation. Ghostty is also the one
+terminal that does not tell a pane which pane it is: there is no
+`$GHOSTTY_PANE`. `lgtm` takes the *focused* split as its own the first time it
+needs to know, which is right because that is the split you just typed `lgtm`
+into — but if you have moved focus first, pass `--pane N`. `osascript -e 'tell
+application "Ghostty" to get id of every terminal'` lists them.
+
+### Reviewing something other than the working tree
+
+| | |
+|---|---|
+| `lgtm` | HEAD against the working tree — the default, and what the tool is about |
+| `lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
+| `lgtm --base main --target HEAD` | committed work only, as two trees. **Static** — nothing can move, so the watcher, the snapshots and the mark are all off |
+
+The badge says which: `main` or `main..HEAD` in the accent instead of `NORMAL`,
+because a diff against a branch looks exactly like a diff against HEAD and
+reading one as the other is the mistake worth preventing.
 
 **Snapshots are not happening** — they need a git repository, and a turn is
 taken ten seconds after the agent *stops* writing. Changes made in the first

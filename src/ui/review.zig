@@ -63,6 +63,23 @@ pub const Review = struct {
     /// the buffer disagree. Surfaced rather than rendered as a blend of two
     /// states.
     torn: bool = false,
+    /// What the review is *against*, and what it is *of*. `--base` and
+    /// `--target`.
+    ///
+    /// `HEAD` and the working tree is the review this tool exists for, and
+    /// every other pair is the same review with a different source - which is
+    /// the whole claim `core/git.zig` makes and the timeline already proved by
+    /// construction. Nothing above the diff notices: hunks, change ids,
+    /// syntax, search, the file list and the notes never knew where a diff
+    /// came from.
+    ///
+    /// A `target` makes the review **static**: both sides are trees, so
+    /// nothing can move under the reader. The watcher, the snapshot store and
+    /// the mark are all about the working tree changing, and all three are
+    /// switched off by the caller when this is set rather than left running
+    /// against something they cannot see.
+    base: []const u8 = "HEAD",
+    target: ?[]const u8 = null,
     /// `[review] ignore` patterns, and whether they are being applied. Held
     /// here because a re-diff is where they take effect: toggling is a
     /// re-diff, not a filter over what is already parsed.
@@ -262,7 +279,13 @@ pub const Review = struct {
         // all still work - which is the same shape as a clean tree, and for
         // the same reason: a pane that crashed is a pane that cannot tell you
         // what went wrong.
-        const parsed = git.diffPathsIn(arena, self.io, null, &.{}, skip) catch |err| switch (err) {
+        const parsed = (if (self.target) |t|
+            // Two trees. No untracked scan, because between two trees there is
+            // nothing untracked: the right-hand side already contains
+            // everything git knew about at that moment.
+            git.diffAt(arena, self.io, null, skip, self.base, t)
+        else
+            git.diffPathsIn(arena, self.io, null, &.{}, skip, self.base)) catch |err| switch (err) {
             error.NotARepository => {
                 self.no_repo = true;
                 return 0;
@@ -276,7 +299,7 @@ pub const Review = struct {
         // What the patterns kept out, counted rather than assumed - which is
         // what lets the status line say a number instead of leaving the reader
         // to wonder what they have not looked at.
-        self.hidden = git.hiddenCount(self.gpa, self.io, skip);
+        self.hidden = git.hiddenCount(self.gpa, self.io, skip, self.base);
 
         // Before the buffers are attached and before ids are inherited, both
         // of which skip a summarised file: what the reader opened has to
@@ -292,7 +315,10 @@ pub const Review = struct {
 
         // Buffers are the source of truth; the diff is an overlay on them.
         const load_span = metrics.span(.source_load);
-        self.sources = source.load(arena, self.io, null, parsed.diff) catch null;
+        // The left side comes from `base`, not from HEAD, or `attach` would
+        // check every removed line against a buffer it never came from and
+        // report the whole review torn.
+        self.sources = source.loadAt(arena, self.io, null, parsed.diff, self.target, self.base) catch null;
         load_span.end();
 
         const attach_span = metrics.span(.attach);

@@ -42,7 +42,7 @@ fn insideRepo(gpa: Allocator, io: std.Io, repo: ?[]const u8) bool {
 /// startup costs 5-20 ms and will dominate the profile long before the diff
 /// itself does.
 pub fn diffPaths(gpa: Allocator, io: std.Io, paths: []const []const u8) Error!Parsed {
-    return diffPathsIn(gpa, io, null, paths, &.{});
+    return diffPathsIn(gpa, io, null, paths, &.{}, "HEAD");
 }
 
 /// Files kept out of the review by `[review] ignore`.
@@ -69,8 +69,13 @@ pub fn diffPathsIn(
     repo: ?[]const u8,
     paths: []const []const u8,
     ignore: []const []const u8,
+    /// What the working tree is compared against. `HEAD` is the review this
+    /// tool is otherwise entirely about; `--base <ref>` makes it a branch, and
+    /// nothing above this function notices - the hunks, the change ids, the
+    /// syntax and the notes never knew where a diff came from.
+    base: []const u8,
 ) Error!Parsed {
-    return diffBase(gpa, io, repo, paths, ignore, "HEAD", null);
+    return diffBase(gpa, io, repo, paths, ignore, base, null);
 }
 
 /// The review as it stood at a snapshot, rather than as it stands now.
@@ -486,9 +491,9 @@ pub fn projectFiles(gpa: Allocator, io: std.Io) Error![][]const u8 {
 /// another was the obvious way and the wrong one: `git diff` never sees
 /// untracked files, so the two lists were not the same population and the
 /// count came out short.
-pub fn hiddenCount(gpa: Allocator, io: std.Io, ignore: []const []const u8) u32 {
+pub fn hiddenCount(gpa: Allocator, io: std.Io, ignore: []const []const u8, base: []const u8) u32 {
     if (ignore.len == 0) return 0;
-    return countMatching(gpa, io, &.{ "git", "diff", "HEAD", "--name-only" }, ignore) +
+    return countMatching(gpa, io, &.{ "git", "diff", base, "--name-only" }, ignore) +
         countMatching(gpa, io, &.{ "git", "ls-files", "--others", "--exclude-standard" }, ignore);
 }
 

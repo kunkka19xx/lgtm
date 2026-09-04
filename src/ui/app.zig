@@ -670,6 +670,10 @@ pub const App = struct {
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .notes = self.commentMarks(),
+            // Empty unless `--base` or `--target` moved them, so the badge
+            // stays `NORMAL` for every ordinary session.
+            .base = if (std.mem.eql(u8, self.review.base, "HEAD")) "" else self.review.base,
+            .target = self.review.target orelse "",
             .viewing = self.review.viewing,
             .tree_moved = self.review.moved,
             .risk = self.review.risk_total,
