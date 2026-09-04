@@ -244,7 +244,7 @@ pub const Store = struct {
 
     /// Carries every comment on `path` from one version of the file to the next.
     ///
-    /// The primary path is a line map, not a search (PERFORMANCE.md 3.1), and
+    /// The primary path is a line map, not a search, and
     /// `anchor.carryLine` is where that lives. A comment the ladder cannot place
     /// becomes stale rather than moving to a plausible-looking wrong line: a
     /// remark attached to the wrong code is a lie, and a stale one is merely

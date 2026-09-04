@@ -2,7 +2,7 @@
 //
 // Points the lexer at a file and prints what it made of it, colourised, plus
 // the timings that decide where the enclosing-function scan should run
-// (ARCHITECTURE.md open question 5). `zig build lex -- <file> [line]`.
+// `zig build lex -- <file> [line]`.
 //
 // This is to the lexer what `zig build diff` is to the parser: the cheap way
 // to find out that a language definition is wrong about a real file, rather

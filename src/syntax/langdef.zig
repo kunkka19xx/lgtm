@@ -9,7 +9,7 @@
 // language, not part of the machine that reads it: `lang/zig.zig` has no
 // business importing a scanner. The performance notes below are why this file
 // is larger than the data it holds - every table here exists because a
-// measurement asked for it (PERFORMANCE.md 6.1).
+// measurement asked for it.
 
 const std = @import("std");
 const token = @import("token.zig");
@@ -120,7 +120,7 @@ pub const LangDef = struct {
     /// fall through to the map and are still answered correctly; false
     /// negatives are impossible, since a real keyword sets both of its bits.
     ///
-    /// This is PERFORMANCE.md 6.1's T1 item at the cost of a comptime table
+    /// This is the tier-one win at the cost of a comptime table
     /// rather than a hand-rolled perfect hash. Revisit only if a profile says
     /// the remainder still matters.
     pub fn lookupWord(self: *const LangDef, word: []const u8) ?Kind {
@@ -133,7 +133,7 @@ pub const LangDef = struct {
 
 /// Builds the word lookups at comptime. `std.StaticStringMap` buckets by
 /// length and compares only same-length keys, which is enough: the perfect
-/// hash of PERFORMANCE.md 6.1 is a T1 item and waits for profile evidence.
+/// hash is a tier-one item and waits for profile evidence.
 pub fn define(comptime d: LangDef) LangDef {
     comptime {
         var out = d;

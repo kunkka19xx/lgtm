@@ -209,7 +209,7 @@ fn trim(s: []const u8) []const u8 {
 }
 
 /// Everything before an unquoted `#`. Quoted, because `"#{change_id}"` is a
-/// template string that FEATURES.md 4.5 puts in this file, and truncating it
+/// template string a `[templates]` entry puts in this file, and truncating it
 /// at the `#` would be a silent corruption rather than an error.
 fn stripComment(line: []const u8) []const u8 {
     var i: usize = 0;
@@ -285,7 +285,7 @@ test "a document is tables, settings, and the lines that are neither" {
 test "a `#` inside a string is data, not a comment" {
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
     defer a.deinit();
-    // Template strings are full of them (FEATURES.md 4.5:
+    // Template strings are full of them (
     // `ref_single = "#{change_id} {path}:{line}"`), and truncating one at the
     // `#` would be a silent corruption rather than an error.
     const evs = (try parseAll(a.allocator(),
@@ -337,7 +337,7 @@ test "every fault says which line, and quotes what it choked on" {
 }
 
 test "a fault costs one line, and the document keeps going" {
-    // The rule the whole config surface rests on (FEATURES.md 4.9): a typo
+    // The rule the whole config surface rests on: a typo
     // takes its own line down and nothing else.
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
     defer a.deinit();

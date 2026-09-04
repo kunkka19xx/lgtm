@@ -5,7 +5,7 @@
 // These are Nerd Font codepoints: private-use characters that only exist in a
 // patched font. That is the whole risk of the feature - in an unpatched font
 // they draw as tofu, and a broken glyph looks worse than no glyph
-// (FEATURES.md 4.2) - which is why nothing here is reachable unless the user
+// - which is why nothing here is reachable unless the user
 // asked for it by name.
 //
 // Each entry names the Nerd Font class it came from, so a codepoint that turns

@@ -6,7 +6,7 @@
 // Structure only - no text is formatted here. A row is a few bytes naming
 // where its content comes from, so the list is built once per re-diff (from
 // the diff arena) while the strings are built per frame for visible rows only
-// (PERFORMANCE.md 7.5). Keeping this file free of vaxis is what lets the
+//. Keeping this file free of vaxis is what lets the
 // layout be tested without a terminal.
 
 const std = @import("std");

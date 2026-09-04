@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // `--theme-preview`: every bundled theme drawn as a few rows of diff, so a
-// theme can be chosen without restarting the tool once per candidate
-// (FEATURES.md 4.1).
+// theme can be chosen without restarting the tool once per candidate.
 //
 // Written straight to stdout as SGR rather than through vaxis: this runs
 // before any terminal setup, and a preview that needed the alt screen would

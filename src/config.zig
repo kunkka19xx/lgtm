@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The config file. A small TOML subset, read from the global file and then the
-// repo's, merged rather than replaced (FEATURES.md 4.8) - and never fatal
-// (FEATURES.md 4.9). A bad line costs that one key its value, is reported with
+// repo's, merged rather than replaced - and never fatal
+//. A bad line costs that one key its value, is reported with
 // the file and line it came from, and everything else in the file still
 // applies. A tool that refuses to start because of a typo in a config file is
 // a tool people uninstall.
@@ -38,7 +38,7 @@ pub const max_bytes: usize = 256 << 10;
 /// stays free of vaxis; `ui/app.zig` does the mapping.
 /// `ui.icons`. `nerd` adds per-filetype icons to the file list and assumes a
 /// patched font; the other two assume nothing, which is why one of them is the
-/// default (FEATURES.md 4.2).
+/// default.
 pub const Icons = enum { unicode, ascii, nerd };
 
 /// Where the compose box sits, and therefore where the lists it opens go: they
@@ -64,7 +64,7 @@ pub const Ui = struct {
     /// Soft wrap. On, a line wider than the pane continues on the next screen
     /// row; off, it is cut at the edge. Default on because the pane this is
     /// designed for is a split one, and a review that hides the end of a line
-    /// is a review of the part that fit (SPEC.md 3).
+    /// is a review of the part that fit.
     wrap: bool = true,
     /// The longest a scroll may take to arrive, in milliseconds. A short jump
     /// finishes sooner: it travels at one screen row per frame, which is the
@@ -81,7 +81,7 @@ pub const Ui = struct {
 };
 
 /// Navigation policy: motions that could reasonably go either way are settings
-/// rather than opinions baked into dispatch (FEATURES.md 4.7b).
+/// rather than opinions baked into dispatch.
 pub const Nav = struct {
     /// `]h` carries on into the next file at the end of this one. Default true
     /// because the status line already counts hunks across every file - "4 of
@@ -130,7 +130,7 @@ pub const Preset = struct {
 };
 
 /// One thing wrong with one line, in the words the user needs to fix it: which
-/// file, which line, which key (FEATURES.md 4.9).
+/// file, which line, which key.
 pub const Problem = struct {
     source: []const u8,
     line: u32,
@@ -432,7 +432,7 @@ pub const Loader = struct {
 
         // A sequence that is a prefix of another fires first and makes the
         // longer one unreachable. Refusing the override and keeping the
-        // previous keymap is what FEATURES.md 4.9 asks for: fall back for
+        // previous keymap is the rule: fall back for
         // that key only, and say why.
         if (keymap.shadowed(next.items)) |hit| {
             var fbuf: [keytext.max_keys_bytes]u8 = undefined;
@@ -577,7 +577,7 @@ fn protoFor(cmd: keymap.Command) keymap.Binding {
 
 /// Where the config lives. `$XDG_CONFIG_HOME` first, as every other tool on
 /// the user's machine does, `~/.config` after it, and the repo's own file
-/// last so that it wins (FEATURES.md 4.8).
+/// last so that it wins.
 pub const repo_path = fs.state_dir ++ "/config.toml";
 
 pub fn globalPath(arena: Allocator, environ: *const std.process.Environ.Map) ?[]const u8 {
@@ -647,7 +647,7 @@ test "the settings that exist can be set" {
 }
 
 test "a bad line costs one key its value and nothing else" {
-    // The rule from FEATURES.md 4.9, and the whole reason this parser reports
+    // The rule, and the whole reason this parser reports
     // rather than returns an error: the typo on line 3 must not take line 4
     // down with it.
     var l = loadText(
@@ -863,7 +863,7 @@ test "a bad escape names the escape, not the line" {
 }
 
 test "the later file wins, key by key" {
-    // Merge, do not replace (FEATURES.md 4.8): the repo file overrides the one
+    // Merge, do not replace: the repo file overrides the one
     // key it names and leaves the rest of the global file standing.
     var l = Loader.init(testing.allocator);
     defer l.deinit();

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The `F` overlay: every changed file in the review, narrowed as you type,
-// `Enter` to jump to one (SPEC.md 6.4, FEATURES.md 4.7).
+// `Enter` to jump to one.
 //
 // The same shape as `help.zig`, deliberately: a filter, a selection, and the
 // grid the last frame drew. Two overlays that behave differently would be two

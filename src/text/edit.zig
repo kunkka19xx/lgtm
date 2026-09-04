@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Byte offsets only. UTF-16 conversion belongs in lsp/position.zig, which does
-// not exist yet (ARCHITECTURE.md 11.3).
+// not exist yet.
 
 const std = @import("std");
 
@@ -30,7 +30,7 @@ pub const Range = struct {
 };
 
 /// The only way text changes. Revert-a-hunk and stage/unstage in v0.3 are both
-/// TextEdits, as are LSP code actions later (ARCHITECTURE.md 11.2).
+/// TextEdits, as are LSP code actions later.
 pub const TextEdit = struct {
     range: Range,
     new_text: []const u8,

@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     try w.flush();
 
     // Read before the terminal is touched: a config error is a status-line
-    // notice on the first frame, never a reason not to start (FEATURES.md
+    // notice on the first frame, never a reason not to start (hard rule
     // 4.9). The loader owns the bindings the keymap is about to point at, so
     // it has to outlive the app.
     var cfg = config.load(gpa, io, init.environ_map, config_path);

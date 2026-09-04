@@ -2,10 +2,9 @@
 //
 // The universal fallback: OSC 52 puts text on the clipboard through the
 // terminal itself, which is why it and not a system clipboard call is the
-// fallback - it works over SSH, and the tool stays usable on a remote box
-// (SPEC.md 6.3).
+// fallback - it works over SSH, and the tool stays usable on a remote box.
 //
-// ARCHITECTURE.md 5c asks that libvaxis's implementation be evaluated before
+// libvaxis's implementation is worth evaluating before
 // hand-rolling escape sequences. It was: `Vaxis.copyToSystemClipboard` is a
 // method on a receiver it never reads, so reuse means passing `undefined` at
 // the call site and importing the whole TUI into `bridge/` for one sequence.

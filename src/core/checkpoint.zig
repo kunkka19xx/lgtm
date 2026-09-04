@@ -14,8 +14,7 @@
 // diff against HEAD, so that stays the frame; this only says which of its rows
 // arrived after the mark. Comparing working trees rather than diffs is what
 // makes it a `linemap` lookup instead of a second diff algorithm - the map is
-// already written, already measured, and already the thing anchoring trusts
-// (PERFORMANCE.md 3.1).
+// already written, already measured, and already the thing anchoring trusts.
 //
 // Pure: bytes and a `FileDiff` in, a bool per row out. No allocator lifetime
 // assumptions beyond the one passed in, and no notion of a key, a colour or a

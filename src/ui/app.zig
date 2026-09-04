@@ -12,7 +12,7 @@
 //
 // The frame arena stays here because the state is what fills it: it holds the
 // strings a single frame draws and is reset *after* render and flush, because
-// vaxis cells reference that text rather than copying it (ARCHITECTURE.md 4).
+// vaxis cells reference that text rather than copying it.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -101,8 +101,7 @@ pub const App = struct {
     /// position - which file, which row - is here; what changed is there.
     review: review_mod.Review,
     /// The strings one frame draws. Reset *after* render and flush, never
-    /// before: vaxis cells reference this text rather than copying it
-    /// (ARCHITECTURE.md 5c).
+    /// before: vaxis cells reference this text rather than copying it.
     frame_arena: std.heap.ArenaAllocator,
 
     queue: *event.Queue,
@@ -304,7 +303,7 @@ pub const App = struct {
     /// Set by `e`. The run loop owns the terminal, so it - not `run(cmd)` -
     /// is what can hand it to a child process.
     want_editor: bool = false,
-    /// Every outgoing string is a template (FEATURES.md 4.5). Config-owned in
+    /// Every outgoing string is a template. Config-owned in
     /// v0.2; the defaults are the internal table until then.
     templates: template.Table = .{},
     /// The composed payload, waiting for the loop to deliver it. Session
@@ -425,7 +424,7 @@ pub const App = struct {
 
         // The working-tree text of every file carrying a note, copied before
         // the arena that holds it is reset. Re-anchoring needs the old text
-        // and the new one at the same moment (PERFORMANCE.md 3.1), and the old
+        // and the new one at the same moment, and the old
         // one is about to stop existing.
         var before: std.ArrayList(struct { path: []u8, text: []u8 }) = .empty;
         defer {
@@ -879,7 +878,7 @@ pub const App = struct {
                 try self.review.mark();
                 // The same state, written down. `m` copies the working tree
                 // into memory for this session and into a ref for the next
-                // one; SNAPSHOTS.md 4 says the checkpoint and the snapshot are
+                // one; the checkpoint and the snapshot are
                 // one thing, so this is one keystroke doing one thing twice
                 // rather than two states to keep in step.
                 const kept = self.snapshotMark();
@@ -1313,8 +1312,7 @@ pub const App = struct {
         switch (kind) {
             .search_forward => {
                 // Bare Enter repeats the last query, as in vim. Every search
-                // starts forward; `N` is what runs it backwards
-                // (FEATURES.md 4.4).
+                // starts forward; `N` is what runs it backwards.
                 if (line.len != 0) self.finder.set(line, .forward);
                 try self.searchStep(if (line.len == 0) self.finder.dir else .forward);
             },
@@ -1325,7 +1323,7 @@ pub const App = struct {
         }
     }
 
-    /// `:q` and nothing else. SPEC.md 6.2 rules out a command mode in v1
+    /// `:q` and nothing else. There is no command mode in v1
     /// except this one, so an unknown command says so rather than being
     /// quietly ignored - which would read as a dropped keystroke.
     fn submitCommand(self: *App, line: []const u8) void {
@@ -1428,7 +1426,7 @@ pub const App = struct {
 
     /// A reference, before a template turns it into text.
     ///
-    /// Every field resolves against the *new* file (SPEC.md 6.3): a line
+    /// Every field resolves against the *new* file: a line
     /// number from the HEAD side means nothing to an agent looking at what it
     /// just wrote.
     pub const Ref = struct {
@@ -2400,7 +2398,7 @@ pub const App = struct {
     };
 
     /// What `e` should open. References resolve against the *new* file
-    /// (SPEC.md 6.3), so a cursor on a deleted line - which has no new-file
+    ///, so a cursor on a deleted line - which has no new-file
     /// line of its own - falls back to where the deletion happened.
     pub fn editTarget(self: *App) ?EditTarget {
         const f = self.current() orelse return null;
@@ -2545,7 +2543,7 @@ pub const App = struct {
     /// The turn list: what the agent has written, one row per turn.
     ///
     /// Built from the commit chain rather than from parsed diffs
-    /// (SNAPSHOTS.md 5.3c), which is what keeps it two subprocesses whatever
+    ///, which is what keeps it two subprocesses whatever
     /// the length of the session. `Enter` shows that turn, so the list is a
     /// selector and the diff view is the viewer - there is no second display
     /// of files and hunks anywhere in this feature.
@@ -2696,7 +2694,7 @@ pub const App = struct {
             return;
         }
 
-        // Snapshot first, always (SNAPSHOTS.md 5.4). Without one this would be
+        // Snapshot first, always. Without one this would be
         // the only unrecoverable action in the tool, so a store that cannot
         // take it is a reason to refuse rather than to proceed carefully.
         if (!self.snapshotTurn()) {
@@ -2875,7 +2873,7 @@ pub const App = struct {
     }
 
     /// One turn's row. The rail, then which turn, what it touched, when, and
-    /// how big - four columns and no more (SNAPSHOTS.md 5.3).
+    /// how big - four columns and no more.
     fn turnLabel(
         arena: Allocator,
         turn: timeline.Turn,
@@ -2919,7 +2917,7 @@ pub const App = struct {
     /// The working tree is a position in the walk rather than a place outside
     /// it, so `]t` from the newest turn lands there and there is always a way
     /// forward. Nothing here is a jump into a different mode: it is the same
-    /// review with a different right-hand side (SNAPSHOTS.md 5.3).
+    /// review with a different right-hand side.
     fn turnStep(self: *App, delta: i32, body: u16) !void {
         const store = if (self.snap) |*s| s else {
             self.notice.set("snapshots are off here - no turns to walk", .{});
@@ -3514,7 +3512,7 @@ pub const App = struct {
                 // and turns go on accumulating - the mode row counts them - but
                 // re-diffing under someone reading turn 4 would throw them back
                 // to the present mid-sentence, which is the one thing a history
-                // view must never do (SNAPSHOTS.md 5.3).
+                // view must never do.
                 if (self.review.viewing != null) return;
                 try self.rediff();
                 self.clampScroll(body);
@@ -3540,7 +3538,7 @@ pub const App = struct {
             // a notice every quiet period would be the tool talking about
             // itself. What it buys them is that `refs/lgtm/<session>/<n>` now
             // holds the work the agent has just done, whether or not they ever
-            // press anything (SNAPSHOTS.md 2).
+            // press anything.
             .agent_quiescent => _ = self.snapshotTurn(),
             .snapshot_taken => {},
         }
@@ -5339,7 +5337,7 @@ test "a deleted line points at its hunk and says why" {
     var fx = try Fixture.withDeletion(testing.allocator, 1);
     defer fx.deinit();
 
-    // References resolve against the new file (SPEC.md 6.3). This line is not
+    // References resolve against the new file. This line is not
     // in it, so the enclosing hunk is the closest honest answer - and the
     // agent is told that is what happened.
     fx.app.cursor = 2;
@@ -5398,7 +5396,7 @@ test "a change id follows the hunk, not the row" {
     defer fx.deinit();
 
     // The second file's hunk is #2, and its reference has to say so - the id
-    // is what the user and the agent say to each other (SPEC.md 6.5).
+    // is what the user and the agent say to each other.
     try fx.press("]f");
     try fx.press("<CR>");
     try testing.expectEqualStrings("#2 b.zig:1", fx.app.payload());
@@ -5815,7 +5813,7 @@ test "confirming without a store refuses rather than writing unrecoverably" {
 
     // No snapshot store, so the pre-restore state could not be recorded. That
     // is a reason to refuse: without it this would be the only unrecoverable
-    // action in the tool (SNAPSHOTS.md 5.4).
+    // action in the tool.
     try fx.app.handle(.{ .key = .{ .codepoint = 'y', .mods = .{} } }, body_rows);
     try fx.expectNotice("could not snapshot first");
     try testing.expect(fx.app.pending_restore == null);

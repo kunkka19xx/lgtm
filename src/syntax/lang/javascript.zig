@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// JavaScript, and the language ARCHITECTURE.md 5 names as the one that
+// JavaScript, and the language named as the one that
 // exhausts a lexer. Two of its context-sensitive corners are conceded here
 // rather than half-solved, both visible and both bounded:
 //

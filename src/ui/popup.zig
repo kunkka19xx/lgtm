@@ -2,7 +2,7 @@
 //
 // The `?` overlay: a box floating over the diff rather than a screen replacing
 // it, so the review stays visible around the edges and the overlay reads as a
-// layer (FEATURES.md 4.4).
+// layer.
 //
 // The geometry is separated from the drawing, because the geometry is the part
 // that is easy to get wrong and impossible to see: how many columns fit, how

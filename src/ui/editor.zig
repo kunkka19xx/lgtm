@@ -5,7 +5,7 @@
 // that is wrong in every tool that gets this wrong: the line-number flag is
 // not portable, and getting it wrong silently opens the file at line 1.
 //
-// v1 is read-only (SPEC.md 4), so this is an escape hatch rather than an edit
+// v1 is read-only, so this is an escape hatch rather than an edit
 // path: you leave, you fix it yourself, you come back and the watcher has
 // already re-diffed.
 

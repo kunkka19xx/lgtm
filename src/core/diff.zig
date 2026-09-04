@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Parses `git diff` output into the hunk model. Everything allocated here
-// belongs to the diff arena and dies on the next re-diff (ARCHITECTURE.md 4);
+// belongs to the diff arena and dies on the next re-diff;
 // text slices borrow from the raw output, which the arena also owns.
 
 const std = @import("std");
@@ -13,7 +13,7 @@ const DiffLines = hunk.DiffLines;
 const LineKind = hunk.LineKind;
 
 /// Above this many changed lines a file renders as a summary and its hunks are
-/// parsed only when opened (SPEC.md 6.1).
+/// parsed only when opened.
 pub const large_file_lines = 5000;
 
 pub const Status = enum { modified, added, deleted, renamed, binary };
@@ -30,7 +30,7 @@ pub const FileDiff = struct {
     added: u32 = 0,
     removed: u32 = 0,
     /// Abbreviated blob hashes from git's `index <old>..<new>` line. These are
-    /// the natural key for a parsed-diff cache (PERFORMANCE.md 7.2), which is
+    /// the natural key for a parsed-diff cache, which is
     /// why they are captured even though nothing consumes them yet.
     old_blob: []const u8 = "",
     new_blob: []const u8 = "",

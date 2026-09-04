@@ -3,10 +3,6 @@
 A terminal diff reviewer that runs beside your coding agent. This is everything
 you need to use it; [CONFIG.md](CONFIG.md) is the full settings reference.
 
-Comments in the source cite design documents by section - `SPEC.md 6.5`,
-`PERFORMANCE.md 3.1`. Those documents are the author's and are not published;
-the citation is there so the reasoning has a name, not so you can look it up.
-
 ---
 
 ## Install

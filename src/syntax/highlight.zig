@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Which highlighter a file gets, and the cache that keeps re-diffs from
-// re-scanning files nobody touched (ARCHITECTURE.md 5).
+// re-scanning files nobody touched.
 //
 // The user never sees an unhighlighted screen as a failure: an unknown
 // language, an oversized file or a missing lexer all fall back to `.plain`,
@@ -75,7 +75,7 @@ pub fn byName(name: []const u8) ?*const LangDef {
 }
 
 /// Not built in v0.1. The variant exists so linking a grammar later is a
-/// change here and nowhere else (ARCHITECTURE.md 5).
+/// change here and nowhere else.
 pub const TreeSitter = struct {};
 
 pub const Highlighter = union(enum) {
@@ -151,8 +151,7 @@ pub fn hashContent(bytes: []const u8) u64 {
 
 /// LRU over whole-file work, keyed by content hash. The agent touches six
 /// files but usually changes one or two; the rest cost nothing on re-diff.
-/// This is the optimisation that matters, not micro-tuning the lexer
-/// (ARCHITECTURE.md 5).
+/// This is the optimisation that matters, not micro-tuning the lexer.
 ///
 /// An entry holds the structure pass eagerly and the whole-file token runs
 /// lazily, because a caller that only wants a hunk header should not pay for
@@ -218,7 +217,7 @@ pub const Cache = struct {
 
     /// Structure for `text`, computed on miss. Instrumented, so `--profile`
     /// answers whether the whole-file pass ever needs splitting into
-    /// visible-range work (ARCHITECTURE.md open question 5).
+    /// visible-range work.
     ///
     /// `key` identifies the content and is supplied by the caller rather than
     /// derived here: core/diff.zig already has git's blob hash, and re-hashing

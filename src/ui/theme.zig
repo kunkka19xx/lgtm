@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Styles and glyphs, kept apart from the code that draws so a second theme is
-// data rather than a branch (FEATURES.md 4.1). A theme is a `Palette` - a
+// data rather than a branch. A theme is a `Palette` - a
 // dozen colours - plus one shared mapping onto the semantic slots the
 // renderer asks for, which is what stops seven bundled themes from becoming
 // seven chances to get "the accent, recessed" subtly different.
@@ -40,7 +40,7 @@ pub const Glyphs = struct {
     at: []const u8,
     /// Border of the `?` popup. Rounded in unicode, because the popup floats
     /// over the diff and a soft corner reads as "on top of" rather than "cut
-    /// out of" (FEATURES.md 4.2 makes the style config later).
+    /// out of". The border style becomes config later.
     box_h: []const u8,
     box_v: []const u8,
     box_tl: []const u8,
@@ -191,7 +191,7 @@ pub const Theme = struct {
 
     /// The theme's primary. One named slot rather than a colour picked per
     /// call site, so a config file can move every accented thing at once
-    /// (FEATURES.md 4.1). Used for the key column of the `?` popup, which read
+    ///. Used for the key column of the `?` popup, which read
     /// as commented-out code while it shared `hint`'s grey with `comment`.
     accent: Style,
 
@@ -414,7 +414,7 @@ fn parseColour(word: []const u8) ?Color {
     return null;
 }
 
-/// The names `[theme]` accepts that are not field names, from FEATURES.md 4.1.
+/// The names `[theme]` accepts that are not field names.
 /// The struct fields say what the renderer draws; these say what a reader
 /// reviewing a diff would call it, and both should work.
 const aliases: []const struct { from: []const u8, to: []const u8 } = &.{
@@ -568,7 +568,7 @@ test "slots are set by their own name or by the name the docs use" {
     try std.testing.expect(setSlot(&t, "add_sign", try parseStyle("#ff0000")));
     try std.testing.expectEqual(Color{ .rgb = .{ 0xff, 0, 0 } }, t.add_sign.fg);
 
-    // FEATURES.md 4.1 promises `added`; the field is `add_sign`. Both work.
+    // The config surface promises `added`; the field is `add_sign`. Both work.
     try std.testing.expect(setSlot(&t, "added", try parseStyle("#00ff00")));
     try std.testing.expectEqual(Color{ .rgb = .{ 0, 0xff, 0 } }, t.add_sign.fg);
 

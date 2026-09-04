@@ -2,8 +2,8 @@
 //
 // The lexer benchmark. `zig build bench -- [dir] [ext]`, ReleaseFast.
 //
-// Instrument before optimising (PERFORMANCE.md 0): the T1 and T2 items in
-// PERFORMANCE.md 6 - comptime perfect hashing for keywords, delimiter skipping
+// Instrument before optimising: the T1 and T2 items in
+// The lexer's budget - comptime perfect hashing for keywords, delimiter skipping
 // - are not to be built until this says which one is worth building. It
 // measures four things, because they have different budgets:
 //
@@ -20,7 +20,7 @@ const lgtm = @import("lgtm");
 const lexer = lgtm.lexer;
 const highlight = lgtm.highlight;
 
-/// A screen's worth of lines, plus the margin PERFORMANCE.md 7.5 asks for.
+/// A screen's worth of lines, plus a margin.
 const screen_lines = 50;
 const min_iterations = 5;
 const max_iterations = 2000;
@@ -253,7 +253,7 @@ pub fn main(init: std.process.Init) !u8 {
     // Budgets restated so a regression is visible without opening the docs.
     const s_whole = try benchStructure(io, gpa, whole);
     const f_whole = try benchFullLex(io, gpa, whole);
-    try w.print("\nagainst budgets (PERFORMANCE.md 0)\n", .{});
+    try w.print("\nagainst budgets\n", .{});
     try w.print("  structure, {d} lines: {d:.3} ms   {s} (re-diff budget 100 ms)\n", .{
         whole.lines, ms(s_whole.ns), if (ms(s_whole.ns) <= 100) "ok" else "OVER",
     });

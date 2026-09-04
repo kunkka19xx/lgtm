@@ -23,7 +23,7 @@ pub const Kind = enum(u8) {
     punct,
 };
 
-/// Token runs, never per-character styles (PERFORMANCE.md 6.4). `start` is a
+/// Token runs, never per-character styles. `start` is a
 /// byte offset into the scanned text.
 ///
 /// Two invariants the renderer depends on, both asserted in the tests below:

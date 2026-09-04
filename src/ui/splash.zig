@@ -166,7 +166,7 @@ pub fn draw(
     }
 
     // The key rather than a `?`: a remapped keymap has to document itself
-    // (FEATURES.md 4.7), and this screen is the only place a reader who has
+    //, and this screen is the only place a reader who has
     // not opened the popup yet can learn how to.
     row += 1;
     var buf: [32]u8 = undefined;

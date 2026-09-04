@@ -210,6 +210,6 @@ test "each kind draws its own prefix" {
     try testing.expectEqualStrings(":", Kind.command.prefix());
     try testing.expectEqualStrings("> ", Kind.help_filter.prefix());
     // No `?` kind: reverse search was dropped as redundant with `/` plus `N`,
-    // which is what freed the key for the help popup (FEATURES.md 4.4).
+    // which is what freed the key for the help popup.
     try testing.expectEqual(@as(usize, 3), @typeInfo(Kind).@"enum".fields.len);
 }

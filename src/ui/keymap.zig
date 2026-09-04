@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Every action is a named command and the keymap maps sequences to names, so
-// dispatch contains no hardcoded keys (FEATURES.md 4.3). Remapping and presets
+// dispatch contains no hardcoded keys. Remapping and presets
 // are phase 5c; the indirection is here from the start because retrofitting it
 // means touching every call site.
 
@@ -82,7 +82,7 @@ pub const Command = enum {
     /// changes that arrived after it.
     mark_here,
     clear_mark,
-    /// The timeline (SNAPSHOTS.md 5.3). Stepping is the primary way in: the
+    /// The timeline. Stepping is the primary way in: the
     /// common question is "what did the last turn do", and it should cost one
     /// key rather than a list that has to be opened to move one step.
     next_turn,
@@ -111,7 +111,7 @@ pub const Command = enum {
     copy_text_lines,
     copy_ref,
     copy_ref_lines,
-    /// Ask presets: one keystroke, a whole question (FEATURES.md 2.1). Each
+    /// Ask presets: one keystroke, a whole question. Each
     /// is the reference plus a template, which is why they cost four enum
     /// values and no dispatch of their own.
     /// Hide the chrome and give the body the whole pane.
@@ -377,7 +377,7 @@ pub const default_bindings: []const Binding = &.{
     // Behind the leader, every one of them. `c` is vim's change operator and
     // `C` is change-to-end-of-line - the two most-used keys after `d` - and
     // `dc` is `d` waiting for a motion. Editing is designed for rather than
-    // out (ARCHITECTURE.md 11), so taking them was borrowing against a debt
+    // out, so taking them was borrowing against a debt
     // that comes due the day insert mode lands. This is the same argument
     // that moved the ask presets off `a`, `x` and `!`.
     .{ .chords = &.{ leader, c('c') }, .command = .comment_add, .desc = "write a comment on this line", .group = .comment },
@@ -545,7 +545,7 @@ pub const Keymap = struct {
 /// True when `short` is the opening of `long`. The matcher resolves an exact
 /// match as soon as it finds one, so a binding that is a prefix of another
 /// fires first and the longer sequence can never be typed - which is the
-/// general form of "never bind the leader on its own" (FEATURES.md 4.3).
+/// general form of "never bind the leader on its own".
 pub fn isPrefix(short: []const Chord, long: []const Chord) bool {
     if (short.len == 0 or short.len >= long.len) return false;
     for (short, long[0..short.len]) |a, b| {

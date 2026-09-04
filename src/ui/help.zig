@@ -8,7 +8,7 @@
 // place.
 //
 // What it deliberately does not own: the keys. Navigation inside the popup is
-// a keymap binding like any other (FEATURES.md 4.4), so `App` matches the key
+// a keymap binding like any other, so `App` matches the key
 // and calls the move; this file never sees a chord.
 
 const std = @import("std");

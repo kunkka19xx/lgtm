@@ -3,7 +3,7 @@
 // The hunk model and change ids. A hunk is not an object with identity: git
 // recomputes hunks from scratch every run and has no memory that #3 existed.
 // The id is what the user and the agent say to each other; the hash is what
-// stops the id from lying (SPEC.md 6.5).
+// stops the id from lying.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -14,7 +14,7 @@ pub const no_id: ChangeId = 0;
 pub const LineKind = enum(u8) { context, add, del };
 
 /// Struct-of-arrays: rendering walks `kind` and `new_no` for every visible row
-/// and touches `text` only for rows it draws (PERFORMANCE.md 7.3).
+/// and touches `text` only for rows it draws.
 pub const DiffLines = struct {
     kind: []LineKind = &.{},
     /// 1-based line number in the old file, 0 when the line is an addition.
@@ -43,7 +43,7 @@ pub const Hunk = struct {
     new_start: u32,
     new_count: u32,
     /// Text after the second @@, which git fills with a guessed enclosing
-    /// symbol. Replaced by the lexer's brace-depth scan later (SPEC.md 6.1).
+    /// symbol. Replaced by the lexer's brace-depth scan later.
     section: []const u8 = "",
     /// Range into the owning FileDiff's DiffLines.
     lo: u32,
@@ -122,7 +122,7 @@ pub const IdTable = struct {
     ///
     /// Exact hash matches first, then greedy by maximum overlap of new-file
     /// ranges, highest overlap first. The Hungarian algorithm would be optimal
-    /// and is unnecessary at n < 50 (PERFORMANCE.md 4). Merge and split both
+    /// and is unnecessary at n < 50. Merge and split both
     /// fall out of the overlap scores rather than being special-cased.
     pub fn inherit(self: *IdTable, gpa: Allocator, prev: []const Hunk, cur: []Hunk) Allocator.Error!void {
         const prev_taken = try gpa.alloc(bool, prev.len);
@@ -170,7 +170,7 @@ pub const IdTable = struct {
 
         // Pass 3: a merge absorbed more than one old hunk. Any old hunk still
         // unclaimed but overlapping a now-identified hunk becomes an alias of
-        // it, lower id winning (SPEC.md 6.5).
+        // it, lower id winning.
         for (prev, 0..) |p, pi| {
             if (prev_taken[pi]) continue;
             for (cur) |*h| {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Re-anchoring. The primary path is a table lookup through an old-to-new line
-// map, not a search (PERFORMANCE.md 3.1). Fallback tiers come later; this file
+// map, not a search. Fallback tiers come later; this file
 // is the part the go/no-go gate measures.
 
 const std = @import("std");
@@ -81,7 +81,7 @@ pub const Version = struct {
 /// Which path placed a note. Recorded so the remaining tiers get built against
 /// evidence rather than speculation.
 pub const Outcome = enum {
-    /// Primary path: the line map had a counterpart (PERFORMANCE.md 3.1).
+    /// Primary path: the line map had a counterpart.
     mapped,
     /// Tier 1: exact window hash within the near window.
     near_hash,
@@ -119,7 +119,7 @@ pub const Anchor = struct {
         const from_line = self.line;
 
         // Primary path. No index is built when this succeeds, which is the
-        // common case (PERFORMANCE.md 3.1).
+        // common case.
         if (map.get(from_line)) |n| {
             self.line = n;
             return .mapped;

@@ -4,7 +4,7 @@
 // behind the same interface.
 //
 // Debounce lives here, not in the main loop: the main loop must never see a
-// burst (ARCHITECTURE.md 3). Agents write several files in quick succession and
+// burst. Agents write several files in quick succession and
 // often leave one half-written for a few milliseconds, so re-diffing on the
 // first sign of movement renders torn states and flickers.
 
@@ -27,7 +27,7 @@ pub const default_debounce_ms: i64 = 200;
 /// It is a guess, and the guess is wrong for an agent that thinks for a long
 /// time in the middle of a turn. What that costs depends entirely on what
 /// reads it: a snapshot taken early is an extra turn in the timeline, which is
-/// harmless; a notification fired early is spent (NOTIFICATIONS.md 2.1).
+/// harmless; a notification fired early is spent.
 pub const default_quiet_ms: i64 = 10_000;
 
 pub const Options = struct {
@@ -36,7 +36,7 @@ pub const Options = struct {
     repo: ?[]const u8 = null,
     /// Require the signature to be identical on two consecutive polls before
     /// emitting. Debounce already covers the common case; this is the extra
-    /// guard from SPEC.md 9 for filesystems where writes land in pieces.
+    /// guard for filesystems where writes land in pieces.
     require_stable: bool = false,
     /// Zero turns quiet detection off, which is the state until something asks
     /// for it. Nothing polls harder to provide it: it is read off the clock
@@ -71,7 +71,7 @@ pub const Poller = struct {
     prev_sig: u64 = 0,
     /// Something has changed since the last quiet period was reported. Cleared
     /// when it fires, so one silence is one signal however long it lasts, and
-    /// re-armed only by a new change - NOTIFICATIONS.md 4 rules 1 and 4, held
+    /// re-armed only by a new change - one silence is one signal, held
     /// here rather than by every caller that would otherwise have to.
     quiet_armed: bool = false,
     /// Whether a poll has happened yet. The first one is not a change, it is
@@ -158,7 +158,7 @@ pub const Poller = struct {
 
     /// Candidate paths from one `git status --porcelain`, then a stat each.
     ///
-    /// One subprocess rather than walking the tree (PERFORMANCE.md 8.1). The
+    /// One subprocess rather than walking the tree. The
     /// stats are needed because status output is identical when an
     /// already-modified file is modified again, so status alone cannot see a
     /// second edit to the same file.
@@ -321,7 +321,7 @@ pub const Watcher = struct {
             }
 
             // The turn boundary, asked after the poll rather than folded into
-            // it: a different question about the same tick (SNAPSHOTS.md 4).
+            // it: a different question about the same tick.
             //
             // An event rather than the snapshot itself. This thread must not
             // write one: the store's turn numbers and its state file are also
@@ -506,7 +506,7 @@ test "a quiet tree never emits" {
 
 test "quiet fires once after the writing stops, and only after a new change" {
     // The turn boundary the snapshot store takes its turns from
-    // (SNAPSHOTS.md 4). A different question from debounce and a much longer
+    //. A different question from debounce and a much longer
     // one: debounce asks whether a write has landed, this asks whether the
     // agent has stopped.
     const gpa = testing.allocator;
@@ -524,7 +524,7 @@ test "quiet fires once after the writing stops, and only after a new change" {
     if (try h.tick(500)) |p| h.free(p);
 
     // Nothing has happened, so there is no silence to report. An agent turn
-    // that changed nothing is not an event (NOTIFICATIONS.md 4 rule 5).
+    // that changed nothing is not an event.
     try testing.expect(!h.poller.quiet(60_000));
 
     try h.write("a.txt", "one\n");

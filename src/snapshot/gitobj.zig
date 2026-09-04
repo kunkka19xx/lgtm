@@ -2,8 +2,7 @@
 //
 // Git plumbing for the snapshot store: argv in, object ids out.
 //
-// Step 1 of SNAPSHOTS.md 5.6, and nothing more than that. No policy lives here:
-// this file does not know what a turn is, when one should be taken, or how a
+// No policy lives here: this file does not know what a turn is, when one should be taken, or how a
 // session is named. It knows how to write a tree from a set of paths without
 // touching anything of the user's, and how to read one back.
 //
@@ -15,7 +14,7 @@
 // That last property is the one worth protecting: a safety net nobody can open
 // without the tool that made it is not a safety net.
 //
-// The hard boundaries are SNAPSHOTS.md 3.1 and they are what this file is for:
+// The hard boundaries are what this file is for:
 //
 //   1. Never write `.git/index`. Every index-touching call carries
 //      `GIT_INDEX_FILE`, which is why `indexEnv` exists and why `io/proc.zig`
@@ -137,7 +136,7 @@ pub fn writeTreeArgv(out: *[2][]const u8) []const []const u8 {
 ///
 /// The parent is what gives the store its shape: a chain while the agent works,
 /// and a fork the moment a restore makes turn N+1 a child of an older turn
-/// (SNAPSHOTS.md 5.3a). Null for the first snapshot of a session.
+///. Null for the first snapshot of a session.
 pub fn commitTreeArgv(gpa: Allocator, tree: []const u8, parent: ?[]const u8, message: []const u8) Allocator.Error![]const []const u8 {
     var argv: std.ArrayList([]const u8) = .empty;
     errdefer argv.deinit(gpa);
@@ -154,7 +153,7 @@ pub fn updateRefArgv(out: *[4][]const u8, ref: []const u8, oid: []const u8) []co
 
 /// Every path and blob id in a snapshot, which is what the timeline reads to
 /// answer "did the agent walk this file back to where it was" without parsing a
-/// single diff (SNAPSHOTS.md 5.3c).
+/// single diff.
 pub fn lsTreeArgv(out: *[5][]const u8, ref: []const u8) []const []const u8 {
     out.* = .{ "git", "ls-tree", "-r", "-z", ref };
     return out[0..5];
@@ -291,7 +290,7 @@ const Ctx = struct {
 /// `paths` must come from `git status --porcelain --untracked-files=all` or
 /// something equally ignore-clean. `update-index --add` is plumbing and will
 /// happily stage `node_modules`; what keeps boundary 5 true is the path list,
-/// not this call (SNAPSHOTS.md 3.1 rule 5).
+/// not this call.
 pub fn writeSnapshot(
     gpa: Allocator,
     io: std.Io,
@@ -517,7 +516,7 @@ test "a blob is found by path, and a missing one says so" {
 }
 
 test "the same content in two turns is the same blob, which is the revert check" {
-    // SNAPSHOTS.md 5.3c: "the agent undid its own work" is `==` on two hashes,
+    // "The agent undid its own work" is `==` on two hashes,
     // because git content-addresses. This is that comparison, on the shape the
     // parser produces.
     const turn4 = try parseTree(testing.allocator, "100644 blob aaa111\tsrc/auth.zig\x00");

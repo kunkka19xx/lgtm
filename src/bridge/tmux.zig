@@ -90,7 +90,7 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
 /// Two panes in a window - the agent and the reviewer reading it - is the
 /// setup the tool is named after, and there the answer is unambiguous. Three
 /// or more is a guess, and a wrong guess types into someone's editor, so it
-/// declines and the caller asks (SPEC.md 6.3).
+/// declines and the caller asks.
 pub fn soleOther(panes: []const Pane, self_pane: []const u8) ?[]const u8 {
     var found: ?[]const u8 = null;
     for (panes) |p| {
@@ -105,7 +105,7 @@ pub const SendError = error{ PaneGone, TmuxFailed } || Allocator.Error;
 
 /// Runs `send-keys`. A dead pane is the failure worth naming: tmux exits
 /// non-zero with "can't find pane", and the caller degrades to the clipboard
-/// rather than treating it as fatal (ARCHITECTURE.md 6).
+/// rather than treating it as fatal.
 pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) SendError!void {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();

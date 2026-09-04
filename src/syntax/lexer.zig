@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // One generic lexer over per-language definitions supplied at comptime
-// (ARCHITECTURE.md 5). A lexer rather than a parser, because a hunk is by
+//. A lexer rather than a parser, because a hunk is by
 // definition a fragment - unbalanced braces, functions cut off at both ends.
 // Lexers handle fragments naturally; parsers fall into error recovery, which
 // is their slowest path.
@@ -42,7 +42,7 @@ pub const State = struct {
 
 pub const checkpoint_lines = 64;
 
-/// `{brace_depth, lex_state}` every 64 lines (PERFORMANCE.md 6.2). Lexing any
+/// `{brace_depth, lex_state}` every 64 lines. Lexing any
 /// region restarts from the nearest preceding checkpoint, so reaching line
 /// 9000 costs 64 lines of scanning, not 9000.
 pub const Checkpoint = struct {
@@ -502,8 +502,7 @@ const Scan = struct {
     }
 
     /// std's scalar search is vectorised, so this beats stepping a byte at a
-    /// time - and comment-heavy source spends a lot of its time right here
-    /// (PERFORMANCE.md 6.3).
+    /// time - and comment-heavy source spends a lot of its time right here.
     fn toLineEnd(self: *Scan) void {
         const nl = std.mem.indexOfScalarPos(u8, self.text[0..self.end], self.i, '\n');
         self.i = if (nl) |n| n + 1 else self.end;

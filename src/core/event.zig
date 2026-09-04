@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // All modes and event variants are declared now and populated later
-// (ARCHITECTURE.md 11.4). Declaring them costs nothing; retrofitting a
+//. Declaring them costs nothing; retrofitting a
 // dispatch refactor does not.
 
 const std = @import("std");
@@ -62,17 +62,17 @@ pub const Event = union(enum) {
     resize: Size,
     quit,
     /// Not produced in v0.1. The agent stopped writing and left changes behind
-    /// (docs/NOTIFICATIONS.md 3.1). Declared now because phase 5 writes the
+    ///. Declared now because phase 5 writes the
     /// dispatch switch, and this is what `task_done` was always going to be.
     agent_quiescent: struct { files: u32, added: u32, removed: u32 },
-    /// Not produced in v0.1 (docs/SNAPSHOTS.md 7). `ref` is owned by the queue
+    /// Not produced in v0.1. `ref` is owned by the queue
     /// until drained and freed by the consumer, like `files_changed`.
     snapshot_taken: struct { turn: u32, ref: []const u8 },
     // Later: lsp_response, agent_edit (ACP).
 };
 
 /// The single meeting point between the watch thread and the main loop
-/// (ARCHITECTURE.md 3, PERFORMANCE.md 9). Mutex and condvar, not lock-free:
+/// Mutex and condvar, not lock-free:
 /// event rates are tens per second.
 pub const Queue = struct {
     items: std.ArrayList(Event),
@@ -256,6 +256,6 @@ test "all seven modes are declared" {
 test "unreachable event variants are declared, not retrofitted" {
     // Same reasoning as the modes above: two of these six are unproducible in
     // v0.1, and declaring them costs nothing next to revisiting every dispatch
-    // site later (ARCHITECTURE.md 11.4).
+    // site later.
     try std.testing.expectEqual(@as(usize, 6), @typeInfo(Event).@"union".fields.len);
 }

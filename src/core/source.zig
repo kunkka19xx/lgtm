@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The buffer is the source of truth; the diff is an overlay over two of them
-// (ARCHITECTURE.md 11.1).
+// The buffer is the source of truth; the diff is an overlay over two of them.
 //
 // Two consequences fall out of this and are the reason it exists:
 //   - Editing later is additive. A mutable worktree Buffer is what a TextEdit
@@ -56,7 +55,7 @@ pub const Sources = struct {
 /// Loads both sides of every file in `d`.
 ///
 /// HEAD blobs come from a single `git cat-file --batch`, never one process per
-/// file (PERFORMANCE.md 8.1). Worktree content is read directly, one whole-file
+/// file. Worktree content is read directly, one whole-file
 /// read each (8.2).
 pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!Sources {
     return loadAt(gpa, io, repo, d, null);
@@ -64,12 +63,12 @@ pub fn load(gpa: Allocator, io: std.Io, repo: ?[]const u8, d: diff.Diff) Error!S
 
 /// As `load`, with the right-hand side read from a tree instead of from disk.
 ///
-/// What the timeline needs (SNAPSHOTS.md 5.3): viewing a turn means the "new"
+/// What the timeline needs: viewing a turn means the "new"
 /// side of every file is a blob in a snapshot, not the file on disk. Everything
 /// downstream is unchanged - `attach` still verifies each line against the
 /// buffer it should have come from, which is what keeps the rule that the
 /// buffer is the source of truth true for a historical view as well as a live
-/// one (ARCHITECTURE.md 11.1).
+/// one.
 pub fn loadAt(
     gpa: Allocator,
     io: std.Io,
@@ -195,7 +194,7 @@ pub const AttachError = error{ContentMismatch} || Allocator.Error;
 ///
 /// Each line is checked against the buffer it should have come from. A mismatch
 /// means the file changed between git running and the read, which is exactly
-/// the torn-read hazard of watching a tree an agent is writing to (SPEC.md 9).
+/// the torn-read hazard of watching a tree an agent is writing to.
 /// Reporting it lets the caller re-diff rather than render a blend of two
 /// states.
 pub fn attach(f: *diff.FileDiff, src: FileSource) AttachError!void {

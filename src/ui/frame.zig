@@ -10,7 +10,7 @@
 // Every string a frame draws is allocated from `Frame.arena`, because vaxis
 // cells reference the text rather than copying it and `render()` reads it
 // later. The arena is reset after render and flush, never before
-// (ARCHITECTURE.md 5c). A slice that dies early renders as plausible garbage
+//. A slice that dies early renders as plausible garbage
 // on one row rather than crashing, so this rule is a review item, not
 // something the compiler catches.
 
@@ -152,7 +152,7 @@ pub const View = struct {
     /// The turn on screen, or null for the working tree. The mode row says so
     /// on every frame it is set, and not optionally: a turn's diff looks
     /// exactly like the working tree's, and reading old code as current is the
-    /// failure this view can cause (SNAPSHOTS.md 5.3).
+    /// failure this view can cause.
     viewing: ?u32 = null,
     /// Turns written since the one on screen, so a reader parked in the past
     /// can see the present accumulating without being dragged into it.
@@ -214,7 +214,7 @@ pub const View = struct {
     hidden: u32 = 0,
     /// Set when the last re-diff hit a file changing underneath it. Shown
     /// rather than swallowed: a stale frame the user knows about beats a
-    /// blended one they do not (SPEC.md 9).
+    /// blended one they do not.
     torn: bool = false,
 };
 
@@ -303,7 +303,7 @@ pub const Frame = struct {
 pub const HelpView = struct {
     /// Rows for the mode the popup was opened from, already narrowed by
     /// `query`. From the bindings, so a remapped keymap documents itself
-    /// rather than the defaults (FEATURES.md 4.4).
+    /// rather than the defaults.
     entries: []const keytext.HelpEntry,
     query: []const u8 = "",
     /// Selected row, an index into `entries` after filtering.

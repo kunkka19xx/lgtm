@@ -10,7 +10,7 @@
 //
 // Pure: comments in, markdown out. No filesystem here - `io/fs.zig` writes it -
 // and no bridge, so what the agent is told is decided by a template the user
-// can change (FEATURES.md 4.5) rather than by a format literal in here.
+// can change rather than by a format literal in here.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

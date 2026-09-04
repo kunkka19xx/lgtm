@@ -2,7 +2,7 @@
 //
 // The diff body: the rows between the two rules. One screen row at a time,
 // and only the visible ones - the row model is built per diff, the strings
-// per frame (PERFORMANCE.md 7.5).
+// per frame.
 //
 // Everything here draws through `Frame` and reads through `View`; neither the
 // diff pipeline nor the terminal is reachable from this file.

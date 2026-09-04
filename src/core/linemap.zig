@@ -17,7 +17,7 @@ pub const window = 5;
 const half_window = window / 2;
 
 /// Maps each distinct line to a u32 so everything downstream compares integers
-/// (PERFORMANCE.md 1.1). Wyhash, never a cryptographic hash (2.1).
+///. Wyhash, never a cryptographic hash (2.1).
 pub const Interner = struct {
     map: std.StringHashMapUnmanaged(u32) = .empty,
     next: u32 = 0,
@@ -56,7 +56,7 @@ pub const Interner = struct {
 };
 
 /// Hashes a window of lines centred on `line`, never a single line: duplicate
-/// lines are the norm in source, duplicate windows are not (PERFORMANCE.md 2.2).
+/// lines are the norm in source, duplicate windows are not.
 pub fn windowHash(ids: []const u32, line: usize) u64 {
     var hasher: std.hash.Wyhash = .init(0);
     var i: isize = @as(isize, @intCast(line)) - half_window;
@@ -115,7 +115,7 @@ const MatchCtx = struct {
         var b_hi = b_hi_in;
 
         // Common prefix and suffix first: an agent editing one function in a
-        // large file leaves a small problem behind (PERFORMANCE.md 1.2).
+        // large file leaves a small problem behind.
         while (a_lo < a_hi and b_lo < b_hi and self.a[a_lo] == self.b[b_lo]) {
             self.out[a_lo] = @intCast(b_lo);
             a_lo += 1;
@@ -237,8 +237,7 @@ pub fn normalise(gpa: Allocator, line: []const u8) Allocator.Error![]u8 {
 }
 
 /// Sorted (hash, line) pairs supporting range lookup. Parallel arrays rather
-/// than a map of lists: no per-key allocation, and lookups stay cache-friendly
-/// (PERFORMANCE.md 7.3).
+/// than a map of lists: no per-key allocation, and lookups stay cache-friendly.
 pub const HashIndex = struct {
     hashes: []u64,
     lines: []u32,
@@ -288,8 +287,7 @@ pub const HashIndex = struct {
 ///
 /// The hash indexes are built on first use, never eagerly. Most re-diffs place
 /// every note through the line map and never touch them, and the cheapest work
-/// is work not done at all (PERFORMANCE.md 0).
-
+/// is work not done at all.
 const testing = std.testing;
 
 test "interner assigns stable ids and dedupes" {

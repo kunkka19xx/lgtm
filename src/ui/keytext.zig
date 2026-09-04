@@ -7,7 +7,7 @@
 // text a human reads or types - `<Space>nf` in a config file, `]h [h hunk` in
 // the status row, `<C-d>  down half a page` in the popup - and all of it is
 // generated from the bindings rather than written out beside them, so a
-// remapped key moves everywhere at once (FEATURES.md 4.3).
+// remapped key moves everywhere at once.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -27,7 +27,7 @@ const default_bindings = keymap.default_bindings;
 /// Renders a chord sequence the way a user would type it - `gg`, `<C-d>`,
 /// `<Space>nf` - into `arena`, in practice the frame arena. Built from the
 /// chords rather than written out beside them, so a remapped keymap describes
-/// its own keys instead of the defaults (FEATURES.md 4.4).
+/// its own keys instead of the defaults.
 pub fn writeChords(chords: []const Chord, arena: Allocator) Allocator.Error![]const u8 {
     var buf: [max_keys_bytes]u8 = undefined;
     return arena.dupe(u8, bufWriteChords(chords, &buf));

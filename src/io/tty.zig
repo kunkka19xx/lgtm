@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Owns the terminal handle and the buffered writer handed to the renderer.
-// ui/ receives the writer as a parameter and never constructs one
-// (ARCHITECTURE.md 5c).
+// ui/ receives the writer as a parameter and never constructs one.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -10,7 +9,7 @@ const vaxis = @import("vaxis");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-/// One flush per frame is the budget (PERFORMANCE.md 7.4). Sized so a full
+/// One flush per frame is the budget. Sized so a full
 /// repaint with styling never forces an early flush.
 pub const default_buffer_bytes = 256 << 10;
 

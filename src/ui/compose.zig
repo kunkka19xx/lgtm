@@ -20,7 +20,7 @@
 // through a sentence.
 //
 // Built to be reused. v0.2's review notes are the same box with a different
-// destination (SPEC.md 6.5), which is why nothing here knows about the bridge,
+// destination, which is why nothing here knows about the bridge,
 // the diff, or what the text is for.
 
 const std = @import("std");

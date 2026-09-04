@@ -29,8 +29,7 @@ pub fn main(init: std.process.Init) !u8 {
     var table: hunk.IdTable = .{};
     defer table.deinit(init.gpa);
 
-    // Buffers are the source of truth; the diff is an overlay on them
-    // (ARCHITECTURE.md 11.1).
+    // Buffers are the source of truth; the diff is an overlay on them.
     var srcs = try source.load(init.gpa, init.io, repo, parsed.diff);
     defer srcs.deinit(init.gpa);
 

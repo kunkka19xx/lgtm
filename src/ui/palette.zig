@@ -40,14 +40,14 @@ pub const Palette = struct {
     cyan: Color,
 
     /// The theme's primary, set once rather than picked per call site
-    /// (FEATURES.md 4.1). The `?` popup's key column and its border are both
+    ///. The `?` popup's key column and its border are both
     /// this hue, which is what makes the box and its keys read as one object.
     accent: Color,
 };
 
 /// 256-colour indexes rather than RGB: they inherit the user's terminal
 /// palette, so `lgtm` looks like the rest of their setup instead of fighting
-/// it (FEATURES.md 4.1, "terminal-native mode"). The default for exactly that
+/// it - terminal-native mode. The default for exactly that
 /// reason - a tool that arrives already matching the terminal it opens in
 /// needs no configuration at all.
 pub const terminal: Palette = .{
@@ -177,7 +177,6 @@ pub const bundled: []const Bundled = &.{
     .{ .name = "rose-pine", .palette = rose_pine },
     .{ .name = "kanagawa", .palette = kanagawa },
 };
-
 
 /// `"a6e3a1"` as a colour, so a palette is written in the notation its
 /// upstream publishes it in. Decoded by hand rather than through `parseInt`,

@@ -2,7 +2,7 @@
 //
 // What the turn list shows: one row per turn, read from the object store.
 //
-// SNAPSHOTS.md 5.3b-c. The rule that shapes this file is that **the list is
+// The rule that shapes this file is that **the list is
 // built from the commit chain, never from parsed diffs**. A list that parsed
 // forty diffs to draw itself is the version of this feature that takes a week
 // and then feels slow.
@@ -32,7 +32,7 @@ pub const Turn = struct {
     number: u32,
     /// Committer date, seconds since the epoch. Rendered as an age, because
     /// "2m ago" is the question being asked of a turn and a timestamp is a
-    /// lookup (SNAPSHOTS.md 5.3a).
+    /// lookup.
     when_s: i64 = 0,
     files: u32 = 0,
     added: u32 = 0,
@@ -43,7 +43,7 @@ pub const Turn = struct {
     /// This turn walked a file back to a blob an earlier turn already had, so
     /// the agent undid its own work. The single most useful thing anyone can
     /// tell a reviewer of agent output, and `==` on two hashes to find
-    /// (SNAPSHOTS.md 5.3c) - though nothing computes it yet.
+    /// - though nothing computes it yet.
     reverted: bool = false,
 };
 

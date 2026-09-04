@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The buffer is the source of truth; the diff is an overlay over two of them
-// (ARCHITECTURE.md 11.1). Read-only in v0.1.
+//. Read-only in v0.1.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

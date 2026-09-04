@@ -9,7 +9,7 @@
 // current file - it is handed one and answers questions about it. That is what
 // makes `rediff` eight lines up there instead of eighty, and what keeps the
 // arena discipline in one place: everything here belongs to `arena` and dies
-// at the next `regenerate` (ARCHITECTURE.md 4).
+// at the next `regenerate`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -60,7 +60,7 @@ pub const Review = struct {
     sources: ?source.Sources = null,
     /// A file changed between git running and our read of it, so the diff and
     /// the buffer disagree. Surfaced rather than rendered as a blend of two
-    /// states (SPEC.md 9).
+    /// states.
     torn: bool = false,
     /// `[review] ignore` patterns, and whether they are being applied. Held
     /// here because a re-diff is where they take effect: toggling is a
@@ -81,7 +81,7 @@ pub const Review = struct {
     /// being shown - rather than of where the reader is looking. `regenerate`
     /// reads it and everything downstream is unchanged: a turn is a diff
     /// source, and nothing above `core/git.zig` ever knew where a diff came
-    /// from (SNAPSHOTS.md 5.3).
+    /// from.
     viewing: ?u32 = null,
     view_ref: [128]u8 = @splat(0),
     view_ref_len: u8 = 0,
@@ -89,12 +89,11 @@ pub const Review = struct {
     /// The carried file's working-tree text as it was before the last reset,
     /// and the line the reader was on in it. gpa-owned, not arena-owned:
     /// re-anchoring needs the old text and the new text at the same moment,
-    /// and the old one lived in the arena `regenerate` just reset
-    /// (PERFORMANCE.md 3.1).
+    /// and the old one lived in the arena `regenerate` just reset.
     prev_work: []u8 = &.{},
     prev_line: u32 = 0,
 
-    /// Paths the reader has opened out of their summary (SPEC.md 6.1).
+    /// Paths the reader has opened out of their summary.
     /// gpa-owned, for the same reason `prev_work` is: surviving the reset is
     /// the whole point. A file that folded itself again every time the agent
     /// touched anything would be a file you cannot read while it is being
@@ -161,7 +160,7 @@ pub const Review = struct {
     /// Returns the file index to look at now: the same path where it still
     /// exists, and the first file where it does not.
     ///
-    /// Order is fixed by ARCHITECTURE.md 3 and is not an implementation
+    /// Order is fixed by the pipeline and is not an implementation
     /// detail: ids are inherited before anything that reads them.
     pub fn regenerate(self: *Review, carry: Carry) !u32 {
         // Copied to the gpa first: both point into the arena this is about to
@@ -286,7 +285,7 @@ pub const Review = struct {
     /// and the reason this is a check rather than a config flag. After one, it
     /// is a line map per changed file per re-diff - the same map anchoring
     /// already runs for the cursor's file, now run for all of them
-    /// (PERFORMANCE.md 3.1). The 100 ms re-diff budget is what to watch here,
+    ///. The 100 ms re-diff budget is what to watch here,
     /// and `--profile` is what watches it.
     fn refresh(self: *Review) Allocator.Error!void {
         if (!self.mark_at.taken()) {
@@ -519,7 +518,7 @@ pub const Review = struct {
     /// Where the reader's line went, or null when it did not go anywhere that
     /// can be pointed at.
     ///
-    /// This is the primary path of PERFORMANCE.md 3.1: diff the previous
+    /// This is the primary path: diff the previous
     /// working tree against the new one and read the answer out of the line
     /// map, which is a lookup rather than a search. The hash tiers inside
     /// `Anchor.reanchor` pick up what the map cannot, and `stale` is reported
@@ -571,7 +570,7 @@ pub const Review = struct {
 };
 
 /// git already hashed this content; re-hashing the file on every lookup costs
-/// more than the miss it avoids (PERFORMANCE.md 7.2).
+/// more than the miss it avoids.
 fn blobKey(blob: []const u8, bytes: []const u8) u64 {
     if (blob.len == 0) return highlight.hashContent(bytes);
     return std.hash.Wyhash.hash(0, blob);

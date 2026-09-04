@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // The bridge: how a line of text reaches the agent's input box. Runtime
-// selected, so a tagged union rather than comptime dispatch (ARCHITECTURE.md
+// selected, so a tagged union rather than comptime dispatch (the backend is
 // 6). `detect` never fails - OSC 52 is always reachable, so there is always a
 // working bridge - and a backend that fails at call time degrades to the
 // clipboard with a notice rather than propagating as fatal.
@@ -18,7 +18,7 @@
 //      space is added here, so no caller can forget it, and the user is the
 //      one who decides when to press Enter.
 //
-// v0.1 ships tmux and OSC 52. WezTerm, kitty and Zellij are later (SPEC.md 6.3) and
+// v0.1 ships tmux and OSC 52. WezTerm, kitty and Zellij are later and
 // are absent rather than stubbed: a union variant whose `sendText` returns
 // `error.Unsupported` is a backend `detect` would have to be careful never to
 // return, which is more machinery than the three lines they will each need.
@@ -117,7 +117,7 @@ pub const Bridge = union(enum) {
                     // A pane that has gone is the common one and the one worth
                     // naming; anything else is tmux itself failing. Both
                     // degrade, because losing the text is worse than losing
-                    // the destination (ARCHITECTURE.md 6).
+                    // the destination.
                     // Forget the target *and* the fact that inference has
                     // run: a pane that died is often replaced, and finding
                     // the replacement should not cost a restart. Bounded -
@@ -200,7 +200,7 @@ pub const Bridge = union(enum) {
     }
 };
 
-/// Env vars only, and infallible by construction (ARCHITECTURE.md 6).
+/// Env vars only, and infallible by construction.
 pub fn detect(environ: *const std.process.Environ.Map) Bridge {
     const in_tmux = if (environ.get("TMUX")) |v| v.len > 0 else false;
     if (!in_tmux) return .osc52;
@@ -227,7 +227,7 @@ fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
 
 // -- target persistence ------------------------------------------------------
 
-/// Durable state lives in `.lgtm/` and nowhere else (ARCHITECTURE.md 1). One
+/// Durable state lives in `.lgtm/` and nowhere else. One
 /// pane id, one line, so it is readable and deletable by hand.
 pub const target_path = fs.state_dir ++ "/target";
 

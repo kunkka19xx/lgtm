@@ -46,8 +46,7 @@ pub const Options = struct {
     cfg: config.Config = .{},
     /// The one line of the config's complaints the status row has space for,
     /// or null when it had none. Shown as a notice on the first frame: a
-    /// config error belongs in the status line, never in a refusal to start
-    /// (FEATURES.md 4.9).
+    /// config error belongs in the status line, never in a refusal to start.
     problems: ?[]const u8 = null,
     /// `--pane <id>`: the multiplexer pane the agent is running in. Beats both
     /// the saved target and the inference, and replaces the saved one, because
@@ -102,7 +101,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
     // Detection is env vars and cannot fail; the target is the part that can,
     // and it resolves lazily on the first send so a pane opened after lgtm
-    // started is still reachable (ARCHITECTURE.md 6).
+    // started is still reachable.
     var br = bridge.detect(environ);
     var saved: SavedTarget = .{};
     if (br == .tmux) {
@@ -156,7 +155,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // in a repo lgtm has never written to.
     fs.ensureSelfIgnore(io);
     // Notes outlive the process: the whole point of `.lgtm/` is that killing
-    // the pane costs scroll position and nothing else (ARCHITECTURE.md 1).
+    // the pane costs scroll position and nothing else.
     app.loadComments();
     // The store needs an environment to run git in, which only this layer has.
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
@@ -480,7 +479,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
     try w.flush();
 
     // After render and flush, never before: the cells above point into this
-    // arena (ARCHITECTURE.md 5c).
+    // arena.
     _ = app.frame_arena.reset(.retain_capacity);
 }
 

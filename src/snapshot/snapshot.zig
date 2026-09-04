@@ -2,7 +2,7 @@
 //
 // When a snapshot is taken, under what session, and which ones are thrown away.
 //
-// Step 2 of SNAPSHOTS.md 5.6. `gitobj.zig` knows how to write one and knows
+// The policy layer. `gitobj.zig` knows how to write one and knows
 // nothing else; this file is the everything else. It decides that a turn has
 // happened, numbers it, remembers where the reader had got to, and deletes the
 // refs nobody will ever look at again.
@@ -18,7 +18,7 @@
 //
 // **Snapshots off is a normal state, not an error.** No repository, a failing
 // plumbing call, a read-only checkout - all of them mean the store stops and
-// everything else in the tool carries on (SNAPSHOTS.md 3.1 rule 6). `enabled`
+// everything else in the tool carries on. `enabled`
 // latches false and nothing retries, because a store that failed once will
 // fail every 500 ms and say so every time.
 //
@@ -39,7 +39,7 @@ pub const state_path = ".lgtm/state.json";
 
 /// A gap this long means the last session is over and this is a new one.
 ///
-/// Four hours, from SNAPSHOTS.md 4. Long enough that lunch, a meeting or a
+/// Four hours. Long enough that lunch, a meeting or a
 /// rebuild does not split a session in two; short enough that yesterday's work
 /// does not turn up in today's timeline as though it were part of it.
 pub const session_gap_ms: i64 = 4 * 60 * 60 * 1000;
@@ -60,7 +60,7 @@ pub const State = struct {
     session_len: u8 = 0,
     /// The most recent turn written. Zero means only the baseline exists.
     latest_turn: u32 = 0,
-    /// The turn the reader has read up to (SNAPSHOTS.md 5.1). Zero until they
+    /// The turn the reader has read up to. Zero until they
     /// mark one, and the same state a pending badge would read - one source of
     /// truth, not two.
     reviewed_turn: u32 = 0,
@@ -122,7 +122,7 @@ pub fn continues(state: *const State, now_ms: i64) bool {
 /// safety net becomes the thing that lost the work. Only the current session's
 /// oldest turns are pruned, and never the baseline: `<session>/0` is the tree
 /// as it was before the agent ran, which is the one snapshot nobody can
-/// reconstruct from any other (SNAPSHOTS.md 5.5).
+/// reconstruct from any other.
 pub fn toPrune(
     gpa: Allocator,
     refs: []const []const u8,
@@ -211,7 +211,7 @@ fn intField(text: []const u8, key: []const u8) ?i64 {
 
 /// The marked snapshot's content for each of `paths`.
 ///
-/// One `cat-file --batch`, never a process per file (PERFORMANCE.md 8.1), with
+/// One `cat-file --batch`, never a process per file, with
 /// `<ref>:<path>` request lines so no `ls-tree` is needed to find the blobs
 /// first. A path the snapshot did not contain comes back empty, which is what
 /// "the file was not there then" already means to `freshRows`.
@@ -315,7 +315,7 @@ pub const Store = struct {
     ///
     /// The parent is the previous turn, which is what makes the store a chain -
     /// and what will make it a shallow tree the first time a restore continues
-    /// from an older turn (SNAPSHOTS.md 5.3a).
+    /// from an older turn.
     pub fn take(self: *Store, paths: []const []const u8, message: []const u8) ?u32 {
         if (!self.enabled or paths.len == 0) return null;
 
@@ -360,7 +360,7 @@ pub const Store = struct {
 
     /// Records the working tree as `<session>/0`, before the agent has run.
     ///
-    /// The one snapshot no other snapshot can reconstruct (SNAPSHOTS.md 5.5):
+    /// The one snapshot no other snapshot can reconstruct:
     /// every later turn is the agent's work, and this is what was there first.
     /// It is also the only uncommitted state git alone could never recover,
     /// which is the argument for the whole store.
@@ -402,7 +402,7 @@ pub const Store = struct {
         return gitobj.refFor(buf, self.state.name(), self.state.reviewed_turn) catch null;
     }
 
-    /// The reader has read up to the latest turn (SNAPSHOTS.md 5.1). The same
+    /// The reader has read up to the latest turn. The same
     /// state a pending badge reads, which is why it is one field and not two.
     pub fn markReviewed(self: *Store) void {
         self.state.reviewed_turn = self.state.latest_turn;
@@ -582,7 +582,7 @@ test "pending is a subtraction, which is why it is one state and not two" {
     store.state.reviewed_turn = store.state.latest_turn;
     try testing.expectEqual(@as(u32, 0), store.unreviewed());
 
-    // Two turns since the reader marked. This is the badge NOTIFICATIONS.md 4
+    // Two turns since the reader marked. This is the badge a notification
     // rule 3 describes, rather than a second thing to keep in step with it.
     store.state.latest_turn = 9;
     try testing.expectEqual(@as(u32, 2), store.unreviewed());

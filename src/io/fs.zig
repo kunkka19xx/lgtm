@@ -13,7 +13,7 @@ pub const File = std.Io.File;
 pub const ReadError = Dir.ReadFileAllocError;
 
 /// Whole-file read in one allocation. Callers slice the result for lines
-/// rather than iterating a reader (PERFORMANCE.md 8.2).
+/// rather than iterating a reader.
 pub fn readFile(io: Io, gpa: Allocator, path: []const u8, max_bytes: usize) ReadError![]u8 {
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_bytes));
 }
@@ -22,7 +22,7 @@ pub const WriteError = Dir.WriteFileError || Dir.CreateDirPathError;
 
 /// Whole-file write, creating the parent directories it needs.
 ///
-/// The only durable state lgtm writes is under `.lgtm/` (ARCHITECTURE.md 1),
+/// The only durable state lgtm writes is under `.lgtm/`,
 /// and it is small enough that a whole-file write is the right shape: there is
 /// nothing to append to and nothing to keep open.
 pub fn writeFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
@@ -35,7 +35,7 @@ pub fn writeFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
-/// The one directory lgtm writes durable state into (ARCHITECTURE.md 1).
+/// The one directory lgtm writes durable state into.
 pub const state_dir = ".lgtm";
 
 /// What lgtm puts in `.lgtm/.gitignore` the first time it writes anything.
@@ -48,7 +48,7 @@ pub const state_dir = ".lgtm";
 /// and has no business editing.
 ///
 /// `config.toml` is re-included deliberately: it is per-repo configuration
-/// meant to be committed and shared (FEATURES.md 4.8), and everything else
+/// meant to be committed and shared, and everything else
 /// here is machine-local - a tmux pane id, a git index, a session id.
 ///
 /// Two spellings that look right and are not. The pattern is `*` rather than

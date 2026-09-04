@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Every outgoing string is a template, from day one (FEATURES.md 4.5). The
+// Every outgoing string is a template, from day one. The
 // table below is the internal default set; `[templates]` in a config file is
 // v0.2 and lands as an override of these fields, which is the whole reason
 // the strings are data rather than format literals scattered through dispatch.
@@ -22,7 +22,7 @@ pub const Table = struct {
     /// columns, it reads the line - but the words do the pointing.
     ref_span: []const u8 = "#{change_id} {path}:{line} `{span}`",
     /// The cursor on a deleted line: the new file has no such line, so the
-    /// reference is the enclosing hunk plus a note saying why (SPEC.md 6.3).
+    /// reference is the enclosing hunk plus a note saying why.
     ref_hunk: []const u8 = "#{change_id} {path}:{line} (deleted lines in this hunk)",
     /// No hunk to point at - a file whose body was never parsed because it
     /// exceeded `large_file_lines`. The path is the whole of the honest answer.
@@ -36,7 +36,7 @@ pub const Table = struct {
     ref_file_range: []const u8 = "{path}:{start}-{end}",
     ref_file_span: []const u8 = "{path}:{line} `{span}`",
 
-    /// The ask presets (FEATURES.md 2.1). `{ref}` is whichever of the above
+    /// The ask presets. `{ref}` is whichever of the above
     /// the cursor produced.
     ask_why: []const u8 = "{ref} - why this approach?",
     ask_revert: []const u8 = "{ref} - revert this, keep the rest",
@@ -56,7 +56,7 @@ pub const Var = struct {
 /// An unrecognised placeholder is emitted verbatim rather than dropped. A
 /// user who writes `{lines}` where the table offers `{line}` should see their
 /// typo in the message they just sent, not a silently shorter one - the same
-/// rule the config loader follows for a key it does not know (FEATURES.md 4.9).
+/// rule the config loader follows for a key it does not know.
 /// There is no escape syntax: a `{` with no closing brace, or one wrapping
 /// something that is not a name, is literal text and stays literal.
 pub fn render(

@@ -3,14 +3,14 @@
 // Terminal input on its own thread, translated into `core/event.zig` types and
 // pushed onto the one queue the main loop drains.
 //
-// ARCHITECTURE.md 3 draws one background thread; this is a second. The reason
+// The design draws one background thread; this is a second. The reason
 // is that the tty read blocks, and the main loop must stay free to service the
 // watcher. The property that section actually cares about is preserved: the
 // UI is single-threaded and the threads meet at one mutex-protected queue and
 // nowhere else.
 //
 // vaxis parses the bytes and we drive the loop, rather than handing control to
-// `vaxis.Loop` (ARCHITECTURE.md 5c).
+// `vaxis.Loop`.
 //
 // The read is guarded by a short `poll` rather than left to block. That is not
 // about latency - it is what makes `stop()` able to *join*. `e` hands the

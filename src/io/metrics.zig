@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Instrument before optimising (PERFORMANCE.md 0). Compiled out entirely
+// Instrument before optimising. Compiled out entirely
 // unless -Dprofile, so spans may be left in hot paths permanently.
 //
 // Zig 0.16 moved clocks into std.Io, so timing needs an Io handle. It is set
@@ -67,7 +67,7 @@ pub inline fn span(comptime kind: Kind) Span {
     return .{ .kind = kind, .start = .now(io, .awake) };
 }
 
-/// Budgets from PERFORMANCE.md 0, used to flag regressions in the report.
+/// The budgets, used to flag regressions in the report.
 fn budgetMs(kind: Kind) ?f64 {
     return switch (kind) {
         .frame => 8.0,

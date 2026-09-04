@@ -3,7 +3,7 @@
 // Takes a real snapshot of the current repository and prints what it wrote.
 // `zig build snap -- [session] [turn] [message]`.
 //
-// SNAPSHOTS.md 5.6 step 1 says the check that matters is made from outside,
+// The check that matters is made from outside,
 // with stock git: `git show refs/lgtm/<session>/<turn>:<path>` has to print the
 // file, and `git status` has to be unchanged. This runs the plumbing so that
 // check can be made; it deliberately proves nothing on its own, because a

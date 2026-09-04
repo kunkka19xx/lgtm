@@ -44,7 +44,7 @@ pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) 
 /// that forgets loses `PATH` for everything but `argv[0]`. The one user is the
 /// snapshot store, which needs `GIT_INDEX_FILE` and has no other way to set it:
 /// git reads it from the environment and there is no flag for it, which is the
-/// whole reason this function exists (SNAPSHOTS.md 3.1 rule 1 - never write the
+/// whole reason this function exists (never write the
 /// user's own `.git/index`).
 pub fn runEnv(
     gpa: Allocator,
@@ -112,7 +112,7 @@ test "runInherit waits for the child and reports its status" {
 /// Runs argv, writes `stdin_data` to its standard input, and collects stdout.
 ///
 /// Needed for `git cat-file --batch`, which is how many blobs are fetched in
-/// one subprocess instead of one per file (PERFORMANCE.md 8.1).
+/// one subprocess instead of one per file.
 pub fn runWithInput(
     gpa: Allocator,
     io: Io,

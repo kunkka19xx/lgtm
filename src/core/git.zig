@@ -4,8 +4,7 @@
 // so parsing stays a pure function that tests can drive without a process.
 //
 // v0.1 shells out rather than linking libgit2: less linkage, no version skew,
-// and it inherits the user's git config and worktree handling for free
-// (ARCHITECTURE.md 5b).
+// and it inherits the user's git config and worktree handling for free.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,7 +40,7 @@ fn insideRepo(gpa: Allocator, io: std.Io, repo: ?[]const u8) bool {
 ///
 /// One subprocess for every path, never one per file: fork plus exec plus git
 /// startup costs 5-20 ms and will dominate the profile long before the diff
-/// itself does (PERFORMANCE.md 8.1).
+/// itself does.
 pub fn diffPaths(gpa: Allocator, io: std.Io, paths: []const []const u8) Error!Parsed {
     return diffPathsIn(gpa, io, null, paths, &.{});
 }
@@ -78,7 +77,7 @@ pub fn diffPathsIn(
 ///
 /// `git diff HEAD <ref>`: the same left-hand side, a different right-hand one.
 /// That is what makes a turn a *diff source* rather than a second kind of view
-/// (SNAPSHOTS.md 5.3) - hunks, change ids, syntax, search and the gutter all
+/// - hunks, change ids, syntax, search and the gutter all
 /// work on it because none of them ever knew where the diff came from.
 ///
 /// No untracked scan. `git diff HEAD` cannot see a new file, so one is
@@ -141,7 +140,7 @@ fn diffBase(
     //
     // No repository at all is the end of the road: this tool is a reader of
     // `git diff` and there is nothing for it to read. It is still not an error
-    // worth dying on (hard rule 8's spirit, and SNAPSHOTS.md 3.1 rule 6), so it
+    // worth dying on - hard rule 8's spirit, and snapshots degrade silently - so it
     // is named rather than lumped in with a real failure, and the caller shows
     // an empty review that says why.
     //
@@ -209,7 +208,7 @@ pub const Parsed = struct {
 /// A brand new file has no blob to diff against, so its entry is synthesised
 /// rather than parsed: every line is an addition.
 ///
-/// SPEC.md open question 2 is answered: full contents, always, whatever the
+/// Full contents, always, whatever the
 /// size. A new file is entirely new code and summarising it would remove the
 /// only thing there is to review. The code is the source of truth; a summary is
 /// not a substitute for it.
@@ -323,7 +322,7 @@ fn synthesiseAdd(gpa: Allocator, path: []const u8, bytes: []const u8) Allocator.
 }
 
 /// Paths that differ from HEAD, for the watcher to narrow re-diffs to.
-/// One subprocess instead of N stat calls (PERFORMANCE.md 8.1).
+/// One subprocess instead of N stat calls.
 pub fn changedPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
     const out = try proc.run(gpa, io, &.{ "git", "diff", "HEAD", "--name-only" }, max_diff_bytes);
     defer out.deinit(gpa);

@@ -18,8 +18,7 @@
 //   - `<script>` and `<style>` bodies lex as HTML, so their JavaScript and CSS
 //     arrive as plain text with the strings coloured. Nothing runs away, it is
 //     just flat - embedded sublanguages are the other half of what a real
-//     grammar buys, and the point at which tree-sitter earns its place
-//     (ARCHITECTURE.md 5).
+//     grammar buys, and the point at which tree-sitter earns its place.
 //
 // No `keywords`: attribute names would be the candidates, and `class`, `id`,
 // `type` and `name` are ordinary English that appears in the prose HTML is
