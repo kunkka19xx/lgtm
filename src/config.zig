@@ -27,6 +27,7 @@ const Allocator = std.mem.Allocator;
 const fs = @import("io/fs.zig");
 const keymap = @import("ui/keymap.zig");
 const rows = @import("ui/rows.zig");
+const template = @import("bridge/template.zig");
 const snapshot = @import("snapshot/snapshot.zig");
 const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
@@ -152,6 +153,10 @@ pub const Config = struct {
     /// Empty until a `[presets]` table names some, and the four built-in asks
     /// stand in for it - so the list is never empty and never a surprise.
     presets: []const Preset = &.{},
+    /// `[templates]`: what the tool says to the agent. Starts as the internal
+    /// table and is overridden per key, so a file that names one string leaves
+    /// the other twelve alone.
+    templates: template.Table = .{},
     /// `[review] ignore`: glob patterns for files kept out of the review.
     /// Empty means everything git reports, which is the behaviour that was
     /// there before this existed.
@@ -173,7 +178,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, diff, snapshot, keys, theme, presets, review };
+const Section = enum { nav, ui, diff, snapshot, keys, templates, theme, presets, review };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -369,6 +374,9 @@ pub const Loader = struct {
                     };
                 } else self.unknownKey(src, line, section, key);
             },
+            // Every key is a field of `template.Table`, so the struct is the
+            // list and a new template is a field rather than a case here.
+            .templates => self.applyTemplate(src, line, key, value),
             // `[keys]` keys are command names, so there is no fixed list to
             // check against - the `Command` enum is the list.
             .keys => self.applyKeys(src, line, key, value),
@@ -382,6 +390,30 @@ pub const Loader = struct {
             },
             .theme => self.applyTheme(src, line, key, value),
         }
+    }
+
+    /// One `[templates]` override, matched against `template.Table`'s fields by
+    /// name.
+    ///
+    /// Reflection rather than a switch, because the alternative is a list of
+    /// thirteen cases that has to be edited every time a sentence is added -
+    /// and the failure mode of forgetting is a key the config silently ignores.
+    /// The field names *are* the config keys, which is what the table was
+    /// written for.
+    ///
+    /// The text is duped into the loader's arena: the caller's bytes are the
+    /// file, which is freed as soon as it is merged.
+    fn applyTemplate(self: *Loader, src: []const u8, line: u32, key: []const u8, value: toml.Value) void {
+        const text = self.wantString(src, line, key, value) orelse return;
+        const owned = self.arena.allocator().dupe(u8, text) catch return;
+
+        inline for (@typeInfo(template.Table).@"struct".fields) |f| {
+            if (std.mem.eql(u8, f.name, key)) {
+                @field(self.cfg.templates, f.name) = owned;
+                return;
+            }
+        }
+        self.unknownKey(src, line, .templates, key);
     }
 
     /// `ignore = ["package-lock.json", "**/*.pb.go"]`, replacing rather than
@@ -1046,6 +1078,52 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
     // line was trying to change.
     try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
     try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
+}
+
+test "a template override replaces one string and leaves the rest" {
+    var l = loadText(
+        \\[templates]
+        \\submit_review = "please read {path} - {count} note{s}"
+        \\ask_test = "{ref} - a table test, not a unit test"
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+    try testing.expectEqualStrings("please read {path} - {count} note{s}", l.cfg.templates.submit_review);
+    try testing.expectEqualStrings("{ref} - a table test, not a unit test", l.cfg.templates.ask_test);
+    // Per key, not per table: the eleven not named keep the defaults, which is
+    // the same rule every other section follows.
+    try testing.expectEqualStrings(template.default.ref_single, l.cfg.templates.ref_single);
+    try testing.expectEqualStrings(template.default.ask_why, l.cfg.templates.ask_why);
+}
+
+test "a template nobody has is reported rather than ignored" {
+    // The whole surface is `template.Table`'s field names, so a typo has a
+    // real answer - and silently accepting one would leave the reader
+    // wondering why their sentence never changed.
+    var l = loadText(
+        \\[templates]
+        \\submitreview = "no such key"
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 1), l.problems.items.len);
+    try testing.expectEqualStrings(template.default.submit_review, l.cfg.templates.submit_review);
+}
+
+test "a template outlives the file it was read from" {
+    // The bytes handed to `merge` are the config file, freed as soon as it is
+    // read; the table is held for the session. Copied into the arena, or the
+    // agent receives whatever that memory became.
+    var l: Loader = .init(testing.allocator);
+    defer l.deinit();
+    {
+        const text = try testing.allocator.dupe(u8,
+            \\[templates]
+            \\submit_review = "held"
+        );
+        defer testing.allocator.free(text);
+        l.merge("test", text);
+    }
+    try testing.expectEqualStrings("held", l.cfg.templates.submit_review);
 }
 
 test "snapshot.keep has a floor, because a net that small is not one" {

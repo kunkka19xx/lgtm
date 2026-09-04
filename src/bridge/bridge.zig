@@ -302,7 +302,21 @@ pub const Bridge = union(enum) {
         const arena = scratch.allocator();
         const mine = p.selfPane();
         const found = switch (self.*) {
-            .tmux => tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, false) catch return null, mine),
+            // The current window first, then every pane of every session.
+            //
+            // Two scopes because neither is right alone. Side by side in one
+            // window is the shape this is built for, and widening it there
+            // would count a busy second session and refuse an answer that was
+            // sitting next door. But an agent in another *tab* - which is what
+            // tmux calls a window - leaves the near listing holding only
+            // ourselves, and declining then is declining with the answer one
+            // subprocess away.
+            //
+            // So: near, and far only when near could not say. The second
+            // listing costs a subprocess exactly once, because `tried` is
+            // already set by the time it runs.
+            .tmux => tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, false) catch return null, mine) orelse
+                tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, true) catch return null, mine),
             .herdr => herdr.soleOther(herdr.list(cx.gpa, arena, cx.io) catch return null, mine),
             .wezterm => wezterm.soleOther(wezterm.list(cx.gpa, arena, cx.io) catch return null, mine),
             .kitty => kitty.soleOther(kitty.list(cx.gpa, arena, cx.io) catch return null, mine),

@@ -112,6 +112,38 @@ compose = "bottom"
 scroll_ms = 0        # instant
 ```
 
+## `[templates]`
+
+Every sentence `lgtm` sends your agent, as data. Override the ones you want;
+the rest keep their defaults.
+
+```toml
+[templates]
+submit_review = "please review {path} — {count} note{s} waiting"
+ref_single    = "look at {path} line {line}"
+ask_test      = "{ref} — a table test, not a unit test"
+```
+
+| Key | Default | `{vars}` |
+|---|---|---|
+| `ref_single` | `#{change_id} {path}:{line}` | `change_id` `path` `line` |
+| `ref_range` | `#{change_id} {path}:{start}-{end}` | `change_id` `path` `start` `end` |
+| `ref_span` | ``#{change_id} {path}:{line} `{span}` `` | plus `span`, the selected text |
+| `ref_hunk` | `#{change_id} {path}:{line} (deleted lines in this hunk)` | the cursor on a removed line, which the new file has no number for |
+| `ref_file` | `{path}` | a file too large to render inline, so there is no hunk to point at |
+| `ref_file_line` / `_range` / `_span` | `{path}:{line}` … | a file with no hunks at all — opened and read rather than reviewed, so no `#id` |
+| `submit_review` | `review ready: {path} ({count} comment{s})` | `path` `count` `s` |
+| `ask_why` `ask_revert` `ask_test` `ask_explain` | `{ref} - why this approach?` … | `ref`, whichever of the above the cursor produced |
+
+`{s}` on `submit_review` is the plural: empty for one comment, `s` otherwise.
+It is a variable rather than a branch, because a template language with an `if`
+in it is a template language.
+
+**An unknown placeholder is left verbatim rather than dropped** — write
+`{lines}` where the table offers `{line}` and you will see the typo in the
+message you just sent, instead of a silently shorter one. A key that is not a
+template is reported with its file and line, like any other config mistake.
+
 ## `[snapshot]`
 
 | Key | Default | |

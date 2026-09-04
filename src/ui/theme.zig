@@ -68,6 +68,19 @@ pub const Glyphs = struct {
     /// block down the gutter, which is the shape of what the agent just did.
     fresh_mark: []const u8,
 
+    /// A turn that walked a file back to where an earlier turn had it. The
+    /// arrow is the one every tool uses for undo, which is what it is.
+    revert_mark: []const u8,
+
+    /// A turn that touched a file the reader has commented on: the agent
+    /// answering them. The reply arrow, which is what it is.
+    answer_mark: []const u8,
+
+    /// A run of turns over one file, folded into a row. A block rather than a
+    /// rule, because it stands where the rail's `│` would and has to read as
+    /// "several of these" rather than as one more of them.
+    run_mark: []const u8,
+
     ellipsis: []const u8,
 
     /// Whether this set has per-filetype icons to go with it. Only the nerd
@@ -108,6 +121,9 @@ pub const Glyphs = struct {
         .heavy_br = "\u{251b}",
         .comment_mark = "\u{25cf}",
         .fresh_mark = "\u{2503}",
+        .revert_mark = "\u{21ba}",
+        .answer_mark = "  \u{21a9}",
+        .run_mark = "\u{28ff}",
         .ellipsis = "\u{2026}",
         // The README's banner. The thumb overhangs the last column of the
         // `M` rather than being centred under it, which is where it sits in
@@ -157,6 +173,9 @@ pub const Glyphs = struct {
         .heavy_br = "+",
         .comment_mark = "*",
         .fresh_mark = "|",
+        .revert_mark = "<-",
+        .answer_mark = "  re:",
+        .run_mark = "#",
         .ellipsis = "...",
         // No block elements and no emoji: the set exists for the terminal
         // that would draw both as tofu.

@@ -228,6 +228,11 @@ pub const App = struct {
     /// reason the comment list's is: the widget lists labelled rows, and what
     /// a row *means* belongs to whoever built it.
     pick_turns: std.ArrayList(u32) = .empty,
+    /// The turn list is showing every turn rather than eliding the middle.
+    /// Set by opening the `⋮` row or by typing a filter, and cleared when the
+    /// list is opened again - a fold the reader expanded once should not stay
+    /// expanded for the rest of the session.
+    turns_expanded: bool = false,
 
     /// A restore waiting for the reader to say yes.
     ///
@@ -1320,8 +1325,19 @@ pub const App = struct {
             .command => |cmd| return self.run(cmd, body),
             .pending, .none => {},
         }
+        // A filter expands the fold before it runs. A search that skipped
+        // folded rows would be a search that lies, and the reader typing a
+        // turn number is exactly the case the fold hid the answer to.
+        const filtering = self.files_purpose == .turns and !self.turns_expanded and
+            key.codepoint >= 0x20 and key.codepoint != event.code.escape;
+
         switch (self.file_list.feed(key)) {
-            .stay => {},
+            .stay => {
+                if (filtering and self.file_list.filter.text().len > 0) {
+                    self.turns_expanded = true;
+                    self.rebuildTurns();
+                }
+            },
             .close => self.closeFiles(),
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
@@ -1334,6 +1350,14 @@ pub const App = struct {
                         self.pick_turns.items[i]
                     else
                         std.math.maxInt(u32);
+                    // Opening the fold shows what it hid rather than opening a
+                    // turn: a summary that cannot be opened is a wall, and the
+                    // reader is still choosing.
+                    if (want == elided_row or want == run_row) {
+                        self.turns_expanded = true;
+                        self.rebuildTurns();
+                        return;
+                    }
                     self.closeFiles();
                     try self.showTurnNumber(want, body);
                     return;
@@ -1684,6 +1708,88 @@ pub const App = struct {
 
         self.finder.failed = true;
         self.notice.set("pattern not found: {s}", .{pat.text});
+    }
+
+    test "the fold keeps the newest, the mark, the baseline and where you are" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // A long session: turn 40 is newest, the mark has stood since turn 3, and
+        // the reader is parked in turn 17.
+        fx.app.review.viewing = 17;
+        const marked: u32 = 3;
+
+        // Index 0 is the newest turn, so the first `turns_shown` survive on
+        // distance alone.
+        try testing.expect(fx.app.turnKept(40, 0, 40, marked));
+        try testing.expect(fx.app.turnKept(33, 7, 40, marked));
+        try testing.expect(!fx.app.turnKept(32, 8, 40, marked));
+
+        // The three that survive wherever they fall.
+        try testing.expect(fx.app.turnKept(marked, 37, 40, marked));
+        try testing.expect(fx.app.turnKept(0, 40, 40, marked));
+        try testing.expect(fx.app.turnKept(17, 23, 40, marked));
+
+        // And an ordinary middle turn does not.
+        try testing.expect(!fx.app.turnKept(18, 22, 40, marked));
+    }
+
+    test "a run is folded only when every turn in it is unremarkable" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        fx.app.review.viewing = null;
+
+        const a: timeline.Turn = .{ .number = 4, .files = 1, .path = "src/ui/app.zig" };
+        const b: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/app.zig" };
+        try testing.expect(fx.app.runsWith(a, b, 0));
+
+        // A different file is a different piece of work.
+        const other: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/body.zig" };
+        try testing.expect(!fx.app.runsWith(a, other, 0));
+
+        // Six things stop a fold, each because the row has something of its own
+        // to say and folding it away would hide exactly what it was drawn for.
+        const marked: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/app.zig" };
+        try testing.expect(!fx.app.runsWith(a, marked, 3));
+
+        var reverted = b;
+        reverted.reverted = true;
+        try testing.expect(!fx.app.runsWith(a, reverted, 0));
+
+        var answered = b;
+        answered.answered = true;
+        try testing.expect(!fx.app.runsWith(a, answered, 0));
+
+        var quiet = b;
+        quiet.files = 0;
+        try testing.expect(!fx.app.runsWith(a, quiet, 0));
+
+        var baseline = b;
+        baseline.number = 0;
+        try testing.expect(!fx.app.runsWith(a, baseline, 0));
+
+        fx.app.review.viewing = 3;
+        try testing.expect(!fx.app.runsWith(a, b, 0));
+        fx.app.review.viewing = null;
+
+        // And expanding stops every fold, which is what opening one means.
+        fx.app.turns_expanded = true;
+        try testing.expect(!fx.app.runsWith(a, b, 0));
+    }
+
+    test "elision is by distance, not by read state" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        fx.app.review.viewing = null;
+
+        // The failure `SNAPSHOTS.md` 5.3b's own rule has: a mark that has stood
+        // all morning leaves every turn unread, so a fold keyed on read state
+        // fires on nothing at all. Distance folds the middle regardless.
+        try testing.expect(!fx.app.turnKept(20, 20, 900, 1));
+
+        // Expanding shows everything, which is what opening the `⋮` row does.
+        fx.app.turns_expanded = true;
+        try testing.expect(fx.app.turnKept(20, 20, 900, 1));
     }
 
     test "auto splits when the pane is wide enough and folds back when it is not" {
@@ -2564,12 +2670,18 @@ pub const App = struct {
 
         // One line, no newline in it: hard rule 1, and the reason the notes
         // themselves may be as long as they like.
+        //
+        // Through the template table like every other outgoing string. It was
+        // a `bufPrint` here for a long time, which made the sentence the agent
+        // receives most the only one a reader could not change.
+        var count_buf: [16]u8 = undefined;
+        const count = std.fmt.bufPrint(&count_buf, "{d}", .{written}) catch "?";
         self.outgoing.clearRetainingCapacity();
-        var line_buf: [256]u8 = undefined;
-        const one = std.fmt.bufPrint(&line_buf, "review ready: {s} ({d} comment{s})", .{
-            rel, written, if (written == 1) "" else "s",
-        }) catch rel;
-        try self.outgoing.appendSlice(self.gpa, one);
+        try template.render(self.gpa, &self.outgoing, self.templates.submit_review, &.{
+            .{ .name = "path", .value = rel },
+            .{ .name = "count", .value = count },
+            .{ .name = "s", .value = if (written == 1) "" else "s" },
+        });
         self.want_send = .send;
     }
 
@@ -3017,18 +3129,76 @@ pub const App = struct {
     /// selector and the diff view is the viewer - there is no second display
     /// of files and hunks anywhere in this feature.
     fn openTurnList(self: *App) !void {
-        const store = if (self.snap) |*s| s else {
+        if (self.snap == null) {
             self.notice.set("snapshots are off here - no turns to list", .{});
             return;
-        };
+        }
+        // Folded again each time it is opened. A fold the reader expanded once
+        // to find something should not still be expanded tomorrow morning,
+        // which is the state the fold exists for.
+        self.turns_expanded = false;
+        if (!self.fillTurnRows()) return;
+
+        self.files_purpose = .turns;
+        self.file_list.title = " turns ";
+        self.file_list.totals = null;
+        self.file_list.extra_keys = &.{};
+        // Opened on the row the reader is already looking at, rather than at an
+        // arbitrary top.
+        var at: u32 = 0;
+        for (self.pick_list.items, 0..) |row, i| {
+            if (row.current) at = @intCast(i);
+        }
+        self.file_list.open(at);
+        self.mode = .finder;
+    }
+
+    /// The same rows again, with the fold in whatever state it is now.
+    ///
+    /// Separate from opening because expanding is not opening: the overlay
+    /// stays where it is, the filter keeps what has been typed, and only the
+    /// rows underneath change. The selection is clamped rather than reset -
+    /// the list only ever grows here, so the row the reader was on is still
+    /// there and usually still under the cursor.
+    fn rebuildTurns(self: *App) void {
+        _ = self.fillTurnRows();
+        // The list only ever grows here, so the row the reader was on is still
+        // there; `move(0)` re-narrows the selection against the new rows
+        // without moving it.
+        self.file_list.move(self.pick_list.items, 0);
+    }
+
+    /// Reads the timeline and lays the rows out. False when there is nothing
+    /// to show and the caller has already been told why.
+    fn fillTurnRows(self: *App) bool {
+        const store = if (self.snap) |*s| s else return false;
         if (store.state.latest_turn == 0 and !store.state.has_baseline) {
             self.notice.set("no turns yet - one is taken when the agent stops writing", .{});
-            return;
+            return false;
         }
 
-        const read = timeline.read(self.gpa, self.io, store.state.name(), store.state.latest_turn) catch {
+        // The files carrying a comment the reader has already sent. A turn
+        // that touched one of them is the agent answering them, as against
+        // doing something else - which is the distinction `FEATURES.md` 1.4 is
+        // entirely about, and half of `SPEC.md` open question 5.
+        //
+        // Distinct paths, because ten comments on one file is one file. Held
+        // in the pick arena, which is reset just below and then rebuilt - so
+        // this is gathered before the reset rather than after it.
+        var watching: std.ArrayList([]const u8) = .empty;
+        defer watching.deinit(self.gpa);
+        for (self.comments.items()) |n| {
+            if (n.state != .sent) continue;
+            var seen = false;
+            for (watching.items) |w| {
+                if (std.mem.eql(u8, w, n.path)) seen = true;
+            }
+            if (!seen) watching.append(self.gpa, n.path) catch {};
+        }
+
+        const read = timeline.read(self.gpa, self.io, store.state.name(), store.state.latest_turn, watching.items) catch {
             self.notice.set("could not read the timeline", .{});
-            return;
+            return false;
         };
         defer self.gpa.free(read.text);
         defer self.gpa.free(read.turns);
@@ -3054,12 +3224,75 @@ pub const App = struct {
             .in_review = false,
             .plain = true,
             .current = self.review.viewing == null,
-        }) catch return;
-        self.pick_turns.append(self.gpa, std.math.maxInt(u32)) catch return;
+        }) catch return false;
+        self.pick_turns.append(self.gpa, std.math.maxInt(u32)) catch return false;
 
         var age_buf: [24]u8 = undefined;
-        for (read.turns) |turn| {
-            const shown = turnLabel(arena, turn, store, &age_buf, now_s);
+        // One row per run of folded turns, not one per turn: the count is the
+        // whole point, and a `⋮` between every pair would be longer than the
+        // list it replaced.
+        const marked = store.state.reviewed_turn;
+        var folded: u32 = 0;
+        var i: usize = 0;
+        while (i < read.turns.len) : (i += 1) {
+            const turn = read.turns[i];
+            if (!self.turnKept(turn.number, i, store.state.latest_turn, marked)) {
+                folded += 1;
+                continue;
+            }
+            if (folded > 0) {
+                self.pick_list.append(self.gpa, .{
+                    .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
+                        folded,
+                        if (folded == 1) "" else "s",
+                    }) catch "⋮",
+                    .added = 0,
+                    .removed = 0,
+                    .in_review = false,
+                    .plain = true,
+                }) catch return false;
+                self.pick_turns.append(self.gpa, elided_row) catch return false;
+                folded = 0;
+            }
+            // A run of turns over the same file, drawn as one row. `git log`
+            // gives them newest first, so the run runs forwards from here and
+            // `turn` is its newest member - which is the age worth showing and
+            // the state the work ended at.
+            var run_end = i;
+            var run_added = turn.added;
+            var run_removed = turn.removed;
+            while (run_end + 1 < read.turns.len and
+                self.turnKept(read.turns[run_end + 1].number, run_end + 1, store.state.latest_turn, marked) and
+                self.runsWith(turn, read.turns[run_end + 1], marked))
+            {
+                run_end += 1;
+                run_added +|= read.turns[run_end].added;
+                run_removed +|= read.turns[run_end].removed;
+            }
+            if (run_end > i) {
+                self.pick_list.append(self.gpa, .{
+                    .path = std.fmt.allocPrint(arena, "{s} {d}-{d}  {s}  {s}  ×{d}", .{
+                        self.glyphs.run_mark,
+                        read.turns[run_end].number,
+                        turn.number,
+                        turn.path,
+                        timeline.age(&age_buf, turn.when_s, now_s),
+                        run_end - i + 1,
+                    }) catch "run",
+                    .added = run_added,
+                    .removed = run_removed,
+                    // The counts are the run's, summed, and they are real -
+                    // unlike the `⋮` row's, which stands for turns whose
+                    // numbers it is not adding up.
+                    .in_review = true,
+                    .icon_path = arena.dupe(u8, turn.path) catch "",
+                }) catch return false;
+                self.pick_turns.append(self.gpa, run_row) catch return false;
+                i = run_end;
+                continue;
+            }
+
+            const shown = turnLabel(arena, turn, store, &age_buf, now_s, self.glyphs);
             self.pick_list.append(self.gpa, .{
                 .path = shown,
                 // The baseline is not a change - it is what was there before
@@ -3085,22 +3318,26 @@ pub const App = struct {
                 .key = turn.number,
                 .plain = turn.number == 0 or turn.files == 0,
                 .current = if (self.review.viewing) |v| v == turn.number else false,
-            }) catch return;
-            self.pick_turns.append(self.gpa, turn.number) catch return;
+            }) catch return false;
+            self.pick_turns.append(self.gpa, turn.number) catch return false;
         }
-
-        self.files_purpose = .turns;
-        self.file_list.title = " turns ";
-        self.file_list.totals = null;
-        self.file_list.extra_keys = &.{};
-        // Opened on the row the reader is already looking at, rather than at an
-        // arbitrary top.
-        var at: u32 = 0;
-        for (self.pick_list.items, 0..) |row, i| {
-            if (row.current) at = @intCast(i);
+        // A session whose oldest turns are folded and whose baseline is gone -
+        // pruned by `[snapshot] keep` - ends on the fold rather than dropping
+        // the count that says how much is missing.
+        if (folded > 0) {
+            self.pick_list.append(self.gpa, .{
+                .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
+                    folded,
+                    if (folded == 1) "" else "s",
+                }) catch "⋮",
+                .added = 0,
+                .removed = 0,
+                .in_review = false,
+                .plain = true,
+            }) catch return false;
+            self.pick_turns.append(self.gpa, elided_row) catch return false;
         }
-        self.file_list.open(at);
-        self.mode = .finder;
+        return true;
     }
 
     /// Asks whether to overwrite a file with the version in the turn on screen.
@@ -3363,12 +3600,85 @@ pub const App = struct {
 
     /// One turn's row. The rail, then which turn, what it touched, when, and
     /// how big - four columns and no more.
+    /// What `pick_turns` holds for the `⋮` row: not a turn, and not the
+    /// working tree's `maxInt` either, so opening it can be told from opening
+    /// anything else.
+    const elided_row: u32 = std.math.maxInt(u32) - 1;
+
+    /// What `pick_turns` holds for a folded *run*. Distinct from `elided_row`
+    /// only so the two can say different things if they ever need to; both
+    /// open by expanding.
+    const run_row: u32 = std.math.maxInt(u32) - 2;
+
+    /// Whether two adjacent turns are one piece of work.
+    ///
+    /// Four turns in a row on `app.zig` is one thing that took four tries, and
+    /// drawing it as four rows spends four lines saying one thing. smartlog
+    /// does not fold adjacent commits because a commit is individually
+    /// meaningful; an agent's turn is not, which is the whole difference this
+    /// list has to work with.
+    ///
+    /// Never across a turn that has something of its own to say: the mark, the
+    /// turn on screen, the baseline, a self-revert, a reply, or a turn that
+    /// changed nothing. Folding one of those away would hide the very thing
+    /// the row was worth drawing for.
+    fn runsWith(self: *const App, a: timeline.Turn, b: timeline.Turn, marked: u32) bool {
+        if (self.turns_expanded) return false;
+        if (a.files == 0 or b.files == 0) return false;
+        if (a.number == 0 or b.number == 0) return false;
+        if (a.reverted or b.reverted or a.answered or b.answered) return false;
+        if (marked > 0 and (a.number == marked or b.number == marked)) return false;
+        if (self.review.viewing) |v| {
+            if (v == a.number or v == b.number) return false;
+        }
+        return a.path.len > 0 and std.mem.eql(u8, a.path, b.path);
+    }
+
+    /// How many of the newest turns are always drawn.
+    ///
+    /// Enough to answer "what did it just do" without scrolling, which is what
+    /// the list is opened for nine times in ten. Small enough that the two
+    /// pinned ends and the mark are on the same screen as it.
+    const turns_shown: usize = 8;
+
+    /// Whether turn `n` survives the fold.
+    ///
+    /// Four kinds of row do. The **newest few**, because that is the question
+    /// being asked. The **mark**, because it is where the reader stopped and
+    /// `✓` is meaningless if the row it sits on is gone. The **baseline**,
+    /// because it is one of the two ends and the one snapshot nothing else can
+    /// reconstruct. And the **turn on screen**, because eliding the row the
+    /// reader is standing on is the one thing a history view must never do.
+    ///
+    /// Everything else is the middle of a long session, which is what the
+    /// count replaces.
+    ///
+    /// This is elision by *distance*, not by read state. `SNAPSHOTS.md` 5.3b
+    /// folds the turns before the mark on the grounds that they have been
+    /// dealt with, and that is right for the nineteen-turn session it draws
+    /// and wrong for a real one: a mark that has stood since the morning
+    /// leaves every turn unread, and the fold fires on nothing at all. The two
+    /// ends are what a reader navigates from, which is what smartlog actually
+    /// elides around.
+    fn turnKept(self: *const App, n: u32, index: usize, newest: u32, marked: u32) bool {
+        _ = newest;
+        if (self.turns_expanded) return true;
+        if (index < turns_shown) return true;
+        if (n == 0) return true;
+        if (marked > 0 and n == marked) return true;
+        if (self.review.viewing) |v| {
+            if (v == n) return true;
+        }
+        return false;
+    }
+
     fn turnLabel(
         arena: Allocator,
         turn: timeline.Turn,
         store: *const snapshot.Store,
         age_buf: []u8,
         now_s: i64,
+        glyphs: theme_mod.Glyphs,
     ) []const u8 {
         // The rail smartlog and undotree both draw, one column wide, straight
         // until a restore forks it (§5.3a). `✓` is the mark: read up to here.
@@ -3391,13 +3701,26 @@ pub const App = struct {
         if (turn.files == 0) {
             return std.fmt.allocPrint(arena, "{s} {d: <3} no change  {s}", .{ rail, turn.number, when }) catch "turn";
         }
-        return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}", .{
+        // Appended rather than given a column of its own. A column would cost
+        // one everywhere to say something on the rare row, and this is rare by
+        // nature - an agent walking its own work back is the exception the
+        // marker exists to catch, not the rule.
+        const undone = if (turn.reverted)
+            std.fmt.allocPrint(arena, "  {s} {d}", .{ glyphs.revert_mark, turn.reverted_to }) catch ""
+        else
+            "";
+        // The pair `SNAPSHOTS.md` 5.3c asks for: one says the agent went
+        // backwards, the other says it was listening.
+        const replied = if (turn.answered) glyphs.answer_mark else "";
+        return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}{s}{s}", .{
             rail,
             turn.number,
             turn.path,
             when,
             turn.files,
             if (turn.files == 1) "" else "s",
+            undone,
+            replied,
         }) catch "turn";
     }
 

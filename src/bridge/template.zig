@@ -36,6 +36,17 @@ pub const Table = struct {
     ref_file_range: []const u8 = "{path}:{start}-{end}",
     ref_file_span: []const u8 = "{path}:{line} `{span}`",
 
+    /// Handing over a whole review: the file that was written, and how many
+    /// remarks are in it.
+    ///
+    /// The one sentence the reader sends most and at the moment that matters
+    /// most, and for a long time the only one they could not change - it was
+    /// a `bufPrint` in `submitReview` while every smaller thing the tool says
+    /// was already data. `{s}` is the plural, empty for one comment, because
+    /// a template cannot branch and "1 comments" is the kind of detail that
+    /// makes a tool look unfinished.
+    submit_review: []const u8 = "review ready: {path} ({count} comment{s})",
+
     /// The ask presets. `{ref}` is whichever of the above
     /// the cursor produced.
     ask_why: []const u8 = "{ref} - why this approach?",
@@ -97,6 +108,26 @@ fn expand(tmpl: []const u8, vars: []const Var) ![]u8 {
     errdefer out.deinit(testing.allocator);
     try render(testing.allocator, &out, tmpl, vars);
     return out.toOwnedSlice(testing.allocator);
+}
+
+test "the review handover is a template like everything else" {
+    const got = try expand(default.submit_review, &.{
+        .{ .name = "path", .value = ".lgtm/review-3.md" },
+        .{ .name = "count", .value = "7" },
+        .{ .name = "s", .value = "s" },
+    });
+    defer testing.allocator.free(got);
+    try testing.expectEqualStrings("review ready: .lgtm/review-3.md (7 comments)", got);
+
+    // One comment, and the plural is a variable rather than a branch: a
+    // template language with an `if` in it is a template language.
+    const one = try expand(default.submit_review, &.{
+        .{ .name = "path", .value = ".lgtm/review-1.md" },
+        .{ .name = "count", .value = "1" },
+        .{ .name = "s", .value = "" },
+    });
+    defer testing.allocator.free(one);
+    try testing.expectEqualStrings("review ready: .lgtm/review-1.md (1 comment)", one);
 }
 
 test "a reference expands from its parts" {

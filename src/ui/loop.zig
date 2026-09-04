@@ -101,6 +101,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         .top => .top,
         .centre => .centre,
     };
+    app.templates = opts.cfg.templates;
     app.review.ignore = opts.cfg.ignore;
     if (opts.base) |b| app.review.base = b;
     app.review.target = opts.target;

@@ -174,6 +174,23 @@ uncommitted work is invisible to git until you lose it.
 |---|---|
 | `]t` `[t` | walk the turns, ending at the working tree |
 | `<Space>lt` | list them: what each touched, when, how big |
+
+The list stays a screenful however long the session runs. The newest few turns
+are always drawn, and so are the mark, `0 original` and the turn you are
+looking at; everything between them collapses into `⋮ 13 turns`. `<CR>` opens a
+fold, and typing anything opens all of them — a filter that skipped folded rows
+would be a filter that lies.
+
+Four turns in a row on one file collapse too, as `⣿ 1-4 app.zig ×4`: that is
+one piece of work that took four tries, not four things to read. A run never
+folds across a row that has something of its own to say.
+
+Two markers earn their place:
+
+| | |
+|---|---|
+| `↺ 4` | **the agent undid its own work** — this turn put a file back to exactly what turn 4 left. Round-tripping is what agents do when they are stuck, and it is nearly invisible in a diff, because a diff only shows the endpoints |
+| `↩` | **this turn touched a file you commented on** — the agent answering you, as against doing something else |
 | `R` | restore this file from the turn on screen |
 | `u` | undo the last restore |
 

@@ -51,9 +51,16 @@ pub fn sendArgv(arena: Allocator, pane: []const u8, text: []const u8) Allocator.
 }
 
 /// `-a` lists every pane of every session; without it, the current window.
-/// The window is the useful default - an agent and its reviewer sit side by
-/// side - and `-a` is what the error message falls back to when the window
-/// holds more than the two.
+///
+/// Both are used, in that order. The window is the useful default - an agent
+/// and its reviewer sit side by side, and widening the search there would
+/// count a busy second session and refuse an answer that was next door. But an
+/// agent in another *tab* is, in tmux's vocabulary, an agent in another
+/// *window*: the near listing then holds only ourselves, and declining with
+/// the answer one subprocess away is not declining, it is giving up.
+///
+/// `soleOther` still refuses past two either way, so the far listing widens
+/// what can be found without widening what can be guessed.
 pub fn listArgv(arena: Allocator, all_sessions: bool) Allocator.Error![]const []const u8 {
     const format = "#{pane_id}\t#{pane_active}\t#{pane_current_command}";
     return if (all_sessions)
@@ -166,6 +173,35 @@ pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all_sessions: bool) Se
 }
 
 const testing = std.testing;
+
+test "an agent in another tab is found only by the wider listing" {
+    // tmux calls a tab a window. Side by side, the near listing answers.
+    const near = [_]Pane{
+        .{ .id = "%1", .command = "lgtm", .active = true },
+        .{ .id = "%2", .command = "claude", .active = false },
+    };
+    try testing.expectEqualStrings("%2", soleOther(&near, "%1").?);
+
+    // In another tab, the near listing holds only ourselves and has nothing
+    // to offer - which is what makes the second listing worth a subprocess.
+    const alone = [_]Pane{.{ .id = "%1", .command = "lgtm", .active = true }};
+    try testing.expect(soleOther(&alone, "%1") == null);
+
+    const far = [_]Pane{
+        .{ .id = "%1", .command = "lgtm", .active = true },
+        .{ .id = "%7", .command = "claude", .active = false },
+    };
+    try testing.expectEqualStrings("%7", soleOther(&far, "%1").?);
+
+    // And the wider listing is wider, not looser: a machine full of panes is
+    // still a machine nobody can guess about.
+    const busy = [_]Pane{
+        .{ .id = "%1", .command = "lgtm", .active = true },
+        .{ .id = "%7", .command = "claude", .active = false },
+        .{ .id = "%9", .command = "vim", .active = false },
+    };
+    try testing.expect(soleOther(&busy, "%1") == null);
+}
 
 test "send-keys is literal, and options stop before the payload" {
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
