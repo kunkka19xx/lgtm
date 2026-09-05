@@ -59,11 +59,24 @@ of `add`, and warns.)
 one mistake worth warning about. Nix caches what a `github:` ref resolves to for
 an hour (`tarball-ttl`), and inside that window it never asks GitHub again — so
 without it a `nix run` can rebuild a revision that is already stale, and a later
-upgrade can hand you back the build you were trying to replace. With it, the two
-lines above are also the upgrade: `nix profile remove lgtm`, then the same `add`,
-because `add` will not install over itself. (`nix profile upgrade --refresh lgtm`
-is the one-step version when it matches the entry — `nix profile list` shows how
-your Nix named it. Remove-then-add always works.)
+upgrade can hand you back the build you were trying to replace.
+
+Upgrading is its own command, and running `add` again is not it:
+
+```sh
+nix profile upgrade --refresh lgtm
+```
+
+A profile entry is locked to the commit it was installed from, and `add` will
+not install over itself, so repeating the install line leaves the old entry
+exactly where it was — `--refresh` re-checks where the `github:` ref points,
+not where your entry is pinned. `upgrade` re-resolves the URL the entry was
+added with and re-locks it. If your Nix named the entry something other than
+`lgtm`, `nix profile list` shows the name alongside the locked commit and the
+store path, which is also the quickest way to confirm that a stale entry — and
+not the release — is why `lgtm -v` still prints the old number.
+`nix profile remove lgtm` followed by the `add` line above does the same thing
+in two steps and always works.
 
 Two things can then make a successful upgrade look like it did nothing. A shell
 that has already run `lgtm` remembers the path it resolved, and `~/.nix-profile`
