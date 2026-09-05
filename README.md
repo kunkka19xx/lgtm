@@ -67,9 +67,14 @@ release's checksums. `--uninstall` removes it.
 **Nix** - the flake ships the binary, not just a dev shell:
 
 ```sh
-nix run github:kunkka19xx/lgtm          # run once, install nothing
-nix profile add github:kunkka19xx/lgtm  # keep it on PATH
+nix run --refresh github:kunkka19xx/lgtm          # run once, install nothing
+nix profile add --refresh github:kunkka19xx/lgtm  # keep it on PATH
 ```
+
+`--refresh` is not optional: Nix caches what a `github:` ref points at for an
+hour, and without it you can get handed a build you already have. Those same
+two lines are also how you upgrade later - run `nix profile remove lgtm` first,
+since `add` will not install over itself.
 
 **Arch**, from the AUR: `lgtm-bin` (the release binary) or `lgtm-git` (builds
 `main`), with any helper or `makepkg -si` from a clone.

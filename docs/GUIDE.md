@@ -45,8 +45,8 @@ git clone https://aur.archlinux.org/lgtm-bin.git && cd lgtm-bin && makepkg -si
 With Nix, the flake exposes the binary as a package, not just a dev shell:
 
 ```sh
-nix run github:kunkka19xx/lgtm          # run it once, install nothing
-nix profile add github:kunkka19xx/lgtm  # keep it on PATH
+nix run --refresh github:kunkka19xx/lgtm          # run it once, install nothing
+nix profile add --refresh github:kunkka19xx/lgtm  # keep it on PATH
 ```
 
 `nix run` builds into the store and runs it — nothing joins your profile or your
@@ -54,6 +54,25 @@ PATH, and the next `nix-collect-garbage` reclaims the build, so trying it costs
 nothing. `nix profile add` is the one that persists; `nix profile remove lgtm`
 undoes it. Both need flakes enabled. (`nix profile install` is the old spelling
 of `add`, and warns.)
+
+`--refresh` belongs on both, first install included, and leaving it off is the
+one mistake worth warning about. Nix caches what a `github:` ref resolves to for
+an hour (`tarball-ttl`), and inside that window it never asks GitHub again — so
+without it a `nix run` can rebuild a revision that is already stale, and a later
+upgrade can hand you back the build you were trying to replace. With it, the two
+lines above are also the upgrade: `nix profile remove lgtm`, then the same `add`,
+because `add` will not install over itself. (`nix profile upgrade --refresh lgtm`
+is the one-step version when it matches the entry — `nix profile list` shows how
+your Nix named it. Remove-then-add always works.)
+
+Two things can then make a successful upgrade look like it did nothing. A shell
+that has already run `lgtm` remembers the path it resolved, and `~/.nix-profile`
+does not change when the store path behind it does: run `rehash` (zsh) or
+`hash -r` (bash) in any long-lived pane, which is why a tmux session left open
+across the upgrade is usually the one still reporting the old version. And an
+`lgtm` already running keeps the binary it started with until you quit it.
+`readlink -f "$(which lgtm)"` settles it — the store hash changes on a real
+upgrade, whether or not `lgtm -v` does.
 
 No Windows build: `io/input.zig` and `io/tty.zig` are POSIX throughout, so that
 needs a port rather than a manifest.
