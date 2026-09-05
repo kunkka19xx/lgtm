@@ -449,9 +449,18 @@ const Scan = struct {
             } else if (self.expect_fn and kind == .text) {
                 kind = .fn_name;
                 self.expect_fn = false;
-                try self.openFn(word);
+                try self.openFn(word, !self.expect_fn_body);
             } else {
                 self.expect_fn = false;
+                if (self.def.fn_decl_paren and kind == .text and self.appliedToArgs()) {
+                    // A call and a declaration are the same shape to a reader,
+                    // and every highlighter paints them alike. Only the ones
+                    // that pass the whole test open a span.
+                    kind = .fn_name;
+                    if (!self.throughReceiver(start) and self.argsPrecedeBlock()) {
+                        try self.openFn(word, true);
+                    }
+                }
             }
 
             // A tag name is an ordinary identifier the markup put after `<`,
@@ -664,9 +673,172 @@ const Scan = struct {
         }
     }
 
+    /// `fn_decl_paren`: is the identifier that just ended applied to an
+    /// argument list? True for a call as much as for a declaration - it is
+    /// what decides the colour, and `argsPrecedeBlock` decides the span.
+    fn appliedToArgs(self: *Scan) bool {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        return j < self.end and self.text[j] == '(';
+    }
+
+    /// How far a declaration's argument list may wrap before the lookahead
+    /// gives up on it.
+    ///
+    /// Not the thing that decides a call from a declaration - the tail does
+    /// that, and every call shape traced against this rejects on its `;`
+    /// whether it wrapped or not. This bounds the cost, and bounds how far a
+    /// file being typed into can be misread from one unclosed parenthesis.
+    /// Six leaves room for a seven-parameter signature with an annotation on
+    /// each: the four-line ones in an ordinary Spring controller sit close
+    /// enough to a tighter bound that it would be the bound, rather than the
+    /// tail, deciding whether a method gets its name.
+    const decl_wrap_lines: u32 = 6;
+
+    /// `fn_decl_paren`: was the identifier that just ended reached through a
+    /// receiver? `list.add(x)` is a call whatever follows it, because a method
+    /// is never declared through one - so the span is refused and only the
+    /// colour is kept.
+    ///
+    /// Backwards over spaces and tabs but never over a newline, so the `.` of
+    /// a chained call broken across lines - `stream\n    .forEach(` - is still
+    /// found, and the `.` ending the statement above an ordinary declaration
+    /// is not.
+    fn throughReceiver(self: Scan, start: usize) bool {
+        var j = start;
+        while (j > 0) {
+            j -= 1;
+            const c = self.text[j];
+            if (c == ' ' or c == '\t') continue;
+            return c == '.';
+        }
+        return false;
+    }
+
+    /// A literal the lookahead stepped over: where it ends, and whether it
+    /// ended at its own close rather than at the end of the line.
+    const Literal = struct { past: usize, closed: bool };
+
+    /// `fn_decl_paren`: the literal that opens at `j`, or null if none does.
+    ///
+    /// The lookahead below reads raw bytes, and a `)` or a `{` inside a string
+    /// is neither - `format("%s) {", x)` would otherwise close the argument
+    /// list early, find a brace behind it, and name the rest of the enclosing
+    /// method after `format`. An unclosed literal is reported rather than
+    /// skipped over, because the lookahead now crosses lines and everything
+    /// past an unterminated quote is a guess: it ends there instead, which is
+    /// no span rather than a wrong one.
+    ///
+    /// Read from `LangDef.strings` rather than from a `'"'` written here, and
+    /// with the same first-match-wins order the scanner itself uses, so Java's
+    /// `"""` is tried before its `"`. A multiline literal is not followed
+    /// across the break either - it is unreachable inside an argument list
+    /// that could be a declaration's. Hashed literals - Swift's `#"` - are
+    /// declined: no language with `fn_decl_paren` has them, and guessing at
+    /// one here would be a second implementation of `matchesClose`.
+    fn skipLiteral(self: Scan, j: usize) ?Literal {
+        const text = self.text[0..self.end];
+        for (self.def.strings) |spec| {
+            if (spec.hashed or spec.open.len == 0) continue;
+            if (!std.mem.startsWith(u8, text[j..], spec.open)) continue;
+
+            var k = j + spec.open.len;
+            while (k < self.end) {
+                const c = text[k];
+                if (c == '\n') return .{ .past = k, .closed = false };
+                if (spec.escape) |e| if (c == e) {
+                    k = @min(k + 2, self.end);
+                    continue;
+                };
+                if (std.mem.startsWith(u8, text[k..], spec.close)) {
+                    const past = k + spec.close.len;
+                    // The byte limit that keeps an apostrophe from painting the
+                    // rest of a line applies here too, or `it's` in a trailing
+                    // comment would swallow the lookahead.
+                    if (spec.max_bytes) |limit| if (past - j > limit) break;
+                    return .{ .past = past, .closed = true };
+                }
+                k += 1;
+            }
+            // A `max_bytes` literal that did not close is not one - the same
+            // rule the scanner applies, so `it's` stays prose.
+            if (spec.max_bytes != null) continue;
+            return .{ .past = self.end, .closed = false };
+        }
+        return null;
+    }
+
+    /// `fn_decl_paren`: does that argument list close on this line with a block
+    /// behind it? This is the whole of the declaration test, and it is a
+    /// lookahead rather than the brace-on-the-same-line rule `fn_decl_body`
+    /// uses, because in this position that rule is not accurate enough:
+    /// `if (isReady(x)) {` puts a call and a block on one line and would name
+    /// the block after the call.
+    ///
+    /// Between the `)` and the `{` only a `throws` clause may stand, so the
+    /// tail admits words and the punctuation a type list is written with.
+    /// Anything else - the `;` of a statement, the second `)` of the `if`, the
+    /// `(` of the real declaration on `@Test(60) void f() {` - is a rejection.
+    /// A `->` inside the parentheses never closes them on the line it opens
+    /// them, which is what keeps `assertThrows(E.class, () -> {` a call.
+    ///
+    /// The argument list may wrap, within `decl_wrap_lines`, because a Spring
+    /// or JPA signature with an annotation on each parameter does not fit on
+    /// one line and refusing those left a controller's methods unnamed. What
+    /// discriminates a wrapped signature from a wrapped call is unchanged and
+    /// is the tail: `changePassword(a,\n b) throws IOException {` reaches a
+    /// brace, `register(a,\n () -> {\n ...\n });` reaches the `;`.
+    ///
+    /// The tail itself is *not* allowed to wrap, and that asymmetry is load
+    /// bearing rather than an omission. `@RequestMapping("/users")` closes its
+    /// parentheses with a class declaration on the line below, and a tail that
+    /// crossed the break would read the brace ending that declaration as the
+    /// annotation's own body. So a brace on its own line - `void f()\n{` - and
+    /// a `throws` clause that wraps still name nothing, which is the failure
+    /// this is built to make: no span rather than a wrong one, with the
+    /// enclosing class still naming the line.
+    fn argsPrecedeBlock(self: *Scan) bool {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        if (j >= self.end or self.text[j] != '(') return false;
+
+        var open: u32 = 0;
+        var wrapped: u32 = 0;
+        while (j < self.end) {
+            if (self.skipLiteral(j)) |lit| {
+                // Everything past an unterminated quote is a guess, and the
+                // lookahead is about to cross a line on the strength of it.
+                if (!lit.closed) return false;
+                j = lit.past;
+                continue;
+            }
+            const c = self.text[j];
+            if (c == '\n') {
+                wrapped += 1;
+                if (wrapped > decl_wrap_lines) return false;
+            }
+            j += 1;
+            if (c == '(') open += 1;
+            if (c == ')') {
+                open -= 1;
+                if (open == 0) break;
+            }
+        } else return false;
+
+        while (j < self.end) : (j += 1) {
+            const c = self.text[j];
+            if (c == '{') return true;
+            const tail = c == ' ' or c == '\t' or c == ',' or c == '.' or
+                c == '<' or c == '>' or c == '&' or
+                std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+            if (!tail) return false;
+        }
+        return false;
+    }
+
     // -- function spans ----------------------------------------------------
 
-    fn openFn(self: *Scan, name: []const u8) Allocator.Error!void {
+    fn openFn(self: *Scan, name: []const u8, confirmed: bool) Allocator.Error!void {
         const fns = self.fns orelse return;
         const stack = self.stack.?;
 
@@ -684,7 +856,7 @@ const Scan = struct {
             .end_line = self.line,
             .depth = self.st.depth,
             .indent = self.indent,
-            .confirmed = !self.expect_fn_body,
+            .confirmed = confirmed,
         });
         try stack.append(self.gpa, @intCast(fns.items.len - 1));
     }
@@ -741,6 +913,7 @@ const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
+const java_lang = @import("lang/java.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
@@ -944,6 +1117,57 @@ test "a swift multiline string spans lines and holds bare quotes" {
     try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
     // The literal ended, so the next line lexes normally.
     try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
+}
+
+test "runs tile the span and classify java source" {
+    const src =
+        \\/** A doc comment. */
+        \\package app;
+        \\
+        \\public final class Tile {
+        \\    private final String name = "hello";
+        \\
+        \\    @Override
+        \\    public boolean isPressable(int actionID) {
+        \\        return actionID > 0;
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/** A doc").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "class").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "String").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "boolean").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"hello\"").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "Tile").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "isPressable").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0;").?);
+}
+
+test "a java text block spans lines and holds bare quotes" {
+    const src =
+        \\String q = """
+        \\    a "quoted" thing
+        \\    """;
+        \\int n = 1;
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
+    // The block closed, so the line after it lexes normally.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "int n").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "1;").?);
 }
 
 test "css hyphenated properties survive as one word" {
@@ -1255,6 +1479,259 @@ test "a javascript local binding does not steal its function's name" {
     try testing.expectEqualStrings("handleSubmit", st.enclosingFn(4).?.name);
     try testing.expectEqualStrings("App", st.enclosingFn(6).?.name);
     for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "email"));
+}
+
+test "java names methods that no keyword introduces" {
+    const src =
+        \\package app;
+        \\
+        \\public class Tile {
+        \\    private int count = 0;
+        \\
+        \\    public Tile(int count) {
+        \\        this.count = count;
+        \\    }
+        \\
+        \\    public static void main(String[] args) {
+        \\        System.out.println(count);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expect(st.enclosingFn(0) == null);
+    // Between the members, the class is still better than nothing.
+    try testing.expectEqualStrings("Tile", st.enclosingFn(3).?.name);
+    // A constructor is a declaration by the same shape as a method.
+    try testing.expectEqualStrings("Tile", st.enclosingFn(6).?.name);
+    try testing.expectEqualStrings("main", st.enclosingFn(9).?.name);
+    try testing.expectEqualStrings("main", st.enclosingFn(10).?.name);
+    // `println` is a call through a receiver and opened no span of its own.
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "println"));
+}
+
+test "a java call does not steal its method's name" {
+    const src =
+        \\class Repo {
+        \\    void save(Row row) {
+        \\        validate(row);
+        \\        rows.forEach(r -> {
+        \\            store.put(r);
+        \\        });
+        \\        assertThrows(IOException.class, () -> {
+        \\            flush();
+        \\        });
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // `validate(row);` opened no block on its line, so it was dropped.
+    try testing.expectEqualStrings("save", st.enclosingFn(2).?.name);
+    // Both lambdas open a block on the call's line. The receiver guard covers
+    // `rows.forEach`, the `->` guard covers the unqualified `assertThrows`.
+    try testing.expectEqualStrings("save", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("save", st.enclosingFn(7).?.name);
+    for (st.fns) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "validate"));
+        try testing.expect(!std.mem.eql(u8, f.name, "forEach"));
+        try testing.expect(!std.mem.eql(u8, f.name, "assertThrows"));
+    }
+}
+
+test "a java brace inside a string does not open a method" {
+    // The lookahead reads raw bytes, so the `) {` in the format string used to
+    // close the argument list early and name every line after it `format`. The
+    // span it opened was never entered - the brace depth had not moved - so it
+    // ran to the end of the enclosing method.
+    const src =
+        \\class X {
+        \\    void b(String x) {
+        \\        String s = format("%s) {", x);
+        \\        logger.info("done) {} rows", 3);
+        \\        realWork();
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    for (2..5) |li| {
+        try testing.expectEqualStrings("b", st.enclosingFn(@intCast(li)).?.name);
+    }
+    for (st.fns) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "format"));
+        try testing.expect(!std.mem.eql(u8, f.name, "info"));
+    }
+}
+
+test "a java string in the parameter list does not cost the method its span" {
+    // The other half of the same rule, and the reason the lookahead skips a
+    // literal rather than stopping at one: an annotated parameter is ordinary
+    // Spring, and refusing every signature that holds a quote would lose the
+    // name of most of a controller.
+    const src =
+        \\class Api {
+        \\    public void handle(@RequestParam("id") String id) {
+        \\        use(id);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("handle", st.enclosingFn(2).?.name);
+}
+
+test "a java signature may wrap, and a wrapped call still may not" {
+    // A parameter per line is what an annotated Spring or JPA signature looks
+    // like, and the whole method used to go unnamed for it.
+    const src =
+        \\class Api {
+        \\    public Response changePassword(@RequestParam String current,
+        \\                                   @RequestParam String next) throws IOException {
+        \\        service.change(current, next);
+        \\    }
+        \\
+        \\    void wide() {
+        \\        register("click",
+        \\                 handler,
+        \\                 () -> {
+        \\                     fire();
+        \\                 });
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // The continuation line and the body both belong to the method.
+    try testing.expectEqualStrings("changePassword", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("changePassword", st.enclosingFn(3).?.name);
+    // The call wraps too, and closes on a `;`. That tail is what separates the
+    // two, not the number of lines either of them takes.
+    try testing.expectEqualStrings("wide", st.enclosingFn(10).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "register"));
+}
+
+test "a java annotation does not take the declaration below it" {
+    // Why the tail may not wrap even though the argument list may: this
+    // annotation closes its parentheses with a class on the next line, and a
+    // tail that crossed the break would find that class's brace and read the
+    // whole type as the annotation's body.
+    const src =
+        \\@RequestMapping("/users")
+        \\public class UserController {
+        \\    void get() {
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("UserController", st.enclosingFn(1).?.name);
+    try testing.expectEqualStrings("get", st.enclosingFn(2).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "RequestMapping"));
+}
+
+test "a java signature wrapped past the bound names nothing" {
+    // The documented failure, kept as a test so the bound is a decision rather
+    // than an accident: the class still names the lines, which is the answer
+    // this degrades to everywhere else.
+    const src =
+        \\class Wide {
+        \\    void far(int a,
+        \\             int b,
+        \\             int c,
+        \\             int d,
+        \\             int e,
+        \\             int f,
+        \\             int g,
+        \\             int h) {
+        \\        use(a);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("Wide", st.enclosingFn(9).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "far"));
+}
+
+test "a java receiver never introduces a declaration" {
+    // Valid Java has no line where a qualified call closes its parentheses and
+    // a block follows - `if (a.b(c)) {` is rejected by the `)` the `if` adds.
+    // A file being typed into has plenty, and this is the guard that makes the
+    // outcome not depend on that: a method is never declared through a
+    // receiver, whatever the rest of the line is doing.
+    const src =
+        \\class X {
+        \\    void c(int n) {
+        \\        obj.make(n) {
+        \\        }
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("c", st.enclosingFn(2).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "make"));
+}
+
+test "a java control-flow block is not a method" {
+    const src =
+        \\class Loop {
+        \\    void run(int n) {
+        \\        for (int i = 0; i < n; i++) {
+        \\            if (i > 2) {
+        \\                break;
+        \\            }
+        \\        }
+        \\        while (n-- > 0) {
+        \\            n = n;
+        \\        }
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // Every one of these opens a block, and none of them is a declaration:
+    // `for`, `if` and `while` are keywords, so no candidate is ever raised.
+    try testing.expectEqualStrings("run", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("run", st.enclosingFn(8).?.name);
+    try testing.expectEqual(@as(usize, 2), st.fns.len);
 }
 
 test "a truncated function still names its lines" {

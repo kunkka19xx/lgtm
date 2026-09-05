@@ -27,6 +27,7 @@ const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
+const java_lang = @import("lang/java.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
@@ -38,6 +39,7 @@ pub const languages = [_]*const LangDef{
     &go_lang.def,
     &python_lang.def,
     &swift_lang.def,
+    &java_lang.def,
     &javascript_lang.def,
     &typescript_lang.def,
     &css_lang.def,
@@ -328,6 +330,7 @@ test "extensions map to languages, case-insensitively" {
     try testing.expectEqualStrings("go", byExtension("cmd/serve.go").?.name);
     try testing.expectEqualStrings("python", byExtension("tools/run.py").?.name);
     try testing.expectEqualStrings("swift", byExtension("Views/Launchpad.swift").?.name);
+    try testing.expectEqualStrings("java", byExtension("src/main/App.java").?.name);
     try testing.expectEqualStrings("javascript", byExtension("web/app.jsx").?.name);
     try testing.expectEqualStrings("typescript", byExtension("web/App.tsx").?.name);
     try testing.expectEqualStrings("css", byExtension("web/main.scss").?.name);

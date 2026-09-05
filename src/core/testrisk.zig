@@ -402,6 +402,7 @@ const lang_zig = @import("../syntax/lang/zig.zig");
 const lang_go = @import("../syntax/lang/go.zig");
 const lang_js = @import("../syntax/lang/javascript.zig");
 const lang_py = @import("../syntax/lang/python.zig");
+const lang_java = @import("../syntax/lang/java.zig");
 
 test "the vocabularies do not fire on ordinary code" {
     // The failure that would kill this feature. Every line here is normal code
@@ -419,11 +420,35 @@ test "the vocabularies do not fire on ordinary code" {
         .{ .line = "  exit(1);", .def = &lang_js.def },
         .{ .line = "    assertion = compute()", .def = &lang_py.def },
         .{ .line = "    def testing_helper(self):", .def = &lang_py.def },
+        // `@Test` needs its `@`, so the import that brings it in is not a
+        // declaration. `@TestInstance(...)` is the one that gets through - see
+        // the note in `syntax/lang/java.zig`.
+        .{ .line = "import org.junit.jupiter.api.Test;", .def = &lang_java.def },
+        .{ .line = "    private boolean ignored = false;", .def = &lang_java.def },
+        // The import a skip arrives with. Counted alongside the call it
+        // enables, one skipped test would be reported as two - and the import
+        // is the line `markRows` would send the reader to. The `(` is what
+        // separates them.
+        .{ .line = "import static org.junit.Assume.assumeTrue;", .def = &lang_java.def },
+        .{ .line = "import static org.junit.jupiter.api.Assumptions.assumeTrue;", .def = &lang_java.def },
     };
     for (ordinary) |o| {
         try testing.expect(!mentions(o.line, o.def.test_decl));
         try testing.expect(!mentions(o.line, o.def.skip_names));
     }
+
+    // The assertion vocabularies, which are counted rather than detected and
+    // so were never covered by the loop above. Production code that a review
+    // deletes must not read as a test losing its assertions.
+    const unasserted = [_]struct { line: []const u8, def: *const langdef.LangDef }{
+        // Both of these matched Mockito's `verify(` before the table dropped
+        // it: one a call through a receiver, one a declaration.
+        .{ .line = "        if (!signature.verify(data)) return false;", .def = &lang_java.def },
+        .{ .line = "    public boolean verify(byte[] sig) {", .def = &lang_java.def },
+        .{ .line = "  const ok = inspect(value);", .def = &lang_js.def },
+        .{ .line = "\tif err := t.Close(); err != nil {", .def = &lang_go.def },
+    };
+    for (unasserted) |u| try testing.expectEqual(@as(u32, 0), countIn(u.line, u.def.assert_names));
 }
 
 test "the vocabularies do fire on the real thing" {
@@ -434,6 +459,8 @@ test "the vocabularies do fire on the real thing" {
         .{ .line = "  it(\"parses a header\", () => {", .def = &lang_js.def },
         .{ .line = "  test('rounds correctly', async () => {", .def = &lang_js.def },
         .{ .line = "def test_parses_header():", .def = &lang_py.def },
+        .{ .line = "    @Test", .def = &lang_java.def },
+        .{ .line = "    @ParameterizedTest", .def = &lang_java.def },
     };
     for (real) |r| try testing.expect(mentions(r.line, r.def.test_decl));
 
@@ -444,6 +471,8 @@ test "the vocabularies do fire on the real thing" {
         .{ .line = "  it.only(\"just this one\", () => {", .def = &lang_js.def },
         .{ .line = "  xit(\"disabled for now\", () => {", .def = &lang_js.def },
         .{ .line = "@pytest.mark.skip(reason=\"flaky\")", .def = &lang_py.def },
+        .{ .line = "    @Disabled(\"flaky on CI\")", .def = &lang_java.def },
+        .{ .line = "        assumeTrue(hasNetwork());", .def = &lang_java.def },
     };
     for (skips) |s| try testing.expect(mentions(s.line, s.def.skip_names));
 }
@@ -459,6 +488,16 @@ test "one assertion is counted once, however it is spelled" {
     try testing.expectEqual(@as(u32, 1), countIn(
         "\tt.Errorf(\"got %v\", got)",
         lang_go.def.assert_names,
+    ));
+    // Every JUnit helper contains `assert`, so the table carries the stem
+    // alone and one call counts once however it is spelled.
+    try testing.expectEqual(@as(u32, 1), countIn(
+        "        assertEquals(2, list.size());",
+        lang_java.def.assert_names,
+    ));
+    try testing.expectEqual(@as(u32, 1), countIn(
+        "        assertThat(row).isEqualTo(expected);",
+        lang_java.def.assert_names,
     ));
     // Rust's three are genuinely distinct spellings and must not collapse.
     try testing.expectEqual(@as(u32, 1), countIn("    assert_eq!(a, b);", &.{ "assert!", "assert_eq!" }));
