@@ -106,6 +106,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     if (opts.base) |b| app.review.base = b;
     app.review.target = opts.target;
     app.theme = opts.cfg.theme;
+    app.theme_name = opts.cfg.theme_name;
     app.glyphs = switch (opts.cfg.ui.icons) {
         .unicode => theme_mod.Glyphs.unicode,
         .ascii => theme_mod.Glyphs.ascii,

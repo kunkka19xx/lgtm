@@ -595,11 +595,30 @@ test "every bundled theme keeps the relationships the default has" {
 
 /// The bundled theme called `name`, resolved through the shared mapping.
 pub fn byName(name: []const u8) ?Theme {
+    const found = lookup(name) orelse return null;
+    return found.theme;
+}
+
+/// The theme *and* the name as this file spells it. Callers that keep the name
+/// around - `:theme` reports which one is on - need a slice that outlives the
+/// line it was typed on, and the one in `palette.bundled` is static.
+pub const Named = struct { name: []const u8, theme: Theme };
+
+pub fn lookup(name: []const u8) ?Named {
     for (palette.bundled) |b| {
-        if (std.mem.eql(u8, b.name, name)) return fromPalette(b.palette);
+        if (std.mem.eql(u8, b.name, name)) return .{ .name = b.name, .theme = fromPalette(b.palette) };
     }
     return null;
 }
+
+/// Every bundled name, for `<Tab>` in `:theme` and for the sentence a wrong
+/// name gets. One list, so neither can go out of date with the palettes.
+pub const bundled_names: []const []const u8 = blk: {
+    var out: [palette.bundled.len][]const u8 = undefined;
+    for (palette.bundled, 0..) |b, i| out[i] = b.name;
+    const frozen = out;
+    break :blk &frozen;
+};
 
 test "the bundled names are the ones a config file writes" {
     try std.testing.expect(byName("catppuccin") != null);

@@ -403,6 +403,19 @@ next_hunk  next_file  next_comment  next_turn  next_fresh  next_risk
 If nothing starts with what you typed it falls back to a loose match, so `:nf`
 still reaches `next_file`.
 
+One line takes a value rather than being one: `:theme <name>` changes the
+palette on the spot, and `<Tab>` walks the seven bundled ones the same way it
+walks command names.
+
+```
+terminal  catppuccin  tokyo-night  gruvbox  dracula  rose-pine  kanagawa
+:theme kanagawa
+```
+
+`:theme` on its own says which one is on. `:colorscheme` and `:colo` are the
+same line under vim's names. It lasts for the session - the status line shows
+you the `[theme] name` to write if you want to keep it.
+
 The short spellings are vim's and mean the same as the long ones. A name that
 does not exist suggests the nearest one that does, and a command that only lives
 inside the compose box or a list says so rather than running somewhere it has no

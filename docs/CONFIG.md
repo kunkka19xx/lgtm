@@ -221,7 +221,13 @@ Seven are bundled: `terminal`, `catppuccin`, `tokyo-night`, `gruvbox`,
 `dracula`, `rose-pine`, `kanagawa`. `terminal` paints nothing and lets your
 emulator's own sixteen colours through.
 
-`lgtm --theme-preview` shows them all.
+`lgtm --theme-preview` shows them all, and `:theme <Tab>` cycles them inside a
+running lgtm - which is the quicker way to choose one. That lasts for the
+session; this file is what makes it stick.
+
+Setting `name` here after a slot override discards the override, and `:theme`
+does the same for the same reason: a palette is a set of colours, not a base to
+patch.
 
 ### Overriding one colour
 

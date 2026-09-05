@@ -112,6 +112,10 @@ pub const App = struct {
     queue: *event.Queue,
     km: keymap.Keymap = .{},
     theme: theme_mod.Theme = theme_mod.default,
+    /// Which bundled theme `theme` came from, for `:theme` to report and for
+    /// the config file to be told to write. Static storage, so it outlives the
+    /// prompt line that set it.
+    theme_name: []const u8 = "terminal",
     glyphs: theme_mod.Glyphs = theme_mod.Glyphs.unicode,
 
     /// The current file, laid out. Rebuilt whenever the file or the diff
@@ -158,13 +162,6 @@ pub const App = struct {
     /// Which candidate is currently in the line, or null while the line is
     /// still the reader's own text.
     comp_at: ?usize = null,
-    /// What was typed before `<Tab>` first replaced it.
-    ///
-    /// Kept because cycling rewrites the line: recomputing the candidates
-    /// from a line that now holds `next_file` would give a different list on
-    /// every press, and the list would change under the reader mid-cycle.
-    comp_stem: [prompt_mod.max_bytes]u8 = undefined,
-    comp_stem_len: usize = 0,
 
     /// The last walk `;` should repeat: `]h`, `]w`, `]c`, `/`'s `n`, any of
     /// them. Null until one has been used, and then never null again - `;`
@@ -1548,11 +1545,18 @@ pub const App = struct {
     fn completeStep(self: *App, dir: i32) void {
         if (self.prompt.kind != .command) return;
 
+        // Past the verb of a line that takes a value, Tab is completing the
+        // value: `:theme <Tab>` walks the palettes, not the command names.
+        // Everything below is the same two rules either way, so the only
+        // difference is which list and what gets written back.
+        const arg = settingOf(self.prompt.text());
+
         if (self.comp.empty()) {
-            const typed = self.prompt.text();
-            @memcpy(self.comp_stem[0..typed.len], typed);
-            self.comp_stem_len = typed.len;
-            self.comp = complete.candidates(self.km.bindings, typed);
+            const typed = if (arg) |a| a.arg else self.prompt.text();
+            self.comp = if (arg) |a|
+                complete.fromNames(a.setting.names, typed)
+            else
+                complete.candidates(self.km.bindings, typed);
             self.comp_at = null;
             if (self.comp.empty()) return;
 
@@ -1560,9 +1564,7 @@ pub const App = struct {
             // The strip stays up, so the reader can see what they are choosing
             // between before the next press picks one.
             if (self.comp.common > typed.len) {
-                self.prompt.set(@tagName(self.comp.items[0])[0..self.comp.common]);
-                self.comp_stem_len = self.comp.common;
-                @memcpy(self.comp_stem[0..self.comp.common], @tagName(self.comp.items[0])[0..self.comp.common]);
+                self.setLine(arg, self.comp.items[0][0..self.comp.common]);
                 // One candidate means the line is now that command, whole.
                 if (self.comp.len == 1) self.comp_at = 0;
                 return;
@@ -1577,7 +1579,16 @@ pub const App = struct {
         } else if (dir > 0) 0 else n - 1;
 
         self.comp_at = next;
-        self.prompt.set(@tagName(self.comp.items[next]));
+        self.setLine(arg, self.comp.items[next]);
+    }
+
+    /// Writes a completion back into the line: the whole line for a command,
+    /// the part after the verb for a value.
+    fn setLine(self: *App, arg: ?Typed, name: []const u8) void {
+        const a = arg orelse return self.prompt.set(name);
+        var buf: [prompt_mod.max_bytes]u8 = undefined;
+        const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ a.setting.verb, name }) catch return;
+        self.prompt.set(line);
     }
 
     /// `:` runs a command by the name `[keys]` binds it by.
@@ -1595,6 +1606,10 @@ pub const App = struct {
     fn submitCommand(self: *App, line: []const u8, body: u16) !void {
         const typed = std.mem.trim(u8, line, " ");
         if (typed.len == 0) return;
+
+        // Before the table, because a line with a value in it is not a name in
+        // the table and never will be.
+        if (settingOf(typed)) |s| return self.setTheme(s.arg);
 
         const cmd = aliasFor(typed) orelse
             std.meta.stringToEnum(keymap.Command, typed) orelse
@@ -1643,6 +1658,68 @@ pub const App = struct {
             if (std.mem.eql(u8, text, e[0])) return e[1];
         }
         return null;
+    }
+
+    /// The `:` lines that take a value, and the value's completions.
+    ///
+    /// One entry so far. It is a table rather than an `if` because the second
+    /// one is what turns an `if` into a bug: the split, the completion and the
+    /// dispatch all have to agree on the same verb, and here they read it from
+    /// the same row.
+    const Setting = struct {
+        verb: []const u8,
+        names: []const []const u8,
+    };
+
+    /// A line split at its verb: which setting it names, and the value typed
+    /// after it - empty while the reader is still at `:theme `.
+    const Typed = struct { setting: Setting, arg: []const u8 };
+
+    const settings = [_]Setting{
+        .{ .verb = "theme", .names = theme_mod.bundled_names },
+        // vim's spelling, for the reader who arrives already knowing it.
+        .{ .verb = "colorscheme", .names = theme_mod.bundled_names },
+        .{ .verb = "colo", .names = theme_mod.bundled_names },
+    };
+
+    /// The setting a line names, and whatever follows it. Null for every other
+    /// line, which is the ordinary command path.
+    fn settingOf(line: []const u8) ?Typed {
+        const text = std.mem.trimStart(u8, line, " ");
+        for (settings) |st| {
+            if (!std.mem.startsWith(u8, text, st.verb)) continue;
+            const rest = text[st.verb.len..];
+            // `:themes` is not `:theme` with an argument.
+            if (rest.len != 0 and rest[0] != ' ') continue;
+            return .{ .setting = st, .arg = std.mem.trim(u8, rest, " ") };
+        }
+        return null;
+    }
+
+    /// `:theme <name>` changes the palette for this session.
+    ///
+    /// Not an entry in the `Command` table: that table maps a name to an
+    /// action with no argument, and every entry in it can be bound to a key. A
+    /// value cannot be typed by a keystroke.
+    ///
+    /// Session-only, and it says so. Writing it back would mean rewriting a
+    /// file the reader hand-wrote, comments and all; naming the two lines they
+    /// would type is honest and costs them one paste. Slot overrides in
+    /// `[theme]` are discarded, which is what setting `name` does in the file
+    /// too.
+    fn setTheme(self: *App, arg: []const u8) void {
+        if (arg.len == 0) {
+            self.notice.set("theme {s} - :theme <Tab> to change it", .{self.theme_name});
+            return;
+        }
+        const found = theme_mod.lookup(arg) orelse {
+            var buf: [256]u8 = undefined;
+            self.notice.set("no theme called {s} - try {s}", .{ arg, config.themeNames(&buf) });
+            return;
+        };
+        self.theme = found.theme;
+        self.theme_name = found.name;
+        self.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
     }
 
     /// Where a command that `:` refuses does live, for the message that says so.
@@ -7229,6 +7306,39 @@ test "Tab on something resembling no command leaves the line alone" {
     try fx.press("<Tab>");
     try testing.expectEqualStrings("zzzqqq", fx.app.prompt.text());
     try testing.expect(fx.app.comp.empty());
+}
+
+test "Tab past the verb completes the value, and Enter applies it" {
+    var fx = try Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try fx.press(":");
+    try fx.typeIn("theme kana");
+    try fx.press("<Tab>");
+    // The verb is kept and only the value is rewritten, which is the whole
+    // difference from completing a command name.
+    try testing.expectEqualStrings("theme kanagawa", fx.app.prompt.text());
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("kanagawa", fx.app.theme_name);
+    try testing.expect(!std.meta.eql(theme_mod.default, fx.app.theme));
+
+    // A name that is not one leaves the theme alone rather than falling back
+    // to a default the reader did not ask for.
+    try fx.press(":");
+    try fx.typeIn("theme nope");
+    try fx.press("<CR>");
+    try testing.expectEqualStrings("kanagawa", fx.app.theme_name);
+}
+
+test "a verb the line only starts with is not a setting" {
+    // `:themes` is a typo for a command, not `:theme` with an argument, and
+    // treating it as one would set the theme to nothing and say so oddly.
+    try testing.expect(App.settingOf("themes") == null);
+    try testing.expect(App.settingOf("theme") != null);
+    try testing.expectEqualStrings("", App.settingOf("theme").?.arg);
+    try testing.expectEqualStrings("gruvbox", App.settingOf("theme  gruvbox ").?.arg);
+    // vim's spelling reaches the same list.
+    try testing.expectEqualStrings("dracula", App.settingOf("colo dracula").?.arg);
 }
 
 test "closing the prompt forgets the candidates" {

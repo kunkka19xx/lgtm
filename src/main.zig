@@ -148,12 +148,14 @@ pub fn main(init: std.process.Init) !void {
     // not a theme is refused here rather than reported on the status line:
     // this one was typed just now, and the user is watching.
     if (theme_name) |name| {
-        cfg.cfg.theme = theme.byName(name) orelse {
+        const found = theme.lookup(name) orelse {
             var list: [256]u8 = undefined;
             try w.print("lgtm: no theme called '{s}'\n\ntry: {s}\n", .{ name, config.themeNames(&list) });
             try w.flush();
             return;
         };
+        cfg.cfg.theme = found.theme;
+        cfg.cfg.theme_name = found.name;
     }
 
     // After the theme is resolved, so `lgtm -v --theme <name>` prints in the

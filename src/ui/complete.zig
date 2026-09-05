@@ -2,6 +2,10 @@
 //
 // `<Tab>` in the `:` prompt: names in, candidates out.
 //
+// Names, not commands, because the line has two things to complete: the
+// command itself, and the value of the one command that takes a value
+// (`:theme`). Both are lists of strings by the time they get here.
+//
 // Pure and headless, for the same reason `motion.zig` is. What a reader gets
 // for a keystroke is decided here, and it is decided by a table, so it can be
 // checked without a terminal to press Tab in.
@@ -17,7 +21,7 @@ const fuzzy = @import("fuzzy.zig");
 pub const max = 48;
 
 pub const Set = struct {
-    items: [max]keymap.Command = undefined,
+    items: [max][]const u8 = undefined,
     len: usize = 0,
     /// How many bytes every candidate shares from the start. `<Tab>` extends
     /// the line to this before it begins cycling, which is vim's `longest`:
@@ -28,8 +32,15 @@ pub const Set = struct {
     /// they share no prefix with what was typed and extending would be a lie.
     common: usize = 0,
 
-    pub fn slice(self: *const Set) []const keymap.Command {
+    pub fn slice(self: *const Set) []const []const u8 {
         return self.items[0..self.len];
+    }
+
+    fn push(self: *Set, name: []const u8) bool {
+        if (self.len == max) return false;
+        self.items[self.len] = name;
+        self.len += 1;
+        return true;
     }
 
     pub fn empty(self: *const Set) bool {
@@ -52,9 +63,7 @@ pub fn candidates(bindings: []const keymap.Binding, typed: []const u8) Set {
     for (std.enums.values(keymap.Command)) |cmd| {
         if (!keymap.typeable(bindings, cmd)) continue;
         if (!std.mem.startsWith(u8, @tagName(cmd), typed)) continue;
-        if (set.len == max) break;
-        set.items[set.len] = cmd;
-        set.len += 1;
+        if (!set.push(@tagName(cmd))) break;
     }
     if (set.len > 0) {
         set.common = commonPrefix(set.slice());
@@ -65,20 +74,40 @@ pub fn candidates(bindings: []const keymap.Binding, typed: []const u8) Set {
     for (std.enums.values(keymap.Command)) |cmd| {
         if (!keymap.typeable(bindings, cmd)) continue;
         if (!fuzzy.subsequence(@tagName(cmd), typed)) continue;
-        if (set.len == max) break;
-        set.items[set.len] = cmd;
-        set.len += 1;
+        if (!set.push(@tagName(cmd))) break;
+    }
+    return set;
+}
+
+/// The same two rules over a fixed list: what `:theme` completes its argument
+/// with. A value has no `typeable` to filter on - every name in the list is
+/// one the command accepts - so this is the shorter half of `candidates`.
+pub fn fromNames(list: []const []const u8, typed: []const u8) Set {
+    var set: Set = .{};
+
+    for (list) |name| {
+        if (!std.mem.startsWith(u8, name, typed)) continue;
+        if (!set.push(name)) break;
+    }
+    if (set.len > 0) {
+        set.common = commonPrefix(set.slice());
+        return set;
+    }
+
+    if (typed.len == 0) return set;
+    for (list) |name| {
+        if (!fuzzy.subsequence(name, typed)) continue;
+        if (!set.push(name)) break;
     }
     return set;
 }
 
 /// Bytes shared by the start of every candidate's name.
-fn commonPrefix(items: []const keymap.Command) usize {
+fn commonPrefix(items: []const []const u8) usize {
     if (items.len == 0) return 0;
-    const first = @tagName(items[0]);
+    const first = items[0];
     var n = first.len;
-    for (items[1..]) |cmd| {
-        const name = @tagName(cmd);
+    for (items[1..]) |name| {
         var i: usize = 0;
         while (i < n and i < name.len and name[i] == first[i]) i += 1;
         n = i;
@@ -105,7 +134,7 @@ pub const Strip = struct {
 /// Two spaces between names, which reads as a gap without a separator glyph.
 pub const gap = 2;
 
-pub fn fit(items: []const keymap.Command, at: usize, width: usize) Strip {
+pub fn fit(items: []const []const u8, at: usize, width: usize) Strip {
     if (items.len == 0 or width == 0) return .{};
 
     var from: usize = 0;
@@ -113,7 +142,7 @@ pub fn fit(items: []const keymap.Command, at: usize, width: usize) Strip {
         var used: usize = 0;
         var to = from;
         while (to < items.len) : (to += 1) {
-            const name = @tagName(items[to]).len;
+            const name = items[to].len;
             const step = if (to == from) name else name + gap;
             // Room for " +N" when the list will continue past here. Reserved
             // rather than measured exactly: one column of slack beats a strip
@@ -134,8 +163,8 @@ const testing = std.testing;
 test "prefix candidates share their prefix, and Tab can extend to it" {
     const set = candidates(keymap.default_bindings, "next_");
     try testing.expect(set.len >= 4);
-    for (set.slice()) |cmd| {
-        try testing.expect(std.mem.startsWith(u8, @tagName(cmd), "next_"));
+    for (set.slice()) |name| {
+        try testing.expect(std.mem.startsWith(u8, name, "next_"));
     }
     // Everything under `next_` shares exactly that much and no more, because
     // the group has both `next_file` and `next_hunk` in it.
@@ -146,7 +175,7 @@ test "a single candidate's common prefix is the whole name" {
     // Which is what lets one Tab finish a unique command outright.
     const set = candidates(keymap.default_bindings, "toggle_z");
     try testing.expectEqual(@as(usize, 1), set.len);
-    try testing.expectEqual(keymap.Command.toggle_zen, set.items[0]);
+    try testing.expectEqualStrings("toggle_zen", set.items[0]);
     try testing.expectEqual(@as(usize, "toggle_zen".len), set.common);
 }
 
@@ -154,7 +183,8 @@ test "an empty line offers every typeable command" {
     const set = candidates(keymap.default_bindings, "");
     try testing.expect(set.len > 20);
     try testing.expectEqual(@as(usize, 0), set.common);
-    for (set.slice()) |cmd| {
+    for (set.slice()) |name| {
+        const cmd = std.meta.stringToEnum(keymap.Command, name).?;
         try testing.expect(keymap.typeable(keymap.default_bindings, cmd));
     }
 }
@@ -164,8 +194,8 @@ test "subsequence is the fallback, and never the first answer" {
     const loose = candidates(keymap.default_bindings, "nf");
     try testing.expect(loose.len > 0);
     var found = false;
-    for (loose.slice()) |cmd| {
-        if (cmd == .next_file) found = true;
+    for (loose.slice()) |name| {
+        if (std.mem.eql(u8, name, "next_file")) found = true;
     }
     try testing.expect(found);
     // Nothing to extend to: these do not share the typed text at all, and
@@ -175,9 +205,33 @@ test "subsequence is the fallback, and never the first answer" {
     // But a real prefix must never be answered with a subsequence match, or
     // the offer stops being the one a reader would have guessed.
     const strict = candidates(keymap.default_bindings, "next_f");
-    for (strict.slice()) |cmd| {
-        try testing.expect(std.mem.startsWith(u8, @tagName(cmd), "next_f"));
+    for (strict.slice()) |name| {
+        try testing.expect(std.mem.startsWith(u8, name, "next_f"));
     }
+}
+
+test "a value list completes by the same two rules as the command names" {
+    const themes = [_][]const u8{ "terminal", "catppuccin", "tokyo-night", "gruvbox", "dracula", "rose-pine", "kanagawa" };
+
+    // Prefix, and the common prefix is what Tab extends to.
+    const t = fromNames(&themes, "t");
+    try testing.expectEqual(@as(usize, 2), t.len);
+    try testing.expectEqualStrings("terminal", t.items[0]);
+    try testing.expectEqualStrings("tokyo-night", t.items[1]);
+    try testing.expectEqual(@as(usize, 1), t.common);
+
+    // Empty offers all of them, and one prefix that matches once is finished
+    // outright.
+    try testing.expectEqual(themes.len, fromNames(&themes, "").len);
+    try testing.expectEqual(@as(usize, "kanagawa".len), fromNames(&themes, "kan").common);
+
+    // Subsequence is the fallback, never the first answer.
+    const loose = fromNames(&themes, "tkn");
+    try testing.expectEqual(@as(usize, 1), loose.len);
+    try testing.expectEqualStrings("tokyo-night", loose.items[0]);
+    try testing.expectEqual(@as(usize, 0), loose.common);
+
+    try testing.expect(fromNames(&themes, "zzz").empty());
 }
 
 test "nothing resembling a command offers nothing" {
@@ -189,7 +243,8 @@ test "completion never offers a command the command line would refuse" {
     // must not put one in the line and let the reader press Enter on it.
     for ([_][]const u8{ "compose", "c", "l", "" }) |typed| {
         const set = candidates(keymap.default_bindings, typed);
-        for (set.slice()) |cmd| {
+        for (set.slice()) |name| {
+            const cmd = std.meta.stringToEnum(keymap.Command, name).?;
             try testing.expect(keymap.typeable(keymap.default_bindings, cmd));
         }
     }
@@ -222,12 +277,12 @@ test "the strip never draws wider than the row it is given" {
             const s = fit(items, at, width);
             var used: usize = 0;
             for (s.from..s.to) |i| {
-                used += @tagName(items[i]).len;
+                used += items[i].len;
                 if (i != s.from) used += gap;
             }
             // One name too wide for the row is shown alone and clipped, which
             // is the one case allowed to exceed it.
-            if (s.len() == 1 and @tagName(items[s.from]).len > width) continue;
+            if (s.len() == 1 and items[s.from].len > width) continue;
             try testing.expect(used <= width);
         }
     }
@@ -251,7 +306,7 @@ test "the strip reserves room for the +N that says the list continues" {
 
     var used: usize = 0;
     for (s.from..s.to) |i| {
-        used += @tagName(items[i]).len;
+        used += items[i].len;
         if (i != s.from) used += gap;
     }
     var buf: [8]u8 = undefined;

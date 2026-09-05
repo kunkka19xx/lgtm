@@ -138,7 +138,7 @@ fn drawCompletions(f: Frame, p: PromptView, row: u16) void {
     var col: u16 = 0;
     for (strip.from..strip.to) |i| {
         if (i != strip.from) col += complete.gap;
-        const name = @tagName(p.completions[i]);
+        const name = p.completions[i];
         const chosen = p.completion_at != null and p.completion_at.? == i;
         f.put(row, col, name, if (chosen) f.theme.search_match else f.theme.dim);
         col += @intCast(name.len);

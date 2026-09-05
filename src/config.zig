@@ -145,6 +145,10 @@ pub const Config = struct {
     /// overrode. Resolved here rather than carried as a name, so the app is
     /// handed styles and never has to know a theme could have failed to load.
     theme: theme.Theme = theme.default,
+    /// Which bundled palette `theme` started from. Slot overrides do not
+    /// change it: it names where the colours came from, which is what `:theme`
+    /// reports and what a reader would write in the file.
+    theme_name: []const u8 = "terminal",
     /// The keymap after any `[keys]` overrides. Points straight at the
     /// defaults until something overrides them, so the ordinary run - no
     /// config file, or one that does not touch keys - allocates nothing.
@@ -575,11 +579,15 @@ pub const Loader = struct {
     fn applyTheme(self: *Loader, src: []const u8, line: u32, key: []const u8, value: toml.Value) void {
         const spec = self.wantString(src, line, key, value) orelse return;
         if (std.mem.eql(u8, key, "name")) {
-            self.cfg.theme = theme.byName(spec) orelse {
+            const found = theme.lookup(spec) orelse {
                 var buf: [256]u8 = undefined;
                 self.note(src, line, "no theme called \"{s}\" - try {s}", .{ spec, themeNames(&buf) });
                 return;
             };
+            self.cfg.theme = found.theme;
+            // The static spelling, not `spec`: the config text is freed and
+            // the name outlives it.
+            self.cfg.theme_name = found.name;
             return;
         }
         const style = theme.parseStyle(spec) catch |err| {

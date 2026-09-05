@@ -113,7 +113,7 @@ pub const PromptView = struct {
     /// of its own: while the prompt is open that rule is decoration, so the
     /// strip costs no screen. Narrowing them to the row is the renderer's job,
     /// because only it knows how wide the row is.
-    completions: []const keymap.Command = &.{},
+    completions: []const []const u8 = &.{},
     /// Which of `completions` is in the line, as an index into it.
     completion_at: ?usize = null,
 };
