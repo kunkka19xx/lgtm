@@ -19,6 +19,17 @@ you reply.
 select, `zz` to centre - the motions already in your fingers, now pointed at the
 agent's work.
 
+- _A pane with your agent and tmux panes inside a window_
+
+<img width="1400" height="900" alt="a-pane-with-agent" src="https://github.com/user-attachments/assets/416d924f-daf6-43cb-b906-68eb67f22e6e" />
+
+---
+
+- _Side-by-side diff view_
+
+<img width="1400" height="900" alt="side-by-side" src="https://github.com/user-attachments/assets/2c585a09-129f-4377-bfca-ce25ceb2f704" />
+
+
 > **Status: pre-alpha**, and used daily by its author.
 >
 > It began a long time ago as a Go tool for reading diffs in a terminal. This is
