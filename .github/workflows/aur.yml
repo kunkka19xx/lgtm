@@ -93,11 +93,26 @@ jobs:
         run: |
           set -eu
           test -n "$KEY" || { echo "::error::AUR_SSH_KEY is not set"; exit 1; }
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n' > ~/.ssh/config
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$KEY" > "$HOME/.ssh/aur"
+          chmod 600 "$HOME/.ssh/aur"
+
+          # Proved, not assumed. This step used to redirect the keyscan's
+          # errors away and check nothing, so an empty known_hosts passed here
+          # and surfaced two steps later as "Host key verification failed" on
+          # the clone - which names the wrong thing entirely. Fail where the
+          # cause is, and say how many keys arrived.
+          ssh-keyscan aur.archlinux.org > "$HOME/.ssh/known_hosts" 2>/dev/null || true
+          test -s "$HOME/.ssh/known_hosts" ||
+            { echo "::error::ssh-keyscan aur.archlinux.org returned nothing"; exit 1; }
+          echo "known_hosts: $(wc -l < "$HOME/.ssh/known_hosts") key(s)"
+
+          # The AUR refuses interactive shells, so a working key answers
+          # "Interactive shell is disabled" and a bad one answers "Permission
+          # denied". Either way the next step's failure is already explained.
+          ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME/.ssh/aur" \
+            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
+            aur@aur.archlinux.org 2>&1 | head -2 || true
 
       - name: push to the AUR
         env:
@@ -106,6 +121,10 @@ jobs:
           set -eu
           git config --global user.name "kunkka19xx"
           git config --global user.email "nobita079x@gmail.com"
+          # Absolute paths rather than an ~/.ssh/config: one mechanism instead
+          # of two, and if $HOME ever differs between steps this says "no such
+          # identity file" instead of blaming the host key.
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/aur -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           for p in lgtm-bin lgtm-git; do
             rm -rf "/tmp/$p"
             git clone "ssh://aur@aur.archlinux.org/$p.git" "/tmp/$p"
