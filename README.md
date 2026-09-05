@@ -72,9 +72,22 @@ nix profile add --refresh github:kunkka19xx/lgtm  # keep it on PATH
 ```
 
 `--refresh` is not optional: Nix caches what a `github:` ref points at for an
-hour, and without it you can get handed a build you already have. Those same
-two lines are also how you upgrade later - run `nix profile remove lgtm` first,
-since `add` will not install over itself.
+hour, and without it you can get handed a build you already have.
+
+Upgrading is a *different* command, and this is the one that catches people:
+
+```sh
+nix profile upgrade --refresh lgtm
+```
+
+`add` does not upgrade. A profile entry is locked to the commit it was
+installed from, so running the install line again will not move it - `add`
+refuses to install over itself, and `--refresh` only re-checks where the
+`github:` ref points, not where your entry is pinned. `upgrade` re-resolves
+the URL the entry was added with and re-locks it to whatever `main` is now.
+`nix profile list` prints the locked commit and store path, which is the
+quickest way to see that a stale entry, not the release, is why `lgtm -v`
+still says the old number.
 
 **Arch**, from the AUR: `lgtm-bin` (the release binary) or `lgtm-git` (builds
 `main`), with any helper or `makepkg -si` from a clone.
