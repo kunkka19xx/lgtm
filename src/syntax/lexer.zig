@@ -449,9 +449,16 @@ const Scan = struct {
             } else if (self.expect_fn and kind == .text) {
                 kind = .fn_name;
                 self.expect_fn = false;
-                try self.openFn(word);
+                try self.openFn(word, !self.expect_fn_body);
             } else {
                 self.expect_fn = false;
+                if (self.def.fn_decl_paren and kind == .text and self.appliedToArgs()) {
+                    // A call and a declaration are the same shape to a reader,
+                    // and every highlighter paints them alike. Only the ones
+                    // that pass the whole test open a span.
+                    kind = .fn_name;
+                    if (self.argsPrecedeBlock()) try self.openFn(word, true);
+                }
             }
 
             // A tag name is an ordinary identifier the markup put after `<`,
@@ -664,9 +671,66 @@ const Scan = struct {
         }
     }
 
+    /// `fn_decl_paren`: is the identifier that just ended applied to an
+    /// argument list? True for a call as much as for a declaration - it is
+    /// what decides the colour, and `argsPrecedeBlock` decides the span.
+    fn appliedToArgs(self: *Scan) bool {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        return j < self.end and self.text[j] == '(';
+    }
+
+    /// `fn_decl_paren`: does that argument list close on this line with a block
+    /// behind it? This is the whole of the declaration test, and it is a
+    /// lookahead rather than the brace-on-the-same-line rule `fn_decl_body`
+    /// uses, because in this position that rule is not accurate enough:
+    /// `if (isReady(x)) {` puts a call and a block on one line and would name
+    /// the block after the call.
+    ///
+    /// Between the `)` and the `{` only a `throws` clause may stand, so the
+    /// tail admits words and the punctuation a type list is written with.
+    /// Anything else - the `;` of a statement, the second `)` of the `if`, the
+    /// `(` of the real declaration on `@Test(60) void f() {` - is a rejection.
+    /// A `->` inside the parentheses never closes them on the line it opens
+    /// them, which is what keeps `assertThrows(E.class, () -> {` a call.
+    ///
+    /// Bounded to this line, so a signature broken across lines and a brace on
+    /// its own line - `void f()\n{` - name nothing. Both are the failure this
+    /// is built to make: no span rather than a wrong one, with the enclosing
+    /// class still naming the line.
+    fn argsPrecedeBlock(self: *Scan) bool {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        if (j >= self.end or self.text[j] != '(') return false;
+
+        var open: u32 = 0;
+        while (j < self.end) : (j += 1) {
+            const c = self.text[j];
+            if (c == '\n') return false;
+            if (c == '(') open += 1;
+            if (c == ')') {
+                open -= 1;
+                if (open == 0) {
+                    j += 1;
+                    break;
+                }
+            }
+        } else return false;
+
+        while (j < self.end) : (j += 1) {
+            const c = self.text[j];
+            if (c == '{') return true;
+            const tail = c == ' ' or c == '\t' or c == ',' or c == '.' or
+                c == '<' or c == '>' or c == '&' or
+                std.ascii.isAlphanumeric(c) or c == '_' or c >= 0x80;
+            if (!tail) return false;
+        }
+        return false;
+    }
+
     // -- function spans ----------------------------------------------------
 
-    fn openFn(self: *Scan, name: []const u8) Allocator.Error!void {
+    fn openFn(self: *Scan, name: []const u8, confirmed: bool) Allocator.Error!void {
         const fns = self.fns orelse return;
         const stack = self.stack.?;
 
@@ -684,7 +748,7 @@ const Scan = struct {
             .end_line = self.line,
             .depth = self.st.depth,
             .indent = self.indent,
-            .confirmed = !self.expect_fn_body,
+            .confirmed = confirmed,
         });
         try stack.append(self.gpa, @intCast(fns.items.len - 1));
     }
@@ -741,6 +805,7 @@ const rust_lang = @import("lang/rust.zig");
 const go_lang = @import("lang/go.zig");
 const python_lang = @import("lang/python.zig");
 const swift_lang = @import("lang/swift.zig");
+const java_lang = @import("lang/java.zig");
 const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
@@ -944,6 +1009,57 @@ test "a swift multiline string spans lines and holds bare quotes" {
     try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
     // The literal ended, so the next line lexes normally.
     try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
+}
+
+test "runs tile the span and classify java source" {
+    const src =
+        \\/** A doc comment. */
+        \\package app;
+        \\
+        \\public final class Tile {
+        \\    private final String name = "hello";
+        \\
+        \\    @Override
+        \\    public boolean isPressable(int actionID) {
+        \\        return actionID > 0;
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/** A doc").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "class").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "String").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "boolean").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"hello\"").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "Tile").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "isPressable").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "0;").?);
+}
+
+test "a java text block spans lines and holds bare quotes" {
+    const src =
+        \\String q = """
+        \\    a "quoted" thing
+        \\    """;
+        \\int n = 1;
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"quoted\"").?);
+    // The block closed, so the line after it lexes normally.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "int n").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "1;").?);
 }
 
 test "css hyphenated properties survive as one word" {
@@ -1255,6 +1371,100 @@ test "a javascript local binding does not steal its function's name" {
     try testing.expectEqualStrings("handleSubmit", st.enclosingFn(4).?.name);
     try testing.expectEqualStrings("App", st.enclosingFn(6).?.name);
     for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "email"));
+}
+
+test "java names methods that no keyword introduces" {
+    const src =
+        \\package app;
+        \\
+        \\public class Tile {
+        \\    private int count = 0;
+        \\
+        \\    public Tile(int count) {
+        \\        this.count = count;
+        \\    }
+        \\
+        \\    public static void main(String[] args) {
+        \\        System.out.println(count);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expect(st.enclosingFn(0) == null);
+    // Between the members, the class is still better than nothing.
+    try testing.expectEqualStrings("Tile", st.enclosingFn(3).?.name);
+    // A constructor is a declaration by the same shape as a method.
+    try testing.expectEqualStrings("Tile", st.enclosingFn(6).?.name);
+    try testing.expectEqualStrings("main", st.enclosingFn(9).?.name);
+    try testing.expectEqualStrings("main", st.enclosingFn(10).?.name);
+    // `println` is a call through a receiver and opened no span of its own.
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "println"));
+}
+
+test "a java call does not steal its method's name" {
+    const src =
+        \\class Repo {
+        \\    void save(Row row) {
+        \\        validate(row);
+        \\        rows.forEach(r -> {
+        \\            store.put(r);
+        \\        });
+        \\        assertThrows(IOException.class, () -> {
+        \\            flush();
+        \\        });
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // `validate(row);` opened no block on its line, so it was dropped.
+    try testing.expectEqualStrings("save", st.enclosingFn(2).?.name);
+    // Both lambdas open a block on the call's line. The receiver guard covers
+    // `rows.forEach`, the `->` guard covers the unqualified `assertThrows`.
+    try testing.expectEqualStrings("save", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("save", st.enclosingFn(7).?.name);
+    for (st.fns) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "validate"));
+        try testing.expect(!std.mem.eql(u8, f.name, "forEach"));
+        try testing.expect(!std.mem.eql(u8, f.name, "assertThrows"));
+    }
+}
+
+test "a java control-flow block is not a method" {
+    const src =
+        \\class Loop {
+        \\    void run(int n) {
+        \\        for (int i = 0; i < n; i++) {
+        \\            if (i > 2) {
+        \\                break;
+        \\            }
+        \\        }
+        \\        while (n-- > 0) {
+        \\            n = n;
+        \\        }
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // Every one of these opens a block, and none of them is a declaration:
+    // `for`, `if` and `while` are keywords, so no candidate is ever raised.
+    try testing.expectEqualStrings("run", st.enclosingFn(4).?.name);
+    try testing.expectEqualStrings("run", st.enclosingFn(8).?.name);
+    try testing.expectEqual(@as(usize, 2), st.fns.len);
 }
 
 test "a truncated function still names its lines" {

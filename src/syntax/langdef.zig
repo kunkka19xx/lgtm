@@ -76,6 +76,25 @@ pub const LangDef = struct {
     /// Go's `func (r *T) Name()`: allow a parenthesised receiver between the
     /// keyword and the name.
     fn_receiver: bool = false,
+    /// Java: a method has no keyword introducing it. `public void run()` is a
+    /// modifier, a type and a name, and none of the three is reliably a word
+    /// this file could list - the return type is usually the project's own
+    /// class. So the shape is what names it: an identifier applied to an
+    /// argument list is a candidate declaration, confirmed only when a block
+    /// opens on the same line, exactly as `fn_decl_body` confirms JavaScript's
+    /// bindings.
+    ///
+    /// Two guards keep a call from being read as a declaration. A qualified
+    /// name - `list.add(x)` - opens no span, because a method is never
+    /// declared through a receiver. And a `->` before the block means the
+    /// block is a lambda body handed to a call, not a method body, which is
+    /// what stops `assertThrows(E.class, () -> {` from holding the header for
+    /// every line of its own test.
+    ///
+    /// The name is still coloured `.fn_name` in both cases: a call and a
+    /// declaration look the same to a reader, and every other highlighter
+    /// paints them alike.
+    fn_decl_paren: bool = false,
     blocks: Blocks = .braces,
     /// Identifier start bytes beyond letters and '_': Zig's `@import`.
     ident_extra: []const u8 = "",
