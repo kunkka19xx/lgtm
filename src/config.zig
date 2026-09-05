@@ -1245,6 +1245,32 @@ test "snapshot.keep has a floor, because a net that small is not one" {
     try testing.expectEqual(@as(usize, 1), tiny.problems.items.len);
 }
 
+test "ui.tab_width takes a stop and refuses one no pane could hold" {
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expectEqual(wrap.default_tab, d.cfg.ui.tab_width);
+
+    var f = loadText(
+        \\[ui]
+        \\tab_width = 8
+    );
+    defer f.deinit();
+    try testing.expectEqual(@as(u16, 8), f.cfg.ui.tab_width);
+    try testing.expectEqual(@as(usize, 0), f.problems.items.len);
+
+    // Out of range costs that key its value and nothing else: a tab of zero
+    // would draw nothing, and one of ninety-nine is an indent, not a stop.
+    var bad = loadText(
+        \\[ui]
+        \\tab_width = 0
+        \\wrap = false
+    );
+    defer bad.deinit();
+    try testing.expectEqual(wrap.default_tab, bad.cfg.ui.tab_width);
+    try testing.expectEqual(false, bad.cfg.ui.wrap);
+    try testing.expectEqual(@as(usize, 1), bad.problems.items.len);
+}
+
 test "diff.layout takes flow, split, and the format's own name for flow" {
     var d = loadText("");
     defer d.deinit();

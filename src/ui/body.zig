@@ -885,3 +885,38 @@ test "a match straddling two segments is painted whole" {
     try testing.expectEqualStrings(line, joined.items);
     try testing.expectEqualStrings("token", lit.items);
 }
+
+test "tabs are drawn as the columns the wrap measured them at" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const m: wrap.Metrics = .{ .method = .unicode, .tab = 4 };
+    const line = "\t\tif x {";
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = line[0..2], .style = .{} });
+    try segs.append(arena, .{ .text = line[2..], .style = .{ .bold = true } });
+
+    const out = try expandTabs(arena, segs.items, 0, m);
+    var text: std.ArrayList(u8) = .empty;
+    for (out) |s| try text.appendSlice(arena, s.text);
+    try testing.expectEqualStrings("        if x {", text.items);
+
+    // The columns are the ones `wrap` counted, or the cursor and the text
+    // would sit in different places on the same row.
+    try testing.expectEqual(wrap.columns(line, m), wrap.columns(text.items, m));
+
+    // Each tab keeps the style of the segment it came from, so a selection or
+    // a match still covers the indentation it was drawn over.
+    try testing.expect(!out[0].style.bold);
+    try testing.expect(out[out.len - 1].style.bold);
+
+    // A run starting mid-row reaches the next stop, not a fixed width: a
+    // continuation row is drawn at its own column and has to agree with it.
+    const one = try expandTabs(arena, &.{.{ .text = "\tx", .style = .{} }}, 1, m);
+    try testing.expectEqualStrings("   ", one[0].text);
+
+    // A line with no tab in it is handed back untouched rather than rebuilt.
+    const plain = try expandTabs(arena, segs.items[1..], 0, m);
+    try testing.expectEqual(segs.items[1].text.ptr, plain[0].text.ptr);
+}
