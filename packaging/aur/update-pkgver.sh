@@ -22,21 +22,43 @@ version="${version#v}"
 sums="$(mktemp)"
 trap 'rm -f "$sums"' EXIT
 
+url="https://github.com/$repo/releases/download/v$version/SHA256SUMS"
+
 # curl first, `gh` only as the fallback: the asset is public, so a plain HTTPS
 # fetch needs no token and works in a container that has no `gh` at all. That
 # is what lets CI run this script rather than reimplementing it.
-url="https://github.com/$repo/releases/download/v$version/SHA256SUMS"
-if ! curl -fsSL "$url" -o "$sums"; then
-  command -v gh >/dev/null 2>&1 ||
-    { echo "cannot fetch $url, and no gh to fall back on" >&2; exit 1; }
-  gh release download "v$version" --repo "$repo" --pattern SHA256SUMS --output "$sums" --clobber
-fi
+#
+# Success is the file existing *and* having tarballs in it. A release whose
+# assets never uploaded answers with an empty or HTML body rather than a 404,
+# and every checksum below would then be missing one at a time.
+fetch() {
+  curl -fsSL "$url" -o "$sums" 2>/dev/null ||
+    { command -v gh >/dev/null 2>&1 &&
+      gh release download "v$version" --repo "$repo" --pattern SHA256SUMS \
+        --output "$sums" --clobber >/dev/null 2>&1; } ||
+    return 1
+  grep -q 'lgtm-.*\.tar\.gz$' "$sums"
+}
 
-# A release whose assets never uploaded returns an empty or HTML body rather
-# than failing, and every checksum below would then be missing one at a time.
-# Say so once, here, in the words that name the actual problem.
-grep -q 'lgtm-.*\.tar\.gz$' "$sums" ||
-  { echo "SHA256SUMS at $url has no lgtm tarballs in it - did the release publish its assets?" >&2; exit 1; }
+# Waiting, not failing. Publishing a release fires the event that runs this
+# minutes before the assets exist: pressing Publish creates the tag, and the
+# workflow that cross-compiles the four targets and uploads them starts at that
+# moment and takes a few minutes to finish. One fetch raced that and lost,
+# which is how the AUR sat on 0.1.0 while every other channel had 0.1.1.
+#
+# A budget rather than forever, so a release that genuinely never uploaded
+# still fails and says why. Zero waits not at all, which is what a person
+# running this by hand after the fact wants.
+wait_secs="${SHA256SUMS_WAIT_SECS:-300}"
+until fetch; do
+  if (( SECONDS >= wait_secs )); then
+    echo "no usable SHA256SUMS at $url after ${wait_secs}s" >&2
+    echo "  the release exists but its assets do not - did the release workflow finish?" >&2
+    exit 1
+  fi
+  echo "waiting for the release assets: ${SECONDS}s of ${wait_secs}s"
+  sleep 15
+done
 
 sha_for() {
   local line

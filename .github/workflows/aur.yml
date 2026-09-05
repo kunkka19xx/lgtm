@@ -81,7 +81,11 @@ jobs:
             su build -c "cd packaging/aur/$p && makepkg --printsrcinfo > .SRCINFO"
           done
           chown -R root packaging/aur
-          grep -H '^\tpkgver' packaging/aur/*/.SRCINFO
+          # A character class, not `\t`: GNU grep reads a basic-regex `\t` as a
+          # literal `t`, warns "stray \ before t", matches nothing and exits 1,
+          # which failed this step on the first run that ever reached it. BSD
+          # grep does understand it, so the bug was invisible on macOS.
+          grep -HE '^[[:space:]]+pkgver' packaging/aur/*/.SRCINFO
 
       - name: ssh
         env:
