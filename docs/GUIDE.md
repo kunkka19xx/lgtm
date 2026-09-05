@@ -65,10 +65,15 @@ Needs [Zig](https://ziglang.org), the version pinned in `.zigversion`:
 ```sh
 make local          # build and install to ~/.local/bin
 make clean-local    # remove it, restoring whatever it displaced
+make dev            # install as lgtm-dev, beside a packaged lgtm
+make clean-dev      # remove that one
 ```
 
 `make local` will not install over a symlink and will not delete a binary it did
-not write, so a copy from a package manager is safe from it.
+not write, so a copy from a package manager is safe from it. `make dev` goes
+further and gives the build its own name, which is what you want while working
+on lgtm with a released one installed: neither can shadow the other, and no
+shell can hand you the wrong one.
 
 ### What else you need
 
@@ -273,6 +278,10 @@ them.
 An unchanged file opens whole, outside the review — still readable, still
 commentable. A file too large to render inline opens with `zo` and folds again
 with `zc`.
+
+A file that is not text - an image, a binary, an archive - never renders its
+bytes. It gets one row saying what it is, how big it is, and for an image how
+large: `PNG image | 1200x630 | 8.5 KB`.
 
 ---
 

@@ -24,6 +24,7 @@ pub const timeline = @import("snapshot/timeline.zig");
 pub const comments = @import("core/comments.zig");
 pub const review = @import("core/review.zig");
 pub const event = @import("core/event.zig");
+pub const binary = @import("core/binary.zig");
 pub const diff = @import("core/diff.zig");
 pub const git = @import("core/git.zig");
 pub const hunk = @import("core/hunk.zig");
@@ -48,6 +49,7 @@ test {
     _ = comments;
     _ = review;
     _ = event;
+    _ = binary;
     _ = diff;
     _ = git;
     _ = hunk;

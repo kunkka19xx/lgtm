@@ -18,6 +18,15 @@ pub fn readFile(io: Io, gpa: Allocator, path: []const u8, max_bytes: usize) Read
     return Dir.cwd().readFileAlloc(io, path, gpa, .limited(max_bytes));
 }
 
+/// The first `buf.len` bytes, for callers that only need a header: sniffing a
+/// binary file's kind must not pull a 40 MB video into memory to do it.
+pub fn readHead(io: Io, path: []const u8, buf: []u8) ?[]u8 {
+    const file = Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    const n = file.readPositionalAll(io, buf, 0) catch return null;
+    return buf[0..n];
+}
+
 pub const WriteError = Dir.WriteFileError || Dir.CreateDirPathError;
 
 /// Whole-file write, creating the parent directories it needs.

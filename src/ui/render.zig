@@ -197,7 +197,13 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
     const removed = try std.fmt.allocPrint(f.arena, "{s}{d}", .{ g.del, v.file.removed });
 
     const counter_w = f.win.gwidth(counter);
-    const counts_w = f.win.gwidth(bar) + f.win.gwidth(added) + 1 + f.win.gwidth(removed);
+    // A binary file has no lines to have changed, and `+0 -0` on one reads as
+    // "nothing happened" when what happened is the whole file.
+    const has_counts = !v.preview and v.file.status != .binary;
+    const counts_w = if (has_counts)
+        f.win.gwidth(bar) + f.win.gwidth(added) + 1 + f.win.gwidth(removed)
+    else
+        0;
 
     // The same two signals the `F` list carries, for the same reason: the row
     // has to answer "which file" and "what happened to it" without being read
@@ -227,7 +233,7 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
         f.put(row, col, counter, t.dim);
         col += counter_w;
     }
-    if (fit.counts and !v.preview) {
+    if (fit.counts and has_counts) {
         f.put(row, col, bar, t.dim);
         col += f.win.gwidth(bar);
         f.put(row, col, added, t.added_count);

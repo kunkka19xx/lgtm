@@ -13,21 +13,28 @@
 
 PREFIX ?= $(HOME)/.local
 BINDIR := $(PREFIX)/bin
-DEST := $(BINDIR)/lgtm
+# The installed name. `make dev` sets it to lgtm-dev so a working tree can sit
+# beside a released lgtm without either one shadowing the other - which is the
+# only way to be sure which of the two a shell just ran.
+NAME ?= lgtm
+DEST := $(BINDIR)/$(NAME)
 
 # What this Makefile installed, so `clean-local` can tell its own build from a
-# release that arrived some other way. Gitignored; safe to delete by hand.
+# release that arrived some other way. Per name, so the two installs keep
+# separate books. Gitignored; safe to delete by hand.
 STATE := .make
-STAMP := $(STATE)/install-path
-SUM := $(STATE)/install-cksum
-BACKUP := $(STATE)/backup/lgtm
+STAMP := $(STATE)/$(NAME).path
+SUM := $(STATE)/$(NAME).cksum
+BACKUP := $(STATE)/backup/$(NAME)
 
 .DEFAULT_GOAL := help
-.PHONY: help local clean-local uninstall test check run clean path path-check
+.PHONY: help local dev clean-local clean-dev forget uninstall test check run clean path path-check
 
 help:
 	@echo "make local        build the release binary and install it to $(BINDIR)"
+	@echo "make dev          the same, installed as lgtm-dev beside a released lgtm"
 	@echo "make clean-local  remove it, restoring whatever it displaced"
+	@echo "make clean-dev    the same, for the lgtm-dev install"
 	@echo "make test         unit tests"
 	@echo "make check        tests + SPDX headers"
 	@echo "make run          run from source, without installing"
@@ -63,6 +70,15 @@ local:
 	@echo "installed $(DEST) ($$(du -h "$(DEST)" | cut -f1))"
 	@$(MAKE) --no-print-directory path-check
 
+# A working tree installed under its own name. Nothing to shadow and nothing to
+# be shadowed by: `lgtm` stays whatever your package manager put there, and a
+# shell that has never heard of `lgtm-dev` cannot have cached the wrong one.
+dev:
+	@$(MAKE) --no-print-directory local NAME=lgtm-dev
+
+clean-dev:
+	@$(MAKE) --no-print-directory clean-local NAME=lgtm-dev
+
 # PATH belongs to the shell that ran make, and no child process can change its
 # parent's environment - so nothing here, on any OS, can make the shell you are
 # standing in find a binary it did not already know about. On macOS this never
@@ -93,9 +109,21 @@ path:
 path-check:
 	@line=$$($(MAKE) --no-print-directory -s path); \
 	if [ -z "$$line" ]; then \
-		found=$$(command -v lgtm 2>/dev/null); \
+		found=$$(command -v $(NAME) 2>/dev/null); \
 		if [ -n "$$found" ] && [ "$$found" != "$(DEST)" ]; then \
-			echo "note: 'lgtm' on PATH is $$found, which comes before $(DEST)"; \
+			echo "note: '$(NAME)' on PATH is $$found, which comes before $(DEST)"; \
+			echo "  install under a name of its own instead:  make dev"; \
+			exit 0; \
+		fi; \
+		others=$$(IFS=:; for d in $$PATH; do \
+			[ -n "$$d" ] && [ -x "$$d/$(NAME)" ] && [ "$$d/$(NAME)" != "$(DEST)" ] && echo "$$d/$(NAME)"; \
+		done); \
+		if [ -n "$$others" ]; then \
+			echo "note: another $(NAME) is on PATH, after this one:"; \
+			printf '  %s\n' $$others; \
+			echo "  a shell opened before now has the old path cached and keeps using it."; \
+			echo "  type 'rehash' in each (zsh) or 'hash -r' (bash); new shells are fine."; \
+			echo "  to stop sharing the name altogether:  make dev"; \
 		fi; \
 		exit 0; \
 	fi; \
@@ -110,7 +138,7 @@ path-check:
 		case "$$(readlink -f "$$rc" 2>/dev/null)" in /nix/store/*) nix=1 ;; esac; \
 	fi; \
 	echo; \
-	echo "$(BINDIR) is not on your PATH, so 'lgtm' will not be found."; \
+	echo "$(BINDIR) is not on your PATH, so '$(NAME)' will not be found."; \
 	echo "make cannot change the PATH of the shell that ran it. Closest thing:"; \
 	echo; \
 	echo "  this shell:  eval \"\$$(make -s path)\""; \
@@ -136,7 +164,7 @@ path-check:
 # thing this file could do.
 clean-local:
 	@if [ ! -f "$(STAMP)" ]; then \
-		echo "nothing installed by 'make local'"; \
+		echo "nothing installed by 'make local' under the name $(NAME)"; \
 		exit 0; \
 	fi; \
 	dest=$$(cat "$(STAMP)"); \
@@ -145,7 +173,7 @@ clean-local:
 	elif [ -f "$(SUM)" ] && ! cksum < "$$dest" | cmp -s - "$(SUM)"; then \
 		echo "leaving $$dest alone: it is not the binary 'make local' wrote"; \
 		echo "  (a release or package manager has installed over it since)"; \
-		rm -rf "$(STATE)"; \
+		$(MAKE) --no-print-directory forget; \
 		exit 0; \
 	else \
 		rm -f "$$dest"; \
@@ -154,9 +182,16 @@ clean-local:
 	if [ -e "$(BACKUP)" ]; then \
 		mkdir -p "$$(dirname "$$dest")"; \
 		cp -p "$(BACKUP)" "$$dest"; \
-		echo "restored the lgtm that was there before"; \
+		echo "restored the $(NAME) that was there before"; \
 	fi; \
-	rm -rf "$(STATE)"
+	$(MAKE) --no-print-directory forget
+
+# This name's books only. Two installs can be live at once - a released `lgtm`
+# and a working-tree `lgtm-dev` - and clearing one must not lose track of the
+# other, which a blanket `rm -rf .make` did.
+forget:
+	@rm -f "$(STAMP)" "$(SUM)" "$(BACKUP)"
+	@rmdir "$(STATE)/backup" "$(STATE)" 2>/dev/null || true
 
 # The spelling the GNU conventions lead people to type.
 uninstall: clean-local

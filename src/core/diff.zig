@@ -7,6 +7,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const hunk = @import("hunk.zig");
+pub const binary = @import("binary.zig");
 
 const Hunk = hunk.Hunk;
 const DiffLines = hunk.DiffLines;
@@ -39,6 +40,10 @@ pub const FileDiff = struct {
     /// the render is deferred, the code is never discarded.
     raw_lo: usize = 0,
     raw_hi: usize = 0,
+    /// Kind, size and - for an image - dimensions, filled in for a `.binary`
+    /// file only. There is no diff to show for one, so this is what the body
+    /// draws instead.
+    bin: ?binary.Info = null,
 
     pub fn path(self: FileDiff) []const u8 {
         return if (self.status == .deleted) self.old_path else self.new_path;

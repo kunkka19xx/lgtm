@@ -80,6 +80,8 @@ nix profile add github:kunkka19xx/lgtm  # keep it on PATH
 ```sh
 make local          # build and install to ~/.local/bin
 make clean-local    # remove it, restoring whatever it displaced
+make dev            # install as lgtm-dev, beside a packaged lgtm
+make clean-dev      # remove that one
 ```
 
 You also need `git`. `tmux` is optional: without it, references go to the

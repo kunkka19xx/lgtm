@@ -24,6 +24,7 @@ const git = @import("../core/git.zig");
 const comments_mod = @import("../core/comments.zig");
 const review_file = @import("../core/review.zig");
 const hunk = @import("../core/hunk.zig");
+const binary = @import("../core/binary.zig");
 const metrics = @import("../io/metrics.zig");
 
 const template = @import("../bridge/template.zig");
@@ -395,6 +396,28 @@ pub const App = struct {
     fn openPreview(self: *App, path: []const u8) !void {
         _ = self.preview_arena.reset(.retain_capacity);
         const arena = self.preview_arena.allocator();
+
+        // Sniffed before it is read: a video opened by mistake should cost one
+        // header read and a row saying what it is, not eight megabytes and a
+        // screen of noise.
+        var head_buf: [binary.sniff_bytes]u8 = undefined;
+        if (fs_mod.readHead(self.io, path, &head_buf)) |head| {
+            if (binary.isBinary(head)) {
+                const size = if (fs_mod.statFile(self.io, path)) |m| m.size else head.len;
+                const bp = try arena.dupe(u8, path);
+                self.preview = .{
+                    .old_path = bp,
+                    .new_path = bp,
+                    .status = .binary,
+                    .bin = binary.describe(bp, head, size),
+                };
+                try self.rebuildRows(.reset);
+                self.vp.cursor = 0;
+                self.vp.scroll = 0;
+                self.notice.set("{s} - not text", .{path});
+                return;
+            }
+        }
 
         const bytes = fs_mod.readFile(self.io, arena, path, 8 << 20) catch {
             // No notice here: every caller knows more about why it wanted the

@@ -16,6 +16,7 @@ const lexer = @import("../syntax/lexer.zig");
 const keytext = @import("keytext.zig");
 const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
+const binary = @import("../core/binary.zig");
 const wrap = @import("wrap.zig");
 
 const frame_mod = @import("frame.zig");
@@ -151,10 +152,33 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
             );
             break :blk;
         },
+        .binary => try drawBinary(f, v, at),
         .hunk_header => |hi| try drawHunkHeader(f, v, at, hi),
         .line, .pair, .note => unreachable,
     }
     return 1;
+}
+
+/// What a file that is not text gets instead of its bytes: kind, dimensions
+/// when it is an image, and size.
+///
+/// Deliberately not the bytes, and deliberately not nothing. The reviewer's
+/// question about a new PNG is "what is it and how big", and both answers fit
+/// in one row at 80 columns.
+fn drawBinary(f: Frame, v: View, at: u16) Allocator.Error!void {
+    // Absent for a file whose bytes were never on hand - one from a snapshot
+    // turn - and the name still answers most of the question.
+    const info = v.file.bin orelse binary.Info{ .kind = binary.kindFromExt(v.file.path()) };
+    const sep = f.glyphs.sep;
+    var size_buf: [16]u8 = undefined;
+    const size = binary.humanSize(&size_buf, info.size);
+
+    var col = try f.print(at, 2, f.theme.dim, "{s}", .{info.kind});
+    if (info.hasDimensions()) {
+        col += try f.print(at, 2 + col, f.theme.dim, " {s} {d}x{d}", .{ sep, info.width, info.height });
+    }
+    if (info.size > 0) col += try f.print(at, 2 + col, f.theme.dim, " {s} {s}", .{ sep, size });
+    if (info.gone) _ = try f.print(at, 2 + col, f.theme.dim, " {s} removed", .{sep});
 }
 
 /// A note under the line it belongs to, indented past the gutter and wrapped

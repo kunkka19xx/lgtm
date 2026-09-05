@@ -11,6 +11,7 @@ const Allocator = std.mem.Allocator;
 const proc = @import("../io/proc.zig");
 const fsmod = @import("../io/fs.zig");
 pub const diff = @import("diff.zig");
+const binary = @import("binary.zig");
 
 /// Enough for a very large diff; beyond this the output is truncated rather
 /// than allowed to exhaust memory.
@@ -185,6 +186,11 @@ fn diffBase(
     // already everything git knew about at that moment.
     if (target != null) return .{ .diff = parsed, .raw = out.stdout, .stderr = out.stderr };
 
+    // Git says only that a tracked binary file differs. What kind, how big and
+    // - for an image - how large it now is are on disk, and that is the whole
+    // of what the body has to draw for it.
+    describeBinaries(io, repo, parsed.files);
+
     // `git diff HEAD` does not see untracked files, and an agent creating a
     // new file is one of the most common things it does. Without this they
     // would be silently absent from the review.
@@ -201,6 +207,28 @@ fn diffBase(
     }
 
     return .{ .diff = parsed, .raw = out.stdout, .stderr = out.stderr, .extra = extra.owned };
+}
+
+/// Kind and size for every `.binary` file, read from the working tree.
+///
+/// A deleted binary file is skipped: there is nothing on disk to describe, and
+/// the header row already says it is gone.
+fn describeBinaries(io: std.Io, repo: ?[]const u8, files: []diff.FileDiff) void {
+    var buf: [binary.head_bytes]u8 = undefined;
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    for (files) |*f| {
+        if (f.status != .binary or f.bin != null) continue;
+        const rel = f.path();
+        const full = if (repo) |r| std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ r, rel }) catch continue else rel;
+        const head = fsmod.readHead(io, full, &buf) orelse {
+            // Deleted, not unreadable: git listed it because it is gone, and
+            // its name is the only thing left to say about it.
+            if (!fsmod.fileExists(io, full)) f.bin = .{ .kind = binary.kindFromExt(rel), .gone = true };
+            continue;
+        };
+        const size = if (fsmod.statFile(io, full)) |m| m.size else head.len;
+        f.bin = binary.describe(rel, head, size);
+    }
 }
 
 /// Owns the raw git output that every text slice in `diff` borrows from, which
@@ -283,10 +311,27 @@ fn untracked(
         const full = if (repo) |r| try std.fs.path.join(gpa, &.{ r, rel }) else try gpa.dupe(u8, rel);
         defer gpa.free(full);
 
-        const bytes = fsmod.readFile(io, gpa, full, max_diff_bytes) catch continue;
-        try owned.append(gpa, bytes);
         const path_copy = try gpa.dupe(u8, rel);
         try owned.append(gpa, path_copy);
+
+        // Sniff before reading. A new PNG rendered as lines is a screenful of
+        // noise with the rest of the review under it, and reading a 40 MB
+        // video whole to find that out would be worse than the noise.
+        var head_buf: [binary.sniff_bytes]u8 = undefined;
+        const head = fsmod.readHead(io, full, &head_buf) orelse continue;
+        if (binary.isBinary(head)) {
+            const size = if (fsmod.statFile(io, full)) |m| m.size else head.len;
+            try files.append(gpa, .{
+                .old_path = "/dev/null",
+                .new_path = path_copy,
+                .status = .binary,
+                .bin = binary.describe(path_copy, head, size),
+            });
+            continue;
+        }
+
+        const bytes = fsmod.readFile(io, gpa, full, max_diff_bytes) catch continue;
+        try owned.append(gpa, bytes);
 
         try files.append(gpa, try synthesiseAdd(gpa, path_copy, bytes));
     }

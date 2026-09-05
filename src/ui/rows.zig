@@ -51,6 +51,9 @@ pub const Row = union(enum) {
     /// materialises them (`Review.expand`), after which this row is gone and
     /// the file has hunks like any other.
     summarised,
+    /// The file is not text. One row saying what it is instead of a screen of
+    /// its bytes; `FileDiff.bin` holds what the row draws.
+    binary,
 };
 
 pub const Rows = struct {
@@ -292,6 +295,14 @@ pub fn buildWith(
         return b.finish();
     }
 
+    // Nothing to diff and nothing worth drawing line by line. Without this the
+    // file has no rows at all, and a header with a void under it does not say
+    // why.
+    if (f.status == .binary) {
+        try b.items.append(gpa, .binary);
+        return b.finish();
+    }
+
     // A file with no hunks but with lines is one being *read* rather than
     // reviewed - `<Space>F` on something the agent has not touched. There is
     // no hunk header to draw because there is no hunk: it is the whole file,
@@ -513,6 +524,22 @@ test "a summarised file is one row, not zero" {
     // Zero rows would render as an empty screen indistinguishable from a bug.
     try testing.expectEqual(@as(u32, 1), rows.len());
     try testing.expect(rows.items[0] == .summarised);
+    try testing.expect(rows.hunkAt(0) == null);
+}
+
+test "a binary file is one row, not a screen of its bytes" {
+    const gpa = testing.allocator;
+    var f: diff.FileDiff = .{
+        .old_path = "logo.png",
+        .new_path = "logo.png",
+        .status = .binary,
+        .bin = .{ .kind = "PNG image", .width = 1200, .height = 630, .size = 8705 },
+    };
+    var rows = try build(gpa, &f);
+    defer rows.deinit(gpa);
+
+    try testing.expectEqual(@as(u32, 1), rows.len());
+    try testing.expect(rows.items[0] == .binary);
     try testing.expect(rows.hunkAt(0) == null);
 }
 

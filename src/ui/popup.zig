@@ -652,7 +652,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // Counts right-aligned inside the box, so the paths stay readable as a
         // column even when one of them is very long.
         const counts_col = text_col + box.content - countsWidth(e);
-        if (e.in_review and counts_col > text_col + lead + f.win.gwidth(shown)) {
+        if (countsWidth(e) > 0 and counts_col > text_col + lead + f.win.gwidth(shown)) {
             var col = counts_col;
             col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
             _ = try f.print(row, col, frame_mod.withBg(f.theme.removed_count, bg), "{s}{d}", .{ f.glyphs.del, e.removed });
@@ -677,8 +677,11 @@ pub fn emptyWhy(query: []const u8) []const u8 {
     return if (query.len > 0) "no file matches" else "nothing to list";
 }
 
-/// Width of `+12 −4`, which the layout needs before anything is drawn.
+/// Width of `+12 −4`, which the layout needs before anything is drawn. Zero
+/// for a file with no counts to draw: one outside the review, and a binary one,
+/// which has no lines for a count to be about.
 fn countsWidth(e: frame_mod.FileEntry) u16 {
+    if (!e.in_review or e.status == .binary) return 0;
     return @intCast(2 + digits(e.added) + digits(e.removed) + 1);
 }
 
