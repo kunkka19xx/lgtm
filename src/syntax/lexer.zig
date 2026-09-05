@@ -682,6 +682,19 @@ const Scan = struct {
         return j < self.end and self.text[j] == '(';
     }
 
+    /// How far a declaration's argument list may wrap before the lookahead
+    /// gives up on it.
+    ///
+    /// Not the thing that decides a call from a declaration - the tail does
+    /// that, and every call shape traced against this rejects on its `;`
+    /// whether it wrapped or not. This bounds the cost, and bounds how far a
+    /// file being typed into can be misread from one unclosed parenthesis.
+    /// Six leaves room for a seven-parameter signature with an annotation on
+    /// each: the four-line ones in an ordinary Spring controller sit close
+    /// enough to a tighter bound that it would be the bound, rather than the
+    /// tail, deciding whether a method gets its name.
+    const decl_wrap_lines: u32 = 6;
+
     /// `fn_decl_paren`: was the identifier that just ended reached through a
     /// receiver? `list.add(x)` is a call whatever follows it, because a method
     /// is never declared through one - so the span is refused and only the
@@ -702,47 +715,55 @@ const Scan = struct {
         return false;
     }
 
-    /// `fn_decl_paren`: the byte after the literal that opens at `j`, or null
-    /// if none does.
+    /// A literal the lookahead stepped over: where it ends, and whether it
+    /// ended at its own close rather than at the end of the line.
+    const Literal = struct { past: usize, closed: bool };
+
+    /// `fn_decl_paren`: the literal that opens at `j`, or null if none does.
     ///
     /// The lookahead below reads raw bytes, and a `)` or a `{` inside a string
     /// is neither - `format("%s) {", x)` would otherwise close the argument
     /// list early, find a brace behind it, and name the rest of the enclosing
-    /// method after `format`. A literal left open at the end of the line
-    /// yields the newline, which ends the lookahead where an unclosed literal
-    /// should: no span rather than a wrong one.
+    /// method after `format`. An unclosed literal is reported rather than
+    /// skipped over, because the lookahead now crosses lines and everything
+    /// past an unterminated quote is a guess: it ends there instead, which is
+    /// no span rather than a wrong one.
     ///
     /// Read from `LangDef.strings` rather than from a `'"'` written here, and
     /// with the same first-match-wins order the scanner itself uses, so Java's
-    /// `"""` is tried before its `"`. Hashed literals - Swift's `#"` - are
+    /// `"""` is tried before its `"`. A multiline literal is not followed
+    /// across the break either - it is unreachable inside an argument list
+    /// that could be a declaration's. Hashed literals - Swift's `#"` - are
     /// declined: no language with `fn_decl_paren` has them, and guessing at
     /// one here would be a second implementation of `matchesClose`.
-    fn skipLiteral(self: Scan, j: usize) ?usize {
-        const line = self.text[0..self.end];
+    fn skipLiteral(self: Scan, j: usize) ?Literal {
+        const text = self.text[0..self.end];
         for (self.def.strings) |spec| {
             if (spec.hashed or spec.open.len == 0) continue;
-            if (!std.mem.startsWith(u8, line[j..], spec.open)) continue;
+            if (!std.mem.startsWith(u8, text[j..], spec.open)) continue;
 
             var k = j + spec.open.len;
             while (k < self.end) {
-                const c = line[k];
-                if (c == '\n') return k;
+                const c = text[k];
+                if (c == '\n') return .{ .past = k, .closed = false };
                 if (spec.escape) |e| if (c == e) {
                     k = @min(k + 2, self.end);
                     continue;
                 };
-                if (std.mem.startsWith(u8, line[k..], spec.close)) {
+                if (std.mem.startsWith(u8, text[k..], spec.close)) {
                     const past = k + spec.close.len;
                     // The byte limit that keeps an apostrophe from painting the
                     // rest of a line applies here too, or `it's` in a trailing
                     // comment would swallow the lookahead.
                     if (spec.max_bytes) |limit| if (past - j > limit) break;
-                    return past;
+                    return .{ .past = past, .closed = true };
                 }
                 k += 1;
             }
+            // A `max_bytes` literal that did not close is not one - the same
+            // rule the scanner applies, so `it's` stays prose.
             if (spec.max_bytes != null) continue;
-            return self.end;
+            return .{ .past = self.end, .closed = false };
         }
         return null;
     }
@@ -761,23 +782,41 @@ const Scan = struct {
     /// A `->` inside the parentheses never closes them on the line it opens
     /// them, which is what keeps `assertThrows(E.class, () -> {` a call.
     ///
-    /// Bounded to this line, so a signature broken across lines and a brace on
-    /// its own line - `void f()\n{` - name nothing. Both are the failure this
-    /// is built to make: no span rather than a wrong one, with the enclosing
-    /// class still naming the line.
+    /// The argument list may wrap, within `decl_wrap_lines`, because a Spring
+    /// or JPA signature with an annotation on each parameter does not fit on
+    /// one line and refusing those left a controller's methods unnamed. What
+    /// discriminates a wrapped signature from a wrapped call is unchanged and
+    /// is the tail: `changePassword(a,\n b) throws IOException {` reaches a
+    /// brace, `register(a,\n () -> {\n ...\n });` reaches the `;`.
+    ///
+    /// The tail itself is *not* allowed to wrap, and that asymmetry is load
+    /// bearing rather than an omission. `@RequestMapping("/users")` closes its
+    /// parentheses with a class declaration on the line below, and a tail that
+    /// crossed the break would read the brace ending that declaration as the
+    /// annotation's own body. So a brace on its own line - `void f()\n{` - and
+    /// a `throws` clause that wraps still name nothing, which is the failure
+    /// this is built to make: no span rather than a wrong one, with the
+    /// enclosing class still naming the line.
     fn argsPrecedeBlock(self: *Scan) bool {
         var j = self.i;
         while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
         if (j >= self.end or self.text[j] != '(') return false;
 
         var open: u32 = 0;
+        var wrapped: u32 = 0;
         while (j < self.end) {
-            if (self.skipLiteral(j)) |past| {
-                j = past;
+            if (self.skipLiteral(j)) |lit| {
+                // Everything past an unterminated quote is a guess, and the
+                // lookahead is about to cross a line on the strength of it.
+                if (!lit.closed) return false;
+                j = lit.past;
                 continue;
             }
             const c = self.text[j];
-            if (c == '\n') return false;
+            if (c == '\n') {
+                wrapped += 1;
+                if (wrapped > decl_wrap_lines) return false;
+            }
             j += 1;
             if (c == '(') open += 1;
             if (c == ')') {
@@ -1556,6 +1595,91 @@ test "a java string in the parameter list does not cost the method its span" {
     defer st.deinit(gpa);
 
     try testing.expectEqualStrings("handle", st.enclosingFn(2).?.name);
+}
+
+test "a java signature may wrap, and a wrapped call still may not" {
+    // A parameter per line is what an annotated Spring or JPA signature looks
+    // like, and the whole method used to go unnamed for it.
+    const src =
+        \\class Api {
+        \\    public Response changePassword(@RequestParam String current,
+        \\                                   @RequestParam String next) throws IOException {
+        \\        service.change(current, next);
+        \\    }
+        \\
+        \\    void wide() {
+        \\        register("click",
+        \\                 handler,
+        \\                 () -> {
+        \\                     fire();
+        \\                 });
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    // The continuation line and the body both belong to the method.
+    try testing.expectEqualStrings("changePassword", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("changePassword", st.enclosingFn(3).?.name);
+    // The call wraps too, and closes on a `;`. That tail is what separates the
+    // two, not the number of lines either of them takes.
+    try testing.expectEqualStrings("wide", st.enclosingFn(10).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "register"));
+}
+
+test "a java annotation does not take the declaration below it" {
+    // Why the tail may not wrap even though the argument list may: this
+    // annotation closes its parentheses with a class on the next line, and a
+    // tail that crossed the break would find that class's brace and read the
+    // whole type as the annotation's body.
+    const src =
+        \\@RequestMapping("/users")
+        \\public class UserController {
+        \\    void get() {
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("UserController", st.enclosingFn(1).?.name);
+    try testing.expectEqualStrings("get", st.enclosingFn(2).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "RequestMapping"));
+}
+
+test "a java signature wrapped past the bound names nothing" {
+    // The documented failure, kept as a test so the bound is a decision rather
+    // than an accident: the class still names the lines, which is the answer
+    // this degrades to everywhere else.
+    const src =
+        \\class Wide {
+        \\    void far(int a,
+        \\             int b,
+        \\             int c,
+        \\             int d,
+        \\             int e,
+        \\             int f,
+        \\             int g,
+        \\             int h) {
+        \\        use(a);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("Wide", st.enclosingFn(9).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "far"));
 }
 
 test "a java receiver never introduces a declaration" {
