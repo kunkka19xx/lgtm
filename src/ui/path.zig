@@ -32,7 +32,7 @@ pub fn elide(
     text: []const u8,
     max: u16,
     ell: []const u8,
-    method: wrap.Method,
+    method: wrap.Metrics,
 ) Allocator.Error![]const u8 {
     if (wrap.columns(text, method) <= max) return text;
 
@@ -64,7 +64,7 @@ pub fn elide(
 }
 
 const testing = std.testing;
-const test_method: wrap.Method = .unicode;
+const test_method: wrap.Metrics = .{ .method = .unicode };
 
 fn check(text: []const u8, max: u16) ![]const u8 {
     return elide(testing.allocator, text, max, "\u{2026}", test_method);

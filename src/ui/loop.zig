@@ -91,6 +91,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         .gutter => .gutter,
         .line => .line,
     };
+    app.vp.metrics.tab = opts.cfg.ui.tab_width;
     app.vp.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
     app.vp.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
     app.km.bindings = opts.cfg.keys;
@@ -450,7 +451,7 @@ fn openEditor(
 }
 
 fn frameOf(app: *App, win: vaxis.Window, arena: Allocator) render.Frame {
-    return .{ .win = win, .arena = arena, .theme = app.theme, .glyphs = app.glyphs };
+    return .{ .win = win, .arena = arena, .theme = app.theme, .glyphs = app.glyphs, .tab = app.vp.metrics.tab };
 }
 
 fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
@@ -461,7 +462,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
     const win = vx.window();
     // Only known once the terminal has answered the capability query, so it is
     // read per frame rather than captured at startup.
-    app.vp.width_method = vx.screen.width_method;
+    app.vp.metrics.method = vx.screen.width_method;
 
     if (app.view(body)) |v| {
         var shown = v;

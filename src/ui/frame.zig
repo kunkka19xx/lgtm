@@ -261,15 +261,18 @@ pub const Frame = struct {
     arena: Allocator,
     theme: Theme,
     glyphs: Glyphs,
+    /// `[ui] tab_width`, carried here because every measurement the frame
+    /// makes has to use the same stop the code is drawn at.
+    tab: u16 = wrap.default_tab,
 
     pub fn width(self: Frame) u16 {
         return self.win.width;
     }
 
-    /// How this screen counts a grapheme's columns. Handed to `ui/wrap.zig` so
-    /// the rows it measures are the rows vaxis draws.
-    pub fn method(self: Frame) wrap.Method {
-        return self.win.screen.width_method;
+    /// How wide text is on this screen. Handed to `ui/wrap.zig` so the rows it
+    /// measures are the rows vaxis draws.
+    pub fn method(self: Frame) wrap.Metrics {
+        return .{ .method = self.win.screen.width_method, .tab = self.tab };
     }
 
     /// A rule spanning `cols` columns, built from a possibly multi-byte glyph.

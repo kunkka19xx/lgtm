@@ -71,10 +71,11 @@ pub const Viewport = struct {
     /// state that decides where the cursor goes needs to know how wide the
     /// pane it is going onto is.
     cols: u16 = 80,
-    /// How the screen counts a grapheme's columns; see `ui/wrap.zig`. Set by
-    /// the loop from the terminal's answer, because vaxis only knows it after
-    /// the capability query comes back.
-    width_method: @import("wrap.zig").Method = .unicode,
+    /// How wide text is on this screen: the grapheme method and the tab stop;
+    /// see `ui/wrap.zig`. The method is set by the loop from the terminal's
+    /// answer, because vaxis only knows it after the capability query comes
+    /// back; the tab comes from the config at startup.
+    metrics: @import("wrap.zig").Metrics = .{ .method = .unicode },
     /// `Tab`: chrome hidden, the body gets the whole pane.
     zen: bool = false,
     /// The viewport catching up with where it has settled, in screen rows.

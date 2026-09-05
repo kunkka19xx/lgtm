@@ -211,19 +211,19 @@ pub fn writeBanner(
     // The picture is one width, not one per row, for the reason `draw` gives:
     // centring each row on its own would shear the thumb off the M.
     var art_w: u16 = 0;
-    for (art) |r| art_w = @max(art_w, wrap.columns(r, .unicode));
+    for (art) |r| art_w = @max(art_w, wrap.columns(r, .{ .method = .unicode }));
 
     var buf: [64]u8 = undefined;
     const sep = std.fmt.bufPrint(&buf, " {s} ", .{g.sep}) catch " | ";
-    const byline_w = wrap.columns(version_label, .unicode) +
-        wrap.columns(sep, .unicode) + wrap.columns(author, .unicode);
+    const byline_w = wrap.columns(version_label, .{ .method = .unicode }) +
+        wrap.columns(sep, .{ .method = .unicode }) + wrap.columns(author, .{ .method = .unicode });
     // The scheme goes when it is what puts the address over the edge: a
     // wrapped URL is not a link and not copyable in one gesture.
-    const url = if (wrap.columns(repo_url, .unicode) <= width) repo_url else repo_short;
-    const url_w = wrap.columns(url, .unicode);
+    const url = if (wrap.columns(repo_url, .{ .method = .unicode }) <= width) repo_url else repo_short;
+    const url_w = wrap.columns(url, .{ .method = .unicode });
 
     // Dropped whole rather than wrapped, the same rule the screen follows.
-    const tag_w = wrap.columns(tagline, .unicode);
+    const tag_w = wrap.columns(tagline, .{ .method = .unicode });
     const tag = tag_w + margin <= width;
 
     // Everything centres on the widest line rather than on the wordmark: the
@@ -287,7 +287,7 @@ fn bold(style: theme_mod.Style) theme_mod.Style {
 /// The wordmark's display width: one width for the picture, not one per row.
 fn wordmarkWidth(g: theme_mod.Glyphs) u16 {
     var out: u16 = 0;
-    for (g.wordmark) |r| out = @max(out, wrap.columns(r, .unicode));
+    for (g.wordmark) |r| out = @max(out, wrap.columns(r, .{ .method = .unicode }));
     return out;
 }
 
@@ -417,7 +417,7 @@ fn noLineOver(text: []const u8, cols: u16) !void {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (std.mem.indexOf(u8, line, "github.com") != null) continue;
-        try testing.expect(wrap.columns(line, .unicode) <= cols);
+        try testing.expect(wrap.columns(line, .{ .method = .unicode }) <= cols);
     }
 }
 
@@ -459,8 +459,8 @@ test "the tagline is dropped whole rather than clipped" {
     // does not fit the narrow split the ascii wordmark exists for. Half of
     // "before you say LGTM" is advice nobody asked for.
     const w = wordmarkWidth(theme_mod.Glyphs.unicode);
-    try testing.expect(wrap.columns(tagline, .unicode) > w);
-    try testing.expect(wrap.columns(tagline, .unicode) <= 80);
+    try testing.expect(wrap.columns(tagline, .{ .method = .unicode }) > w);
+    try testing.expect(wrap.columns(tagline, .{ .method = .unicode }) <= 80);
 }
 
 test "every wordmark row is the same width, or the picture shears" {

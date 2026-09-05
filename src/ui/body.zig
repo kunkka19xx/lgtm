@@ -38,6 +38,7 @@ pub fn draw(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
         .arena = f.arena,
         .theme = f.theme,
         .glyphs = f.glyphs,
+        .tab = f.tab,
     };
 
     // Negative to begin with when the top row is only partly on screen, which
@@ -346,6 +347,7 @@ fn drawSide(
         .arena = f.arena,
         .theme = f.theme,
         .glyphs = f.glyphs,
+        .tab = f.tab,
     };
     _ = try drawLine(cf, v, row, li, mark orelse .{ .row = 0 }, .{
         .side = side,
@@ -562,7 +564,8 @@ fn drawCode(
 
     if (height <= 1) {
         const at = onScreen(f, row) orelse return;
-        _ = f.win.print(segs.items, .{ .row_offset = at, .col_offset = col, .wrap = .none });
+        const line = try expandTabs(f, segs.items, 0);
+        _ = f.win.print(line, .{ .row_offset = at, .col_offset = col, .wrap = .none });
         return;
     }
 
@@ -578,9 +581,54 @@ fn drawCode(
             if (r >= f.win.height) break;
             continue;
         };
-        const part = try sliceSegs(f.arena, segs.items, chunk);
+        const part = try expandTabs(f, try sliceSegs(f.arena, segs.items, chunk), chunk.col);
         _ = f.win.print(part, .{ .row_offset = at, .col_offset = col + chunk.col, .wrap = .none });
     }
+}
+
+/// The spaces a tab is drawn from. As long as the widest tab the config takes.
+const tab_spaces = " " ** wrap.max_tab;
+
+/// Tabs as the spaces they are drawn as, for a row that starts `at` columns
+/// into the text area.
+///
+/// The last pass over the segments, so everything above it - the lexer's runs,
+/// the selection, the search matches - keeps working in byte offsets and never
+/// has to know that a column is not a byte. A tab reaches its next stop, which
+/// is what `ui/wrap.zig` measured it as, so the row drawn is the row counted.
+fn expandTabs(f: Frame, segs: []const vaxis.Segment, at: u16) Allocator.Error![]const vaxis.Segment {
+    var tabbed = false;
+    for (segs) |s| {
+        if (std.mem.indexOfScalar(u8, s.text, '\t') != null) {
+            tabbed = true;
+            break;
+        }
+    }
+    if (!tabbed) return segs;
+
+    const m = f.method();
+    var out: std.ArrayList(vaxis.Segment) = .empty;
+    var col = at;
+    for (segs) |s| {
+        var i: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, s.text, i, '\t')) |t| {
+            if (t > i) {
+                const run = s.text[i..t];
+                col += wrap.columnsFrom(run, m, col);
+                try out.append(f.arena, .{ .text = run, .style = s.style });
+            }
+            const w = wrap.tabCols(col, m.tab);
+            try out.append(f.arena, .{ .text = tab_spaces[0..w], .style = s.style });
+            col += w;
+            i = t + 1;
+        }
+        if (i < s.text.len) {
+            const run = s.text[i..];
+            col += wrap.columnsFrom(run, m, col);
+            try out.append(f.arena, .{ .text = run, .style = s.style });
+        }
+    }
+    return out.items;
 }
 
 /// The part of a line's styled segments covering one wrapped chunk.

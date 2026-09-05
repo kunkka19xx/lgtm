@@ -20,6 +20,28 @@ const vaxis = @import("vaxis");
 /// row measured here is the row vaxis draws (`Screen.width_method`).
 pub const Method = vaxis.gwidth.Method;
 
+/// `[ui] tab_width` when the file says nothing. Four rather than eight: the
+/// pane this is built for is a split one, and Go indented at eight loses a
+/// third of it before the code starts.
+pub const default_tab: u16 = 4;
+
+/// The widest tab the config accepts, and the length of the run of spaces the
+/// renderer draws one from.
+pub const max_tab: u16 = 16;
+
+/// How wide text is on this screen: the grapheme method, and the tab stop.
+///
+/// One value rather than two parameters because every caller that measures a
+/// line has to agree with the renderer about both, and a tab counted here as
+/// one width and drawn as another is a cursor in the wrong column.
+pub const Metrics = struct {
+    method: Method,
+    /// Columns between tab stops. A tab advances to the next multiple of it,
+    /// which is what every editor does and what keeps gofmt's alignment
+    /// aligned.
+    tab: u16 = default_tab,
+};
+
 /// Whether a continuation row starts under the line's own indentation or at
 /// the left edge of the text area.
 ///
@@ -48,7 +70,7 @@ pub const Iterator = struct {
     /// means no room at all, which yields the line as one chunk rather than
     /// an endless sequence of empty ones.
     width: u16,
-    method: Method,
+    m: Metrics,
     /// Every byte below 0x80, so a column is a byte and the grapheme walk can
     /// be skipped entirely. Overwhelmingly the common case for source.
     ascii: bool,
@@ -58,11 +80,11 @@ pub const Iterator = struct {
     at: u32 = 0,
     done: bool = false,
 
-    pub fn init(text: []const u8, width: u16, method: Method, indent: Indent) Iterator {
+    pub fn init(text: []const u8, width: u16, m: Metrics, indent: Indent) Iterator {
         var it: Iterator = .{
             .text = text,
             .width = width,
-            .method = method,
+            .m = m,
             .ascii = isAscii(text),
         };
         if (indent == .follow) it.indent = it.leadingColumns();
@@ -72,16 +94,15 @@ pub const Iterator = struct {
     /// Columns of leading whitespace, capped at a third of the width so a
     /// deeply nested line still has most of the pane to wrap into.
     ///
-    /// Measured with the same step the wrap itself uses, so a tab - which the
-    /// renderer draws as nothing - indents a continuation by nothing, and the
-    /// two cannot disagree. A line that is *nothing but* whitespace has no
-    /// continuation to indent.
+    /// Measured with the same step the wrap itself uses, so a tab indents a
+    /// continuation by the columns it is drawn as and the two cannot disagree.
+    /// A line that is *nothing but* whitespace has no continuation to indent.
     fn leadingColumns(self: Iterator) u16 {
         if (self.width == 0) return 0;
         var col: u16 = 0;
         var i: u32 = 0;
         while (i < self.text.len and isSpace(self.text[i])) {
-            const step = self.stepAt(i);
+            const step = self.stepAt(i, col);
             col += step.cols;
             i += step.len;
         }
@@ -125,7 +146,7 @@ pub const Iterator = struct {
         var prev_space = false;
 
         while (i < self.text.len) {
-            const step = self.stepAt(i);
+            const step = self.stepAt(i, at_col + col);
             if (col + step.cols > room) {
                 // A space at the edge is the seam itself, not content that
                 // failed to fit: the row before it is full and ends there.
@@ -172,21 +193,23 @@ pub const Iterator = struct {
 
     const Step = struct { len: u32, cols: u16 };
 
-    fn stepAt(self: Iterator, i: u32) Step {
+    /// `col` is where the byte lands in the text area, which only a tab cares
+    /// about: it advances to the next stop rather than by a fixed width, so
+    /// the columns a run of them takes depends on where the run began.
+    fn stepAt(self: Iterator, i: u32, col: u16) Step {
         if (self.ascii) {
-            // Control bytes are what vaxis draws them as: nothing. A tab is
-            // one of them, which is why a tab-indented line renders flush
-            // left - a display decision that belongs with the renderer, not
-            // here, but the two have to agree on the count.
             const b = self.text[i];
+            if (b == '\t') return .{ .len = 1, .cols = tabCols(col, self.m.tab) };
+            // Every other control byte is what vaxis draws it as: nothing.
             return .{ .len = 1, .cols = if (b < 0x20 or b == 0x7f) 0 else 1 };
         }
+        if (self.text[i] == '\t') return .{ .len = 1, .cols = tabCols(col, self.m.tab) };
         var it = vaxis.unicode.graphemeIterator(self.text[i..]);
         const g = it.next() orelse return .{ .len = 1, .cols = 1 };
         const bytes = self.text[i..][g.start .. g.start + g.len];
         return .{
             .len = @intCast(g.start + g.len),
-            .cols = vaxis.gwidth.gwidth(bytes, self.method),
+            .cols = vaxis.gwidth.gwidth(bytes, self.m.method),
         };
     }
 };
@@ -194,13 +217,13 @@ pub const Iterator = struct {
 /// Byte length of the longest prefix of `text` that fits in `cols` display
 /// columns. A grapheme that would straddle the edge is left out entirely: half
 /// a character is not a character.
-pub fn fitFront(text: []const u8, cols: u16, method: Method) usize {
+pub fn fitFront(text: []const u8, cols: u16, m: Metrics) usize {
     if (cols == 0) return 0;
-    const it: Iterator = .init(text, cols, method, .flush);
+    const it: Iterator = .init(text, cols, m, .flush);
     var col: u16 = 0;
     var i: u32 = 0;
     while (i < text.len) {
-        const step = it.stepAt(i);
+        const step = it.stepAt(i, col);
         if (col + step.cols > cols) break;
         col += step.cols;
         i += step.len;
@@ -214,15 +237,15 @@ pub fn fitFront(text: []const u8, cols: u16, method: Method) usize {
 /// One forward pass rather than a backwards walk: vaxis iterates graphemes in
 /// one direction only, and the strings this is asked about are paths, which
 /// are short enough that measuring twice costs nothing.
-pub fn fitBack(text: []const u8, cols: u16, method: Method) usize {
-    const total = columns(text, method);
+pub fn fitBack(text: []const u8, cols: u16, m: Metrics) usize {
+    const total = columns(text, m);
     if (total <= cols) return 0;
     const drop = total - cols;
-    const it: Iterator = .init(text, cols, method, .flush);
+    const it: Iterator = .init(text, cols, m, .flush);
     var col: u16 = 0;
     var i: u32 = 0;
     while (i < text.len) {
-        const step = it.stepAt(i);
+        const step = it.stepAt(i, col);
         col += step.cols;
         i += step.len;
         if (col >= drop) return i;
@@ -233,12 +256,13 @@ pub fn fitBack(text: []const u8, cols: u16, method: Method) usize {
 /// Screen rows `text` occupies in `width` columns, never more than `cap` and
 /// never fewer than one. The cap is the body height: nothing taller than the
 /// pane can be scrolled past, so counting further is work with no reader.
-pub fn height(text: []const u8, width: u16, method: Method, cap: u16, indent: Indent) u16 {
+pub fn height(text: []const u8, width: u16, m: Metrics, cap: u16, indent: Indent) u16 {
     if (width == 0 or cap <= 1) return 1;
-    // The line that fits, which is almost all of them.
-    if (text.len <= width and isAscii(text)) return 1;
+    // The line that fits, which is almost all of them. A tab is not one byte
+    // wide on screen, so a line carrying one is measured properly.
+    if (text.len <= width and isPlain(text)) return 1;
 
-    var it: Iterator = .init(text, width, method, indent);
+    var it: Iterator = .init(text, width, m, indent);
     var n: u16 = 0;
     while (it.next()) |_| {
         n += 1;
@@ -259,11 +283,11 @@ pub fn pairHeight(
     left_width: u16,
     right: ?[]const u8,
     right_width: u16,
-    method: Method,
+    m: Metrics,
     cap: u16,
 ) u16 {
-    const l = if (left) |t| height(t, left_width, method, cap, .follow) else 0;
-    const r = if (right) |t| height(t, right_width, method, cap, .follow) else 0;
+    const l = if (left) |t| height(t, left_width, m, cap, .follow) else 0;
+    const r = if (right) |t| height(t, right_width, m, cap, .follow) else 0;
     return @max(@max(l, r), 1);
 }
 
@@ -281,38 +305,59 @@ pub const Cell = struct {
 ///
 /// An offset inside a seam - a space the wrap dropped - belongs to the end of
 /// the row before it, which is where a cursor sitting on that space is drawn.
-pub fn locate(text: []const u8, width: u16, method: Method, offset: u32) Cell {
-    var it: Iterator = .init(text, width, method, .follow);
+pub fn locate(text: []const u8, width: u16, m: Metrics, offset: u32) Cell {
+    var it: Iterator = .init(text, width, m, .follow);
     var row: u16 = 0;
     var prev: Chunk = .{ .start = 0, .end = 0 };
     while (it.next()) |chunk| {
         // Skipped over: the offset is a space this row dropped, so it is drawn
         // at the end of the row before it.
         if (offset < chunk.start) {
-            return .{ .row = row -| 1, .col = prev.col + columns(prev.slice(text), method) };
+            return .{ .row = row -| 1, .col = prev.col + columnsFrom(prev.slice(text), m, prev.col) };
         }
         if (offset < chunk.end) {
-            return .{ .row = row, .col = chunk.col + columns(text[chunk.start..offset], method) };
+            return .{ .row = row, .col = chunk.col + columnsFrom(text[chunk.start..offset], m, chunk.col) };
         }
         prev = chunk;
         row += 1;
     }
     // Past the last byte: the cell just after the final row's text, which is
     // where an offset at the end of the line belongs.
-    return .{ .row = row -| 1, .col = prev.col + columns(prev.slice(text), method) };
+    return .{ .row = row -| 1, .col = prev.col + columnsFrom(prev.slice(text), m, prev.col) };
 }
 
-/// Display columns of a run of text, with the same ASCII shortcut the wrap
-/// itself takes.
-pub fn columns(text: []const u8, method: Method) u16 {
-    if (isAscii(text)) {
+/// Display columns of a run of text starting at column zero. The common call:
+/// a path, a label, the whole of a line.
+pub fn columns(text: []const u8, m: Metrics) u16 {
+    return columnsFrom(text, m, 0);
+}
+
+/// The same, for a run that starts `at` columns into the text area. Only a tab
+/// reads the offset - it advances to the next stop, so the same run is a
+/// different width in a different place.
+pub fn columnsFrom(text: []const u8, m: Metrics, at: u16) u16 {
+    if (isPlain(text)) {
         var n: u16 = 0;
         for (text) |b| {
             if (b >= 0x20 and b != 0x7f) n += 1;
         }
         return n;
     }
-    return vaxis.gwidth.gwidth(text, method);
+    var col = at;
+    const it: Iterator = .init(text, 0, m, .flush);
+    var i: u32 = 0;
+    while (i < text.len) {
+        const step = it.stepAt(i, col);
+        col += step.cols;
+        i += step.len;
+    }
+    return col - at;
+}
+
+/// Columns a tab at `col` takes: the distance to the next stop, never zero.
+pub fn tabCols(col: u16, tab: u16) u16 {
+    const stop = if (tab == 0) default_tab else tab;
+    return stop - (col % stop);
 }
 
 fn isSpace(b: u8) bool {
@@ -326,7 +371,18 @@ fn isAscii(text: []const u8) bool {
     return true;
 }
 
+/// ASCII and tab-free: one byte, one column, no measuring needed.
+fn isPlain(text: []const u8) bool {
+    for (text) |b| {
+        if (b >= 0x80 or b == '\t') return false;
+    }
+    return true;
+}
+
 const testing = std.testing;
+
+/// The screen the tests measure against: unicode widths and the default tab.
+const tm: Metrics = .{ .method = .unicode };
 
 test "a continuation row starts under the line's own indentation" {
     const gpa = testing.allocator;
@@ -348,7 +404,7 @@ test "a continuation row starts under the line's own indentation" {
     defer gpa.free(flat);
     for (flat) |c| try testing.expectEqual(@as(u16, 0), c.col);
     try testing.expect(got.len >= flat.len);
-    try testing.expectEqual(got.len, height(line, 24, .unicode, 40, .follow));
+    try testing.expectEqual(got.len, height(line, 24, tm, 40, .follow));
 }
 
 test "the indent is capped, and costs nothing where it means nothing" {
@@ -367,11 +423,13 @@ test "the indent is capped, and costs nothing where it means nothing" {
     defer gpa.free(flat);
     for (flat) |c| try testing.expectEqual(@as(u16, 0), c.col);
 
-    // A tab is drawn as nothing, so it indents a continuation by nothing -
-    // the wrap and the renderer have to agree about that or the rows drift.
-    const tabbed = try chunksIn(gpa, "\t\tcall(one, two, three, four, five);", 16, .follow);
+    // A tab is drawn as the columns to its next stop, so two of them indent a
+    // continuation by two stops - the wrap and the renderer have to agree
+    // about that or the rows drift.
+    const tabbed = try chunksIn(gpa, "\t\tcall(one, two, three, four, five);", 30, .follow);
     defer gpa.free(tabbed);
-    for (tabbed) |c| try testing.expectEqual(@as(u16, 0), c.col);
+    try testing.expect(tabbed.len > 1);
+    for (tabbed[1..]) |c| try testing.expectEqual(2 * tm.tab, c.col);
 
     // A line that is nothing but whitespace has no continuation at all.
     const blank = try chunksIn(gpa, "        ", 10, .follow);
@@ -390,13 +448,13 @@ test "the cursor lands on the indented column, not the one behind it" {
     defer gpa.free(got);
     try testing.expect(got.len > 1);
 
-    const cell = locate(line, w, .unicode, got[1].start);
+    const cell = locate(line, w, tm, got[1].start);
     try testing.expectEqual(@as(u16, 1), cell.row);
     try testing.expectEqual(@as(u16, 4), cell.col);
 }
 
 test "a split row is as tall as its taller side" {
-    const m: Method = .unicode;
+    const m = tm;
     const short = "fn one() void {}";
     const long = "const long = \"" ++ "y" ** 60 ++ "\";";
 
@@ -423,7 +481,7 @@ fn chunksOf(gpa: std.mem.Allocator, text: []const u8, width: u16) ![]Chunk {
 
 fn chunksIn(gpa: std.mem.Allocator, text: []const u8, width: u16, indent: Indent) ![]Chunk {
     var out: std.ArrayList(Chunk) = .empty;
-    var it: Iterator = .init(text, width, .unicode, indent);
+    var it: Iterator = .init(text, width, tm, indent);
     while (it.next()) |ch| try out.append(gpa, ch);
     return out.toOwnedSlice(gpa);
 }
@@ -442,7 +500,7 @@ test "a line that fits is one row" {
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("const x = 1;", got[0]);
-    try testing.expectEqual(@as(u16, 1), height("const x = 1;", 40, .unicode, 20, .flush));
+    try testing.expectEqual(@as(u16, 1), height("const x = 1;", 40, tm, 20, .flush));
 }
 
 test "wrapping breaks at the last space that fits and drops it" {
@@ -454,7 +512,7 @@ test "wrapping breaks at the last space that fits and drops it" {
     try testing.expectEqualStrings("the block is a", got[0]);
     try testing.expectEqualStrings("different", got[1]);
     try testing.expectEqualStrings("thing", got[2]);
-    try testing.expectEqual(@as(u16, 3), height("the block is a different thing", 14, .unicode, 20, .flush));
+    try testing.expectEqual(@as(u16, 3), height("the block is a different thing", 14, tm, 20, .flush));
 }
 
 test "a run of spaces is one seam, not an indent on the next row" {
@@ -513,7 +571,7 @@ test "an empty line is one row and terminates" {
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
     try testing.expectEqualStrings("", got[0]);
-    try testing.expectEqual(@as(u16, 1), height("", 20, .unicode, 20, .flush));
+    try testing.expectEqual(@as(u16, 1), height("", 20, tm, 20, .flush));
 }
 
 test "no room at all yields the line once rather than forever" {
@@ -521,7 +579,7 @@ test "no room at all yields the line once rather than forever" {
     const got = try rowsOf(gpa, "something", 0);
     defer gpa.free(got);
     try testing.expectEqual(@as(usize, 1), got.len);
-    try testing.expectEqual(@as(u16, 1), height("something", 0, .unicode, 20, .flush));
+    try testing.expectEqual(@as(u16, 1), height("something", 0, tm, 20, .flush));
 }
 
 test "a wide glyph counts two columns and never stalls in a one-column pane" {
@@ -542,37 +600,74 @@ test "an offset is located on the row and column it is drawn at" {
     const text = "the block is a different thing";
 
     // Unwrapped: one row, and the column is the display width before it.
-    try testing.expectEqual(@as(u16, 0), locate(text, 0, .unicode, 10).row);
-    try testing.expectEqual(@as(u16, 10), locate(text, 0, .unicode, 10).col);
+    try testing.expectEqual(@as(u16, 0), locate(text, 0, tm, 10).row);
+    try testing.expectEqual(@as(u16, 10), locate(text, 0, tm, 10).col);
 
     // Wrapped at 14: "the block is a" / "different" / "thing".
-    try testing.expectEqual(Cell{ .row = 0, .col = 4 }, locate(text, 14, .unicode, 4));
+    try testing.expectEqual(Cell{ .row = 0, .col = 4 }, locate(text, 14, tm, 4));
     // "different" starts at byte 15, the first column of the second row.
-    try testing.expectEqual(Cell{ .row = 1, .col = 0 }, locate(text, 14, .unicode, 15));
-    try testing.expectEqual(Cell{ .row = 1, .col = 3 }, locate(text, 14, .unicode, 18));
+    try testing.expectEqual(Cell{ .row = 1, .col = 0 }, locate(text, 14, tm, 15));
+    try testing.expectEqual(Cell{ .row = 1, .col = 3 }, locate(text, 14, tm, 18));
     // "thing" starts at byte 25.
-    try testing.expectEqual(Cell{ .row = 2, .col = 0 }, locate(text, 14, .unicode, 25));
+    try testing.expectEqual(Cell{ .row = 2, .col = 0 }, locate(text, 14, tm, 25));
 
     // Byte 14 is the seam - a space no row draws - so it belongs to the end of
     // the row before it rather than to the start of the next.
-    try testing.expectEqual(Cell{ .row = 0, .col = 14 }, locate(text, 14, .unicode, 14));
+    try testing.expectEqual(Cell{ .row = 0, .col = 14 }, locate(text, 14, tm, 14));
 
     // Past the end is the cell after the last character, not a trap.
-    try testing.expectEqual(Cell{ .row = 2, .col = 5 }, locate(text, 14, .unicode, 99));
+    try testing.expectEqual(Cell{ .row = 2, .col = 5 }, locate(text, 14, tm, 99));
     // An empty line has one cell, at the origin.
-    try testing.expectEqual(Cell{ .row = 0, .col = 0 }, locate("", 14, .unicode, 0));
+    try testing.expectEqual(Cell{ .row = 0, .col = 0 }, locate("", 14, tm, 0));
 }
 
 test "a wide glyph is measured in columns, not bytes" {
     const text = "a\u{4f60}b";
     // The glyph at byte 1 is two columns, so `b` at byte 4 sits at column 3.
-    try testing.expectEqual(@as(u16, 1), locate(text, 0, .unicode, 1).col);
-    try testing.expectEqual(@as(u16, 3), locate(text, 0, .unicode, 4).col);
-    try testing.expectEqual(@as(u16, 4), columns(text, .unicode));
+    try testing.expectEqual(@as(u16, 1), locate(text, 0, tm, 1).col);
+    try testing.expectEqual(@as(u16, 3), locate(text, 0, tm, 4).col);
+    try testing.expectEqual(@as(u16, 4), columns(text, tm));
 }
 
 test "the height cap stops counting rather than walking a generated line" {
     var buf: [4000]u8 = undefined;
     @memset(&buf, 'x');
-    try testing.expectEqual(@as(u16, 5), height(&buf, 40, .unicode, 5, .flush));
+    try testing.expectEqual(@as(u16, 5), height(&buf, 40, tm, 5, .flush));
+}
+
+test "a tab advances to its next stop, wherever it starts" {
+    // From the left edge it is a full stop wide; from one column in, the rest
+    // of that stop. Alignment is what tabs are for, and a fixed width loses it.
+    try testing.expectEqual(tm.tab, tabCols(0, tm.tab));
+    try testing.expectEqual(@as(u16, 1), tabCols(tm.tab - 1, tm.tab));
+    try testing.expectEqual(tm.tab, tabCols(tm.tab, tm.tab));
+
+    // Two leading tabs are two stops, which is what indented code looks like.
+    try testing.expectEqual(2 * tm.tab, columns("\t\t", tm));
+    try testing.expectEqual(2 * tm.tab + 1, columns("\t\tx", tm));
+
+    // The same run measured from further along the row is narrower, because
+    // the first tab has less of its stop left to give.
+    try testing.expectEqual(tm.tab - 1, columnsFrom("\t", tm, 1));
+
+    // And the cursor follows: the byte after a leading tab is drawn one stop in.
+    try testing.expectEqual(@as(u16, 0), locate("\tx", 0, tm, 0).col);
+    try testing.expectEqual(tm.tab, locate("\tx", 0, tm, 1).col);
+}
+
+test "a tab-indented line wraps by the columns it is drawn as" {
+    const gpa = testing.allocator;
+    // Eight columns of indent at the default stop, so 20 columns of pane leave
+    // twelve for the code and the line needs more than one row.
+    const line = "\t\tcall(one, two, three);";
+    try testing.expect(height(line, 20, tm, 40, .follow) > 1);
+
+    // With the tabs counted as nothing it fit in one row, which is the bug
+    // this measures: the byte length is under the width and the drawn one is not.
+    try testing.expect(line.len <= 24);
+    try testing.expect(height(line, 24, tm, 40, .follow) > 1);
+
+    const got = try chunksIn(gpa, line, 20, .follow);
+    defer gpa.free(got);
+    try testing.expect(got.len > 1);
 }
