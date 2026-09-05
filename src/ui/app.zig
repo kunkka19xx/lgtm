@@ -24,6 +24,7 @@ const git = @import("../core/git.zig");
 const comments_mod = @import("../core/comments.zig");
 const review_file = @import("../core/review.zig");
 const hunk = @import("../core/hunk.zig");
+const buffer = @import("../text/buffer.zig");
 const binary = @import("../core/binary.zig");
 const metrics = @import("../io/metrics.zig");
 
@@ -217,6 +218,11 @@ pub const App = struct {
     /// not in `review.files()`, `]f` does not reach it, and the status row
     /// says so.
     preview: ?diff.FileDiff = null,
+    /// The previewed file as a Buffer, which is what the renderer highlights
+    /// from: it wants a line index and byte offsets, not the diff's per-line
+    /// slices. Arena-allocated with the rest of the preview, so it dies when
+    /// the preview does.
+    preview_buf: ?buffer.Buffer = null,
     preview_arena: std.heap.ArenaAllocator = undefined,
     /// The `Ctrl-i` list, open over the box. An index into `presets()`, or
     /// null while the box has the keyboard.
@@ -390,11 +396,12 @@ pub const App = struct {
     /// Every line is context, because that is what it is: nothing changed.
     /// The body already renders a file with no hunks correctly, and a line
     /// with a `new_no` is all a note or a reference needs - so browsing,
-    /// noting and pointing all work here for free. Syntax highlighting does
-    /// not: the lexer runs over the review's own buffers, and this file is not
-    /// one of them. The body falls back to unstyled, which is legible.
+    /// noting and pointing all work here for free. Highlighting needs one
+    /// thing more: the runs index a Buffer, and this file is not one of the
+    /// review's, so it gets its own out of the same arena.
     fn openPreview(self: *App, path: []const u8) !void {
         _ = self.preview_arena.reset(.retain_capacity);
+        self.preview_buf = null;
         const arena = self.preview_arena.allocator();
 
         // Sniffed before it is read: a video opened by mistake should cost one
@@ -457,6 +464,11 @@ pub const App = struct {
             .hunks = &.{},
             .lines = lines,
         };
+        // Highlighted like any other file. A whole-file lex is around a tenth
+        // of a millisecond per thousand lines and the result is cached, so the
+        // reason this file used to render plain was never the cost - it was
+        // that nothing had built it a Buffer for the runs to index.
+        self.preview_buf = buffer.Buffer.initOwned(arena, bytes) catch null;
         try self.rebuildRows(.reset);
         self.vp.cursor = 0;
         self.vp.scroll = 0;
@@ -469,6 +481,7 @@ pub const App = struct {
     fn clearPreview(self: *App) void {
         if (self.preview == null) return;
         self.preview = null;
+        self.preview_buf = null;
         self.rebuildRows(.reset) catch {};
     }
 
@@ -675,7 +688,13 @@ pub const App = struct {
 
     pub fn view(self: *App, body: u16) ?render.View {
         const f = self.current() orelse return null;
-        const bufs = self.review.buffersFor(f.path());
+        // A previewed file is not in the review, so it has no buffers there.
+        // Its own is the whole file, and the head side of a file nothing
+        // changed is the same text - there is nothing to draw as removed.
+        const bufs: review_mod.Buffers = if (self.preview_buf) |b|
+            .{ .work = b }
+        else
+            self.review.buffersFor(f.path());
         const drawn = self.drawnTop(body);
         return .{
             .file = f,

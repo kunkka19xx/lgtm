@@ -146,6 +146,18 @@ fn benchCacheHit(io: std.Io, gpa: std.mem.Allocator, c: Case) !Result {
     return r;
 }
 
+/// The most bytes a file can have and still be highlighted, ending on a line
+/// boundary so the last line is whole.
+fn capToLimits(text: []const u8) []const u8 {
+    var end: usize = 0;
+    var lines: u32 = 0;
+    while (end < text.len and end < highlight.max_bytes and lines < highlight.max_lines) : (end += 1) {
+        if (text[end] == '\n') lines += 1;
+    }
+    while (end > 0 and text[end - 1] != '\n') end -= 1;
+    return text[0..end];
+}
+
 fn perLine(ns: u64, lines: u32) f64 {
     if (lines == 0) return 0;
     return @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(lines));
@@ -203,18 +215,27 @@ pub fn main(init: std.process.Init) !u8 {
         });
     }
 
-    // Everything concatenated: the large-file case, and the only sample big
-    // enough for the per-byte numbers to mean much.
+    // Everything concatenated: the largest file lgtm will ever lex, and the
+    // only sample big enough for the per-byte numbers to mean much.
+    //
+    // Capped where `Highlighter.choose` caps. Past 500 KB or 10,000 lines a
+    // real file renders plain, so an uncapped corpus measured the plain path:
+    // structure came out at 0.000 ms, the screen column never recorded at all
+    // (no checkpoints to lex from), and both budgets below passed
+    // unconditionally while measuring nothing.
+    const capped = capToLimits(corpus.items);
     const whole: Case = .{
         .path = "<corpus>",
-        .text = corpus.items,
-        .hl = highlight.Highlighter.choose(paths[0], corpus.items.len, countLines(corpus.items)),
-        .lines = countLines(corpus.items),
+        .text = capped,
+        .hl = highlight.Highlighter.choose(paths[0], capped.len, countLines(capped)),
+        .lines = countLines(capped),
     };
 
     try w.print("lgtm lexer benchmark - {d} file(s) under {s}/, {d} lines, {d} bytes\n", .{
-        paths.len, root, whole.lines, whole.text.len,
+        paths.len, root, countLines(corpus.items), corpus.items.len,
     });
+    try w.print("<corpus> is the first {d} lines of that, the most one file can be and\n", .{whole.lines});
+    try w.print("still be highlighted - which is the worst case the budgets are about\n", .{});
     try w.print("optimize: {t}, best-of over >= {d} iterations\n\n", .{
         @import("builtin").mode, min_iterations,
     });
