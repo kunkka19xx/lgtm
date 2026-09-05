@@ -729,13 +729,13 @@ test "a file list is one column, however wide the pane" {
 const ComposeRows = struct {
     text: []const u8,
     width: u16,
-    method: wrap_mod.Method,
+    method: wrap_mod.Metrics,
     at: u32 = 0,
     inner: ?wrap_mod.Iterator = null,
     base: u32 = 0,
     done: bool = false,
 
-    fn init(text: []const u8, width: u16, method: wrap_mod.Method) ComposeRows {
+    fn init(text: []const u8, width: u16, method: wrap_mod.Metrics) ComposeRows {
         return .{ .text = text, .width = width, .method = method };
     }
 

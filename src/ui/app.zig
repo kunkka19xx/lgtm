@@ -2143,7 +2143,7 @@ pub const App = struct {
                 sp.left -| col,
                 if (p.right) |li| lines.text[li] else null,
                 sp.right_width -| col,
-                fx.app.vp.width_method,
+                fx.app.vp.metrics,
                 8,
             );
             // Both columns are given the same rows, so neither slides past the
@@ -4387,7 +4387,7 @@ pub const App = struct {
                     sp.left -| col,
                     if (p.right) |li| f.lines.text[li] else null,
                     sp.right_width -| col,
-                    self.vp.width_method,
+                    self.vp.metrics,
                     cap,
                 );
             }
@@ -4397,7 +4397,7 @@ pub const App = struct {
         return wrap_mod.height(
             f.lines.text[li],
             self.vp.cols -| rows_mod.gutter(f, .flow),
-            self.vp.width_method,
+            self.vp.metrics,
             cap,
             .follow,
         );
@@ -4437,7 +4437,7 @@ pub const App = struct {
         var rows: u16 = 0;
         var lines = std.mem.splitScalar(u8, marks[ni].body, '\n');
         while (lines.next()) |line| {
-            rows +|= wrap_mod.height(line, width, self.vp.width_method, cap, .flush);
+            rows +|= wrap_mod.height(line, width, self.vp.metrics, cap, .flush);
         }
         return @max(@min(rows, cap), 1);
     }
@@ -4590,7 +4590,7 @@ pub const App = struct {
         if (li >= f.lines.len()) return .{ .row = @floatFromInt(y), .col = @floatFromInt(gutter) };
 
         const avail = if (self.wrap) column -| gutter else 0;
-        const cell = wrap_mod.locate(f.lines.text[li], avail, self.vp.width_method, self.vp.col);
+        const cell = wrap_mod.locate(f.lines.text[li], avail, self.vp.metrics, self.vp.col);
         return .{
             .row = @floatFromInt(y + @as(i32, cell.row)),
             .col = @floatFromInt(base + @min(gutter + cell.col, column -| 1)),

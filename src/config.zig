@@ -31,6 +31,7 @@ const template = @import("bridge/template.zig");
 const snapshot = @import("snapshot/snapshot.zig");
 const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
+const wrap = @import("ui/wrap.zig");
 const toml = @import("toml.zig");
 
 /// A config file larger than this is not a config file. Reading it is the one
@@ -105,6 +106,11 @@ pub const Ui = struct {
     /// arrives sooner because it moves a cell a frame and runs out of cells.
     /// Zero puts it there at once.
     cursor_ms: u32 = 80,
+    /// Columns a tab is drawn as. A tab advances to the next multiple of it,
+    /// so aligned code stays aligned. Four rather than eight because the pane
+    /// this is built for is a split one, and Go or a Makefile indented at
+    /// eight spends a third of it before the code starts.
+    tab_width: u16 = wrap.default_tab,
 };
 
 /// Navigation policy: motions that could reasonably go either way are settings
@@ -347,6 +353,15 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.ui.scroll_ms = @intCast(n);
+                } else if (std.mem.eql(u8, key, "tab_width")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    // One is a tab that still separates; past sixteen it is an
+                    // indent no pane has room for.
+                    if (n < 1 or n > wrap.max_tab) {
+                        self.note(src, line, "ui.tab_width must be between 1 and {d}", .{wrap.max_tab});
+                        return;
+                    }
+                    self.cfg.ui.tab_width = @intCast(n);
                 } else if (std.mem.eql(u8, key, "cursor_ms")) {
                     const n = self.wantInt(src, line, key, value) orelse return;
                     if (n < 0 or n > 1000) {
@@ -743,6 +758,7 @@ pub const starter =
     \\# comments = "marker"       # "marker" is the gutter dot, "inline" the text
     \\# compose = "bottom"        # "bottom", "top", or "centre"
     \\# wrap = true               # soft wrap; zw toggles it for the session
+    \\# tab_width = 4             # columns a tab is drawn as
     \\# scroll_ms = 250           # how long a jump travels; 0 is instant
     \\# cursor_ms = 80            # the same for the cursor
     \\
@@ -1227,6 +1243,32 @@ test "snapshot.keep has a floor, because a net that small is not one" {
     defer tiny.deinit();
     try testing.expectEqual(snapshot.default_keep, tiny.cfg.snapshot.keep);
     try testing.expectEqual(@as(usize, 1), tiny.problems.items.len);
+}
+
+test "ui.tab_width takes a stop and refuses one no pane could hold" {
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expectEqual(wrap.default_tab, d.cfg.ui.tab_width);
+
+    var f = loadText(
+        \\[ui]
+        \\tab_width = 8
+    );
+    defer f.deinit();
+    try testing.expectEqual(@as(u16, 8), f.cfg.ui.tab_width);
+    try testing.expectEqual(@as(usize, 0), f.problems.items.len);
+
+    // Out of range costs that key its value and nothing else: a tab of zero
+    // would draw nothing, and one of ninety-nine is an indent, not a stop.
+    var bad = loadText(
+        \\[ui]
+        \\tab_width = 0
+        \\wrap = false
+    );
+    defer bad.deinit();
+    try testing.expectEqual(wrap.default_tab, bad.cfg.ui.tab_width);
+    try testing.expectEqual(false, bad.cfg.ui.wrap);
+    try testing.expectEqual(@as(usize, 1), bad.problems.items.len);
 }
 
 test "diff.layout takes flow, split, and the format's own name for flow" {

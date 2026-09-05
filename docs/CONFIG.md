@@ -106,6 +106,7 @@ being reviewed.
 | `icons` | `"unicode"` | `"nerd"`, `"unicode"` or `"ascii"`. Only `nerd` has filetype icons; `ascii` exists for a terminal that would draw the rest as tofu |
 | `comments` | `"marker"` | `"marker"` is the gutter dot alone; `"inline"` folds the comment text under the line it belongs to |
 | `compose` | `"bottom"` | `"bottom"`, `"top"` or `"centre"` — where the compose box opens |
+| `tab_width` | `4` | Columns a tab is drawn as, 1 to 16. A tab advances to the next multiple of it, so a line aligned with tabs stays aligned. Four rather than eight because the pane this is built for is a split one, and Go or a Makefile indented at eight spends a third of it before the code starts |
 | `scroll_ms` | `250` | How long a jump takes to travel, up to 1000. `0` turns the animation off |
 | `cursor_ms` | `80` | The same for the cursor |
 
@@ -114,6 +115,7 @@ being reviewed.
 icons = "nerd"
 comments = "inline"
 compose = "bottom"
+tab_width = 8        # what gofmt and make assume
 scroll_ms = 0        # instant
 ```
 

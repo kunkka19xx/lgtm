@@ -38,6 +38,7 @@ pub fn draw(f: Frame, v: View, top: u16, height: u16) Allocator.Error!void {
         .arena = f.arena,
         .theme = f.theme,
         .glyphs = f.glyphs,
+        .tab = f.tab,
     };
 
     // Negative to begin with when the top row is only partly on screen, which
@@ -346,6 +347,7 @@ fn drawSide(
         .arena = f.arena,
         .theme = f.theme,
         .glyphs = f.glyphs,
+        .tab = f.tab,
     };
     _ = try drawLine(cf, v, row, li, mark orelse .{ .row = 0 }, .{
         .side = side,
@@ -562,7 +564,8 @@ fn drawCode(
 
     if (height <= 1) {
         const at = onScreen(f, row) orelse return;
-        _ = f.win.print(segs.items, .{ .row_offset = at, .col_offset = col, .wrap = .none });
+        const line = try expandTabs(f.arena, segs.items, 0, f.method());
+        _ = f.win.print(line, .{ .row_offset = at, .col_offset = col, .wrap = .none });
         return;
     }
 
@@ -578,9 +581,59 @@ fn drawCode(
             if (r >= f.win.height) break;
             continue;
         };
-        const part = try sliceSegs(f.arena, segs.items, chunk);
+        const sliced = try sliceSegs(f.arena, segs.items, chunk);
+        const part = try expandTabs(f.arena, sliced, chunk.col, f.method());
         _ = f.win.print(part, .{ .row_offset = at, .col_offset = col + chunk.col, .wrap = .none });
     }
+}
+
+/// The spaces a tab is drawn from. As long as the widest tab the config takes.
+const tab_spaces = " " ** wrap.max_tab;
+
+/// Tabs as the spaces they are drawn as, for a row that starts `at` columns
+/// into the text area.
+///
+/// The last pass over the segments, so everything above it - the lexer's runs,
+/// the selection, the search matches - keeps working in byte offsets and never
+/// has to know that a column is not a byte. A tab reaches its next stop, which
+/// is what `ui/wrap.zig` measured it as, so the row drawn is the row counted.
+fn expandTabs(
+    arena: Allocator,
+    segs: []const vaxis.Segment,
+    at: u16,
+    m: wrap.Metrics,
+) Allocator.Error![]const vaxis.Segment {
+    var tabbed = false;
+    for (segs) |s| {
+        if (std.mem.indexOfScalar(u8, s.text, '\t') != null) {
+            tabbed = true;
+            break;
+        }
+    }
+    if (!tabbed) return segs;
+
+    var out: std.ArrayList(vaxis.Segment) = .empty;
+    var col = at;
+    for (segs) |s| {
+        var i: usize = 0;
+        while (std.mem.indexOfScalarPos(u8, s.text, i, '\t')) |t| {
+            if (t > i) {
+                const run = s.text[i..t];
+                col += wrap.columnsFrom(run, m, col);
+                try out.append(arena, .{ .text = run, .style = s.style });
+            }
+            const w = wrap.tabCols(col, m.tab);
+            try out.append(arena, .{ .text = tab_spaces[0..w], .style = s.style });
+            col += w;
+            i = t + 1;
+        }
+        if (i < s.text.len) {
+            const run = s.text[i..];
+            col += wrap.columnsFrom(run, m, col);
+            try out.append(arena, .{ .text = run, .style = s.style });
+        }
+    }
+    return out.items;
 }
 
 /// The part of a line's styled segments covering one wrapped chunk.
@@ -831,4 +884,39 @@ test "a match straddling two segments is painted whole" {
     }
     try testing.expectEqualStrings(line, joined.items);
     try testing.expectEqualStrings("token", lit.items);
+}
+
+test "tabs are drawn as the columns the wrap measured them at" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const m: wrap.Metrics = .{ .method = .unicode, .tab = 4 };
+    const line = "\t\tif x {";
+    var segs: std.ArrayList(vaxis.Segment) = .empty;
+    try segs.append(arena, .{ .text = line[0..2], .style = .{} });
+    try segs.append(arena, .{ .text = line[2..], .style = .{ .bold = true } });
+
+    const out = try expandTabs(arena, segs.items, 0, m);
+    var text: std.ArrayList(u8) = .empty;
+    for (out) |s| try text.appendSlice(arena, s.text);
+    try testing.expectEqualStrings("        if x {", text.items);
+
+    // The columns are the ones `wrap` counted, or the cursor and the text
+    // would sit in different places on the same row.
+    try testing.expectEqual(wrap.columns(line, m), wrap.columns(text.items, m));
+
+    // Each tab keeps the style of the segment it came from, so a selection or
+    // a match still covers the indentation it was drawn over.
+    try testing.expect(!out[0].style.bold);
+    try testing.expect(out[out.len - 1].style.bold);
+
+    // A run starting mid-row reaches the next stop, not a fixed width: a
+    // continuation row is drawn at its own column and has to agree with it.
+    const one = try expandTabs(arena, &.{.{ .text = "\tx", .style = .{} }}, 1, m);
+    try testing.expectEqualStrings("   ", one[0].text);
+
+    // A line with no tab in it is handed back untouched rather than rebuilt.
+    const plain = try expandTabs(arena, segs.items[1..], 0, m);
+    try testing.expectEqual(segs.items[1].text.ptr, plain[0].text.ptr);
 }
