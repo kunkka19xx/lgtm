@@ -564,7 +564,7 @@ fn drawCode(
 
     if (height <= 1) {
         const at = onScreen(f, row) orelse return;
-        const line = try expandTabs(f, segs.items, 0);
+        const line = try expandTabs(f.arena, segs.items, 0, f.method());
         _ = f.win.print(line, .{ .row_offset = at, .col_offset = col, .wrap = .none });
         return;
     }
@@ -581,7 +581,8 @@ fn drawCode(
             if (r >= f.win.height) break;
             continue;
         };
-        const part = try expandTabs(f, try sliceSegs(f.arena, segs.items, chunk), chunk.col);
+        const sliced = try sliceSegs(f.arena, segs.items, chunk);
+        const part = try expandTabs(f.arena, sliced, chunk.col, f.method());
         _ = f.win.print(part, .{ .row_offset = at, .col_offset = col + chunk.col, .wrap = .none });
     }
 }
@@ -596,7 +597,12 @@ const tab_spaces = " " ** wrap.max_tab;
 /// the selection, the search matches - keeps working in byte offsets and never
 /// has to know that a column is not a byte. A tab reaches its next stop, which
 /// is what `ui/wrap.zig` measured it as, so the row drawn is the row counted.
-fn expandTabs(f: Frame, segs: []const vaxis.Segment, at: u16) Allocator.Error![]const vaxis.Segment {
+fn expandTabs(
+    arena: Allocator,
+    segs: []const vaxis.Segment,
+    at: u16,
+    m: wrap.Metrics,
+) Allocator.Error![]const vaxis.Segment {
     var tabbed = false;
     for (segs) |s| {
         if (std.mem.indexOfScalar(u8, s.text, '\t') != null) {
@@ -606,7 +612,6 @@ fn expandTabs(f: Frame, segs: []const vaxis.Segment, at: u16) Allocator.Error![]
     }
     if (!tabbed) return segs;
 
-    const m = f.method();
     var out: std.ArrayList(vaxis.Segment) = .empty;
     var col = at;
     for (segs) |s| {
@@ -615,17 +620,17 @@ fn expandTabs(f: Frame, segs: []const vaxis.Segment, at: u16) Allocator.Error![]
             if (t > i) {
                 const run = s.text[i..t];
                 col += wrap.columnsFrom(run, m, col);
-                try out.append(f.arena, .{ .text = run, .style = s.style });
+                try out.append(arena, .{ .text = run, .style = s.style });
             }
             const w = wrap.tabCols(col, m.tab);
-            try out.append(f.arena, .{ .text = tab_spaces[0..w], .style = s.style });
+            try out.append(arena, .{ .text = tab_spaces[0..w], .style = s.style });
             col += w;
             i = t + 1;
         }
         if (i < s.text.len) {
             const run = s.text[i..];
             col += wrap.columnsFrom(run, m, col);
-            try out.append(f.arena, .{ .text = run, .style = s.style });
+            try out.append(arena, .{ .text = run, .style = s.style });
         }
     }
     return out.items;
