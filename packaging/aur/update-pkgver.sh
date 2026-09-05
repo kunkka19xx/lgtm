@@ -21,7 +21,22 @@ version="${version#v}"
 
 sums="$(mktemp)"
 trap 'rm -f "$sums"' EXIT
-gh release download "v$version" --repo "$repo" --pattern SHA256SUMS --output "$sums" --clobber
+
+# curl first, `gh` only as the fallback: the asset is public, so a plain HTTPS
+# fetch needs no token and works in a container that has no `gh` at all. That
+# is what lets CI run this script rather than reimplementing it.
+url="https://github.com/$repo/releases/download/v$version/SHA256SUMS"
+if ! curl -fsSL "$url" -o "$sums"; then
+  command -v gh >/dev/null 2>&1 ||
+    { echo "cannot fetch $url, and no gh to fall back on" >&2; exit 1; }
+  gh release download "v$version" --repo "$repo" --pattern SHA256SUMS --output "$sums" --clobber
+fi
+
+# A release whose assets never uploaded returns an empty or HTML body rather
+# than failing, and every checksum below would then be missing one at a time.
+# Say so once, here, in the words that name the actual problem.
+grep -q 'lgtm-.*\.tar\.gz$' "$sums" ||
+  { echo "SHA256SUMS at $url has no lgtm tarballs in it - did the release publish its assets?" >&2; exit 1; }
 
 sha_for() {
   local line

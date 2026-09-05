@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: Apache-2.0
+name: aur
+
+# `release: published`, not a tag push. The AUR package's checksums come from
+# the release's own SHA256SUMS, so this cannot run until those assets exist -
+# and a tag exists well before they do. Publishing v0.1.0 from the web UI
+# created the tag, raced the release workflow, and produced a release with no
+# assets at all; keying off the published release is what makes that
+# unrepresentable here.
+on:
+  release:
+    types: [published]
+  # For a release that was published before this workflow existed, or a rerun
+  # after fixing a PKGBUILD without cutting a new version.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "version to publish, without the leading v"
+        required: true
+
+# Two of these at once would race on the same two AUR repositories.
+concurrency:
+  group: aur
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Official image, x86_64, and the runner is too - so makepkg runs natively
+    # and none of the emulation trouble from a local arm64 machine applies.
+    container: archlinux:base-devel
+    steps:
+      - name: pacman
+        # --disable-sandbox: pacman's own sandbox wants seccomp permissions the
+        # container does not have, and every sync fails without it.
+        run: pacman -Sy --noconfirm --disable-sandbox git openssh
+
+      - uses: actions/checkout@v7
+        with:
+          # main, not the tag: the packaging files in this repository are the
+          # source of truth the AUR copies come from, so they are updated on
+          # the branch and pushed from there.
+          ref: main
+          fetch-depth: 0
+
+      - name: version
+        id: v
+        run: |
+          set -eu
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          version="${{ inputs.version || github.event.release.tag_name }}"
+          version="${version#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse --short=7 "v$version")" >> "$GITHUB_OUTPUT"
+          echo "publishing $version"
+
+      - name: point the packages at the release
+        env:
+          V: ${{ steps.v.outputs.version }}
+          SHA: ${{ steps.v.outputs.sha }}
+        run: |
+          set -eu
+          # Reads the release's SHA256SUMS over https and refuses an asset-less
+          # release rather than writing a package that cannot install.
+          ./packaging/aur/update-pkgver.sh "$V"
+          # lgtm-git recomputes its version in pkgver() at build time; this is
+          # only what the AUR web page shows until someone builds it, so it
+          # carries the last released version rather than zeroes.
+          sed -i "s/^pkgver=.*/pkgver=$V.r0.g$SHA/" packaging/aur/lgtm-git/PKGBUILD
+
+      - name: regenerate .SRCINFO
+        run: |
+          set -eu
+          # makepkg refuses to run as root: a PKGBUILD is arbitrary code.
+          useradd -m build
+          chown -R build packaging/aur
+          for p in lgtm-bin lgtm-git; do
+            su build -c "cd packaging/aur/$p && makepkg --printsrcinfo > .SRCINFO"
+          done
+          chown -R root packaging/aur
+          grep -H '^\tpkgver' packaging/aur/*/.SRCINFO
+
+      - name: ssh
+        env:
+          KEY: ${{ secrets.AUR_SSH_KEY }}
+        run: |
+          set -eu
+          test -n "$KEY" || { echo "::error::AUR_SSH_KEY is not set"; exit 1; }
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          printf 'Host aur.archlinux.org\n  User aur\n  IdentityFile ~/.ssh/id_ed25519\n  IdentitiesOnly yes\n' > ~/.ssh/config
+
+      - name: push to the AUR
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -eu
+          git config --global user.name "kunkka19xx"
+          git config --global user.email "nobita079x@gmail.com"
+          for p in lgtm-bin lgtm-git; do
+            rm -rf "/tmp/$p"
+            git clone "ssh://aur@aur.archlinux.org/$p.git" "/tmp/$p"
+            cp "packaging/aur/$p/PKGBUILD" "packaging/aur/$p/.SRCINFO" "/tmp/$p/"
+            git -C "/tmp/$p" add PKGBUILD .SRCINFO
+            # Nothing to say is not a failure: a rerun with no change is fine.
+            if git -C "/tmp/$p" diff --cached --quiet; then
+              echo "$p already at this version"
+            else
+              git -C "/tmp/$p" commit -m "$p $V"
+              git -C "/tmp/$p" push origin master
+              echo "pushed $p $V"
+            fi
+          done
+
+      - name: commit the packaging files back
+        env:
+          V: ${{ steps.v.outputs.version }}
+        run: |
+          set -eu
+          if git diff --quiet -- packaging/aur; then
+            echo "packaging/ already matches"
+            exit 0
+          fi
+          git add packaging/aur
+          git commit -m "aur: $V"
+          # Last, and forgiving: the AUR already has the packages by this
+          # point, so someone else pushing to main in the meantime is a thing
+          # to report rather than a reason to report the release as failed.
+          git push origin HEAD:main || echo "::warning::could not push packaging/ to main; sync it by hand"
