@@ -91,11 +91,41 @@ pub const def = langdef.define(.{
     // One entry, not one per helper: `assertEquals`, `assertThat` and
     // `assertThrows` all contain `assert`, and listing them separately would
     // count a single call several times. It matches Java's own `assert`
-    // statement too, which is an assertion and should be counted.
-    .assert_names = &.{ "assert", "verify(" },
+    // statement too, which is an assertion and should be counted, and a
+    // custom `assertRowMatches` helper, which is one as well.
+    //
+    // The over-count it can make is the import that brings the helpers in:
+    // `import static org.assertj.core.api.Assertions.assertThat;` holds
+    // `assertj` and `assertThat` and counts two. Left alone deliberately -
+    // the signal is `assert_gone -| assert_new`, so an import counted on the
+    // added side can only make the warning quieter, and on the removed side
+    // the file was losing its tests anyway. Anchoring it - `assert(`, or a
+    // leading space - would cost the `assert x != null;` statement or the
+    // qualified `Assertions.assertEquals(` and buy nothing.
+    //
+    // Mockito's `verify(` is not here. A bare `verify(` is indistinguishable
+    // from `signature.verify(data)` or from a `boolean verify(byte[] sig)`
+    // declaration in production code, and `fewer_asserts` fires on a file
+    // with no tests in it the moment such a line is deleted. `Mockito.verify(`
+    // would be safe and would miss the static-imported form everyone writes,
+    // so the count leaves verifications out and rests on the assertions that
+    // a Mockito test also carries.
+    .assert_names = &.{"assert"},
     // `@Disabled` is JUnit 5, `@Ignore` is JUnit 4 and TestNG. `assumeTrue`
     // and its neighbours abort a test at runtime, which is a skip that leaves
     // the build green.
-    .skip_names = &.{ "@Disabled", "@Ignore", "assumeTrue", "assumeFalse", "Assume." },
+    //
+    // The assumptions carry their `(` for the reason `t.Skip(` and `it.skip(`
+    // do: `import static org.junit.Assume.assumeTrue;` holds the bare name,
+    // and a change that adds one skip usually adds its import in the same
+    // hunk - two skips reported for one, and the import marked as the place
+    // to go and read it. A static import never has the paren. It also makes
+    // `Assume.` unnecessary, since `Assume.assumeTrue(` carries the call form
+    // whole; the JUnit 4 spellings that are not `assumeTrue` are listed
+    // instead, which is what `Assume.` was covering.
+    .skip_names = &.{
+        "@Disabled",    "@Ignore",     "assumeTrue(",
+        "assumeFalse(", "assumeThat(", "assumeNotNull(",
+    },
     .fn_decl_paren = true,
 });

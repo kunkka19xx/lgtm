@@ -425,11 +425,30 @@ test "the vocabularies do not fire on ordinary code" {
         // the note in `syntax/lang/java.zig`.
         .{ .line = "import org.junit.jupiter.api.Test;", .def = &lang_java.def },
         .{ .line = "    private boolean ignored = false;", .def = &lang_java.def },
+        // The import a skip arrives with. Counted alongside the call it
+        // enables, one skipped test would be reported as two - and the import
+        // is the line `markRows` would send the reader to. The `(` is what
+        // separates them.
+        .{ .line = "import static org.junit.Assume.assumeTrue;", .def = &lang_java.def },
+        .{ .line = "import static org.junit.jupiter.api.Assumptions.assumeTrue;", .def = &lang_java.def },
     };
     for (ordinary) |o| {
         try testing.expect(!mentions(o.line, o.def.test_decl));
         try testing.expect(!mentions(o.line, o.def.skip_names));
     }
+
+    // The assertion vocabularies, which are counted rather than detected and
+    // so were never covered by the loop above. Production code that a review
+    // deletes must not read as a test losing its assertions.
+    const unasserted = [_]struct { line: []const u8, def: *const langdef.LangDef }{
+        // Both of these matched Mockito's `verify(` before the table dropped
+        // it: one a call through a receiver, one a declaration.
+        .{ .line = "        if (!signature.verify(data)) return false;", .def = &lang_java.def },
+        .{ .line = "    public boolean verify(byte[] sig) {", .def = &lang_java.def },
+        .{ .line = "  const ok = inspect(value);", .def = &lang_js.def },
+        .{ .line = "\tif err := t.Close(); err != nil {", .def = &lang_go.def },
+    };
+    for (unasserted) |u| try testing.expectEqual(@as(u32, 0), countIn(u.line, u.def.assert_names));
 }
 
 test "the vocabularies do fire on the real thing" {

@@ -457,7 +457,9 @@ const Scan = struct {
                     // and every highlighter paints them alike. Only the ones
                     // that pass the whole test open a span.
                     kind = .fn_name;
-                    if (self.argsPrecedeBlock()) try self.openFn(word, true);
+                    if (!self.throughReceiver(start) and self.argsPrecedeBlock()) {
+                        try self.openFn(word, true);
+                    }
                 }
             }
 
@@ -680,6 +682,71 @@ const Scan = struct {
         return j < self.end and self.text[j] == '(';
     }
 
+    /// `fn_decl_paren`: was the identifier that just ended reached through a
+    /// receiver? `list.add(x)` is a call whatever follows it, because a method
+    /// is never declared through one - so the span is refused and only the
+    /// colour is kept.
+    ///
+    /// Backwards over spaces and tabs but never over a newline, so the `.` of
+    /// a chained call broken across lines - `stream\n    .forEach(` - is still
+    /// found, and the `.` ending the statement above an ordinary declaration
+    /// is not.
+    fn throughReceiver(self: Scan, start: usize) bool {
+        var j = start;
+        while (j > 0) {
+            j -= 1;
+            const c = self.text[j];
+            if (c == ' ' or c == '\t') continue;
+            return c == '.';
+        }
+        return false;
+    }
+
+    /// `fn_decl_paren`: the byte after the literal that opens at `j`, or null
+    /// if none does.
+    ///
+    /// The lookahead below reads raw bytes, and a `)` or a `{` inside a string
+    /// is neither - `format("%s) {", x)` would otherwise close the argument
+    /// list early, find a brace behind it, and name the rest of the enclosing
+    /// method after `format`. A literal left open at the end of the line
+    /// yields the newline, which ends the lookahead where an unclosed literal
+    /// should: no span rather than a wrong one.
+    ///
+    /// Read from `LangDef.strings` rather than from a `'"'` written here, and
+    /// with the same first-match-wins order the scanner itself uses, so Java's
+    /// `"""` is tried before its `"`. Hashed literals - Swift's `#"` - are
+    /// declined: no language with `fn_decl_paren` has them, and guessing at
+    /// one here would be a second implementation of `matchesClose`.
+    fn skipLiteral(self: Scan, j: usize) ?usize {
+        const line = self.text[0..self.end];
+        for (self.def.strings) |spec| {
+            if (spec.hashed or spec.open.len == 0) continue;
+            if (!std.mem.startsWith(u8, line[j..], spec.open)) continue;
+
+            var k = j + spec.open.len;
+            while (k < self.end) {
+                const c = line[k];
+                if (c == '\n') return k;
+                if (spec.escape) |e| if (c == e) {
+                    k = @min(k + 2, self.end);
+                    continue;
+                };
+                if (std.mem.startsWith(u8, line[k..], spec.close)) {
+                    const past = k + spec.close.len;
+                    // The byte limit that keeps an apostrophe from painting the
+                    // rest of a line applies here too, or `it's` in a trailing
+                    // comment would swallow the lookahead.
+                    if (spec.max_bytes) |limit| if (past - j > limit) break;
+                    return past;
+                }
+                k += 1;
+            }
+            if (spec.max_bytes != null) continue;
+            return self.end;
+        }
+        return null;
+    }
+
     /// `fn_decl_paren`: does that argument list close on this line with a block
     /// behind it? This is the whole of the declaration test, and it is a
     /// lookahead rather than the brace-on-the-same-line rule `fn_decl_body`
@@ -704,16 +771,18 @@ const Scan = struct {
         if (j >= self.end or self.text[j] != '(') return false;
 
         var open: u32 = 0;
-        while (j < self.end) : (j += 1) {
+        while (j < self.end) {
+            if (self.skipLiteral(j)) |past| {
+                j = past;
+                continue;
+            }
             const c = self.text[j];
             if (c == '\n') return false;
+            j += 1;
             if (c == '(') open += 1;
             if (c == ')') {
                 open -= 1;
-                if (open == 0) {
-                    j += 1;
-                    break;
-                }
+                if (open == 0) break;
             }
         } else return false;
 
@@ -1437,6 +1506,80 @@ test "a java call does not steal its method's name" {
         try testing.expect(!std.mem.eql(u8, f.name, "forEach"));
         try testing.expect(!std.mem.eql(u8, f.name, "assertThrows"));
     }
+}
+
+test "a java brace inside a string does not open a method" {
+    // The lookahead reads raw bytes, so the `) {` in the format string used to
+    // close the argument list early and name every line after it `format`. The
+    // span it opened was never entered - the brace depth had not moved - so it
+    // ran to the end of the enclosing method.
+    const src =
+        \\class X {
+        \\    void b(String x) {
+        \\        String s = format("%s) {", x);
+        \\        logger.info("done) {} rows", 3);
+        \\        realWork();
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    for (2..5) |li| {
+        try testing.expectEqualStrings("b", st.enclosingFn(@intCast(li)).?.name);
+    }
+    for (st.fns) |f| {
+        try testing.expect(!std.mem.eql(u8, f.name, "format"));
+        try testing.expect(!std.mem.eql(u8, f.name, "info"));
+    }
+}
+
+test "a java string in the parameter list does not cost the method its span" {
+    // The other half of the same rule, and the reason the lookahead skips a
+    // literal rather than stopping at one: an annotated parameter is ordinary
+    // Spring, and refusing every signature that holds a quote would lose the
+    // name of most of a controller.
+    const src =
+        \\class Api {
+        \\    public void handle(@RequestParam("id") String id) {
+        \\        use(id);
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("handle", st.enclosingFn(2).?.name);
+}
+
+test "a java receiver never introduces a declaration" {
+    // Valid Java has no line where a qualified call closes its parentheses and
+    // a block follows - `if (a.b(c)) {` is rejected by the `)` the `if` adds.
+    // A file being typed into has plenty, and this is the guard that makes the
+    // outcome not depend on that: a method is never declared through a
+    // receiver, whatever the rest of the line is doing.
+    const src =
+        \\class X {
+        \\    void c(int n) {
+        \\        obj.make(n) {
+        \\        }
+        \\    }
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&java_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("c", st.enclosingFn(2).?.name);
+    for (st.fns) |f| try testing.expect(!std.mem.eql(u8, f.name, "make"));
 }
 
 test "a java control-flow block is not a method" {
