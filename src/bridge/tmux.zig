@@ -77,7 +77,7 @@ pub fn sendArgv(arena: Allocator, pane: []const u8, text: []const u8) Allocator.
 /// what can be found without widening what can be guessed.
 pub fn listArgv(arena: Allocator, all_sessions: bool) Allocator.Error![]const []const u8 {
     const format = "#{pane_id}\t#{pane_active}\t#{pane_current_command}" ++
-        "\t#{session_name}:#{window_index}.#{pane_index}\t#{pane_title}";
+        "\t#{session_name}:#{window_index}.#{pane_index}\t#{window_panes}\t#{pane_title}";
     return if (all_sessions)
         arena.dupe([]const u8, &.{ "tmux", "list-panes", "-a", "-F", format })
     else
@@ -89,10 +89,18 @@ pub fn listArgv(arena: Allocator, all_sessions: bool) Allocator.Error![]const []
 /// to not know a format variable prints it back verbatim, and losing one pane
 /// from a picker is better than losing the picker.
 ///
-/// The last two are optional for the same reason, and they are last so that
-/// they can be: a tmux that answers three fields still drives inference, which
-/// only ever needed the id. The title takes everything remaining, tabs
-/// included, because it is a user's sentence and not a field this wrote.
+/// The rest are optional for the same reason, and they come last so that they
+/// can be: a tmux that answers three fields still drives inference, which only
+/// ever needed the id. The title takes everything remaining, tabs included,
+/// because it is a user's sentence and not a field this wrote.
+///
+/// `#{window_panes}` decides whether `.pane` is worth printing. In a window
+/// with one pane it is always `.0` and says nothing, and thirteen rows of a
+/// fifteen-row picker ending in `.0` read as a decimal point rather than as
+/// tmux's `window.pane`. Dropped there, kept where a window really is split -
+/// so the suffix appearing is itself the row saying so. A tmux too old to
+/// know the variable prints it back verbatim, which is not `1`, so the
+/// suffix stays and nothing is lost.
 pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
     var panes: std.ArrayList(Pane) = .empty;
     var lines = std.mem.tokenizeScalar(u8, out, '\n');
@@ -103,8 +111,13 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
         const active = fields.next() orelse continue;
         const command = fields.next() orelse continue;
         if (id.len == 0 or id[0] != pane_sigil) continue;
-        const where = fields.next() orelse "";
+        const raw_where = fields.next() orelse "";
+        const window_panes = fields.next() orelse "";
         const title = fields.rest();
+        const where = if (std.mem.eql(u8, window_panes, "1"))
+            raw_where[0 .. std.mem.lastIndexOfScalar(u8, raw_where, '.') orelse raw_where.len]
+        else
+            raw_where;
         const colon = std.mem.indexOfScalar(u8, where, ':');
         try panes.append(arena, .{
             .id = id,
@@ -393,17 +406,52 @@ test "a pane listing carries where it is and what it calls itself" {
 
     const panes = try parsePanes(
         a.allocator(),
-        "%604\t1\t2.1.261\tlgtm:3.0\tlgtm#1 language support\n",
+        "%604\t1\t2.1.261\tlgtm:3.0\t2\tlgtm#1 language support\n",
     );
     try testing.expectEqual(@as(usize, 1), panes.len);
     try testing.expectEqualStrings("%604", panes[0].id);
     try testing.expectEqualStrings("2.1.261", panes[0].command);
+    // Window 3 is split, so which pane of it is worth saying.
     try testing.expectEqualStrings("lgtm:3.0", panes[0].where);
     // The session alone, for the picker's grouping.
     try testing.expectEqualStrings("lgtm", panes[0].session);
     // The title is a person's sentence, so it takes the rest of the line -
     // tabs in it are the title's, not a field boundary.
     try testing.expectEqualStrings("lgtm#1 language support", panes[0].title);
+}
+
+test "an unsplit window does not say which of its one pane this is" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    const panes = try parsePanes(
+        a.allocator(),
+        "%1\t1\tzsh\tlgtm:2.0\t1\tkunkka\n" ++
+            "%2\t1\tzsh\tlgtm:3.0\t2\tkunkka\n" ++
+            "%3\t0\tzsh\tlgtm:3.1\t2\tkunkka\n",
+    );
+    // `.0` on a window with one pane in it is always `.0`, and a column of
+    // them reads as a decimal point rather than as `window.pane`.
+    try testing.expectEqualStrings("lgtm:2", panes[0].where);
+    // Where the window really is split, the suffix appearing is the row
+    // saying so.
+    try testing.expectEqualStrings("lgtm:3.0", panes[1].where);
+    try testing.expectEqualStrings("lgtm:3.1", panes[2].where);
+    // Grouping is unaffected either way.
+    for (panes) |p| try testing.expectEqualStrings("lgtm", p.session);
+}
+
+test "a tmux too old to know the count keeps the suffix" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    // An unknown format variable comes back verbatim, which is not "1", so
+    // nothing is stripped on a guess.
+    const panes = try parsePanes(
+        a.allocator(),
+        "%1\t1\tzsh\tlgtm:2.0\t#{window_panes}\tkunkka\n",
+    );
+    try testing.expectEqualStrings("lgtm:2.0", panes[0].where);
 }
 
 test "a tmux that answers only the first three fields still drives inference" {
