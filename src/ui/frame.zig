@@ -396,6 +396,23 @@ pub const FileEntry = struct {
     /// one is my agent" in a way no amount of columns could. Empty on every
     /// other list, and an empty one draws no panel.
     preview: []const u8 = "",
+    /// What `preview` holds, which decides which end of it is shown and
+    /// whether its lines carry a meaning worth colouring.
+    ///
+    /// An enum rather than two flags because the three lists want three
+    /// different combinations and a pair of booleans would allow a fourth
+    /// that means nothing.
+    preview_kind: enum {
+        /// Prose. Read from the top, drawn in one colour. A comment.
+        text,
+        /// Unified diff. Read from the top, and its signs coloured - a grey
+        /// diff is most of the way to no diff.
+        diff,
+        /// A terminal's screen. Read from the *bottom*, because the last
+        /// lines are the live ones, and drawn in one colour: a `+` at the
+        /// start of a line someone's shell printed means nothing.
+        log,
+    } = .text,
     /// A number this row *is*, as against a number that appears in its label.
     ///
     /// The turn list's rows carry an age and two counts, so fuzzy-matching `2`

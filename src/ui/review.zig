@@ -200,6 +200,13 @@ pub const Review = struct {
         return p.diff.files;
     }
 
+    /// The raw `git diff` output the current generation was parsed from.
+    /// Empty when nothing has been parsed yet.
+    pub fn raw(self: *const Review) []const u8 {
+        const p = self.parsed orelse return "";
+        return p.raw;
+    }
+
     pub fn fileAt(self: *const Review, index: u32) ?*diff.FileDiff {
         const fs = self.files();
         if (index >= fs.len) return null;

@@ -104,6 +104,7 @@ being reviewed.
 
 | Key | Default | |
 |---|---|---|
+| `preview` | `true` | The panel beside a list: the pane picker shows the pane's own screen, the comment list the remark as it was written, the file lists the head of that file's diff. One key for all three - they are the same idea, and a reader who does not want a list explaining itself does not want it three times |
 | `wrap` | `true` | Soft wrap long lines. `zw` toggles it for the session. A wrapped code line's continuation rows start under the line's own indentation, so a run-on reads as one statement rather than as the start of a new one |
 | `icons` | `"unicode"` | `"nerd"`, `"unicode"` or `"ascii"`. Only `nerd` has filetype icons; `ascii` exists for a terminal that would draw the rest as tofu |
 | `comments` | `"marker"` | `"marker"` is the gutter dot alone; `"inline"` folds the comment text under the line it belongs to |

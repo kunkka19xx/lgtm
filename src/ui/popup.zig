@@ -290,6 +290,21 @@ pub const preview_rows_max: u16 = 8;
 pub const preview_rows_min: u16 = 3;
 const list_min_rows: u16 = 4;
 
+/// What a panel *beside* the list may grow to.
+///
+/// Far more than the stacked ceiling, because the two are paying for
+/// different things. A stacked panel spends rows the list wanted, so eight is
+/// as much as it can justify. A panel beside the list spends none: it fills
+/// the height the box already has, and the only reason the box was that tall
+/// was the length of the list. Eight files therefore bought a seven-line
+/// preview in a thirty-row pane, which is the whole feature working as hard
+/// as it can and still showing almost nothing.
+///
+/// The box grows to whichever of the list and the panel wants more, so this
+/// is a ceiling and not a floor: a two-line preview does not open a twenty-row
+/// box to draw two lines in it.
+pub const preview_rows_beside: u16 = 20;
+
 /// The space the box may float in: the body, or the whole pane in zen mode.
 pub const Area = struct {
     width: u16,
@@ -420,7 +435,7 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     var list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
     // A panel beside the list is as tall as the list, so a short list makes a
     // short panel rather than a box with a hole in it.
-    if (beside > 0) list_rows = @max(list_rows, @min(preview_rows_max, room -| 3));
+    if (beside > 0) list_rows = @max(list_rows, @min(m.preview_lines, room -| 3));
     const width = content + 4;
     const height = list_rows + 3 + (if (under > 0) under + 1 else 0);
     const col = (area.width -| width) / 2;
@@ -606,12 +621,36 @@ test "the preview goes beside the list, or under it, or not at all" {
 
     // Wide: beside. The list keeps the width it would have had and the panel
     // takes what is left, so no row is narrower for having a panel.
+    m.preview_lines = 4;
     const wide = fit(m, 0, .{ .width = 120, .top = 2, .height = 24 }).?;
     try testing.expect(wide.preview_width >= preview_min);
     try testing.expectEqual(one, wide.list_width);
     try testing.expectEqual(wide.col + 2 + wide.content - wide.preview_width, wide.preview_col);
     // Beside means level with the list, so the box has no hole in it.
     try testing.expectEqual(wide.top + 2, wide.preview_top);
+
+    // Beside, the box grows to whichever of the list and the panel wants
+    // more. Eight files in a thirty-row pane bought a seven-line preview,
+    // because the box was only ever as tall as the list - and a panel beside
+    // the list costs the list nothing to make taller.
+    var few = m;
+    few.entries = 8;
+    few.preview_lines = preview_rows_beside;
+    const grown = fit(few, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(preview_rows_beside, grown.preview_rows);
+    try testing.expectEqual(@as(usize, 8), grown.shown);
+
+    // A ceiling, not a floor: two lines do not open a twenty-row box to draw
+    // two lines in it.
+    few.preview_lines = 2;
+    const snug = fit(few, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(@as(u16, 8), snug.preview_rows);
+
+    // And the pane still wins over the ceiling.
+    few.preview_lines = preview_rows_beside;
+    const shallow = fit(few, 0, .{ .width = 120, .top = 0, .height = 14 }).?;
+    try testing.expect(shallow.preview_rows < preview_rows_beside);
+    try testing.expect(shallow.height <= 14);
 
     // A very wide pane does not spend all of it on a terminal nobody reads at
     // a glance.
@@ -946,7 +985,7 @@ fn previewLines(e: frame_mod.FileEntry) u16 {
     var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, e.preview, "\n"), '\n');
     while (it.next()) |_| {
         n += 1;
-        if (n >= preview_rows_max) break;
+        if (n >= preview_rows_beside) break;
     }
     return n;
 }
@@ -970,24 +1009,42 @@ fn drawPreview(f: Frame, box: Box, e: frame_mod.FileEntry) Allocator.Error!void 
     }
     if (e.preview.len == 0 or row >= last) return;
 
-    // Count backwards for the tail that fits, then draw forwards.
+    // A log is read from its end, a diff and a remark from their start. For
+    // the tail, count backwards for the lines that fit and then draw forwards;
+    // for the head, start where the text does and stop when the panel is full.
     const room = last - row;
-    var start = e.preview.len;
-    var lines: u16 = 0;
-    while (lines < room) {
-        const cut = std.mem.lastIndexOfScalar(u8, e.preview[0..start -| 1], '\n');
-        start = if (cut) |n| n + 1 else 0;
-        lines += 1;
-        if (start == 0) break;
+    var start: usize = 0;
+    if (e.preview_kind == .log) {
+        start = e.preview.len;
+        var lines: u16 = 0;
+        while (lines < room) {
+            const cut = std.mem.lastIndexOfScalar(u8, e.preview[0..start -| 1], '\n');
+            start = if (cut) |n| n + 1 else 0;
+            lines += 1;
+            if (start == 0) break;
+        }
     }
 
     var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, e.preview[start..], "\n"), '\n');
     while (it.next()) |raw| {
         if (row >= last) break;
         const line = try path_mod.clip(f.arena, raw, box.preview_width, f.glyphs.ellipsis, f.method());
-        f.put(row, box.preview_col, line, f.theme.comment);
+        f.put(row, box.preview_col, line, previewStyle(f, e, raw));
         row += 1;
     }
+}
+
+/// One line's colour. Only a diff has any: everywhere else a leading `+` is a
+/// character someone typed, and colouring it would be the panel claiming to
+/// understand text it was handed verbatim.
+fn previewStyle(f: Frame, e: frame_mod.FileEntry, line: []const u8) vaxis.Style {
+    if (e.preview_kind != .diff or line.len == 0) return f.theme.comment;
+    return switch (line[0]) {
+        '+' => f.theme.add_sign,
+        '-' => f.theme.del_sign,
+        '@' => f.theme.hunk_id,
+        else => f.theme.comment,
+    };
 }
 
 /// What an empty list says, and why it is two sentences rather than one.

@@ -99,6 +99,14 @@ pub const Ui = struct {
     /// designed for is a split one, and a review that hides the end of a line
     /// is a review of the part that fit.
     wrap: bool = true,
+    /// The panel beside a list: the pane picker draws the pane's own screen
+    /// in it, the comment list the remark as it was written, the file lists
+    /// the head of that file's diff.
+    ///
+    /// One key for all three rather than one each. They are the same idea -
+    /// the row names a thing, the panel shows it - and a reader who does not
+    /// want a list explaining itself does not want it three times.
+    preview: bool = true,
     /// The longest a scroll may take to arrive, in milliseconds. A short jump
     /// finishes sooner: it travels at one screen row per frame, which is the
     /// finest a cell grid can draw, and runs out of rows. Zero is the old
@@ -359,7 +367,9 @@ pub const Loader = struct {
                 } else self.unknownKey(src, line, section, key);
             },
             .ui => {
-                if (std.mem.eql(u8, key, "wrap")) {
+                if (std.mem.eql(u8, key, "preview")) {
+                    self.cfg.ui.preview = self.wantBool(src, line, key, value) orelse return;
+                } else if (std.mem.eql(u8, key, "wrap")) {
                     self.cfg.ui.wrap = self.wantBool(src, line, key, value) orelse return;
                 } else if (std.mem.eql(u8, key, "scroll_ms")) {
                     const n = self.wantInt(src, line, key, value) orelse return;
@@ -774,6 +784,7 @@ pub const starter =
     \\# comments = "marker"       # "marker" is the gutter dot, "inline" the text
     \\# compose = "bottom"        # "bottom", "top", or "centre"
     \\# wrap = true               # soft wrap; zw toggles it for the session
+    \\# preview = true            # the panel beside a list: pane screens, comments, diffs
     \\# tab_width = 4             # columns a tab is drawn as
     \\# scroll_ms = 250           # how long a jump travels; 0 is instant
     \\# cursor_ms = 80            # the same for the cursor
@@ -1189,6 +1200,20 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
     // line was trying to change.
     try testing.expectEqual(theme.byName("dracula").?.add_sign, l.cfg.theme.add_sign);
     try testing.expectEqual(theme.byName("dracula").?.keyword, l.cfg.theme.keyword);
+}
+
+test "previews are on unless the file says otherwise" {
+    var l = loadText(
+        \\[ui]
+        \\preview = false
+    );
+    defer l.deinit();
+    try testing.expect(!l.cfg.ui.preview);
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+
+    var on = loadText("");
+    defer on.deinit();
+    try testing.expect(on.cfg.ui.preview);
 }
 
 test "a template override replaces one string and leaves the rest" {

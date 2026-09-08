@@ -85,6 +85,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer app.deinit();
     app.nav = opts.cfg.nav;
     app.wrap = opts.cfg.ui.wrap;
+    app.list_preview = opts.cfg.ui.preview;
     app.layout = opts.cfg.diff.layout;
     app.split_min_width = opts.cfg.diff.split_min_width;
     app.expand_lines = opts.cfg.diff.expand_lines;

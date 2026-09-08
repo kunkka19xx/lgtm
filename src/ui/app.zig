@@ -341,6 +341,12 @@ pub const App = struct {
     /// Soft wrap, from `ui.wrap` and toggled by `zw`. On, a line wider than
     /// the pane continues on the next screen row; off, it is cut at the edge.
     wrap: bool = true,
+    /// `[ui] preview`. The panel beside a list, on every list that has one to
+    /// draw. Held here rather than read from the config each time for the
+    /// reason `wrap` is: this is the value in force, not the value on disk.
+    /// Named for the panel, not for `preview` above it, which is a file being
+    /// read outside the review.
+    list_preview: bool = true,
     /// `[diff] layout`. `|` overrides it for the session by writing an
     /// explicit value here, which is what "manual wins over auto" is.
     layout: config.Layout = .auto,
@@ -1242,6 +1248,7 @@ pub const App = struct {
                 self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             // One set of list keys, two overlays. Which one they move is the
@@ -1412,6 +1419,59 @@ pub const App = struct {
     /// the list.
     const pane_where_max: usize = 14;
 
+    /// Lines of a file's diff kept for its panel, and the bytes they may not
+    /// exceed.
+    ///
+    /// The line count is what a panel beside the list can draw; the byte cap
+    /// is what stops one minified line from being the whole budget. Both are
+    /// per file and every file gets one, so the ceiling is what bounds a big
+    /// review - and against the raw diff those slices are cut from, already
+    /// held whole in memory, the copies are a fraction.
+    /// Twenty, which is what `popup.preview_rows_beside` will draw. Kept as
+    /// a number here rather than imported: how much text to hold is a
+    /// decision about data, and `ui/app.zig` reaching into the renderer for
+    /// it would be the wrong direction.
+    const preview_lines: usize = 20;
+    const preview_bytes: usize = 1536;
+
+    /// The head of a file's section of the raw `git diff`, from its first
+    /// `@@` line.
+    ///
+    /// A slice and a copy, not a render: `raw_lo`/`raw_hi` already bound each
+    /// file's text, so the panel costs a `memcpy` of at most two kilobytes
+    /// rather than a second renderer. Copied because `raw` lives in the
+    /// review's arena, which every re-diff resets, and this list outlives a
+    /// re-diff - the same reason the paths beside it are copied.
+    ///
+    /// From the first `@@` because the four lines above it - `diff --git`,
+    /// `index`, `---`, `+++` - say what the row already said, and would be
+    /// half of an eight-row panel saying it again.
+    pub fn diffHead(arena: Allocator, raw: []const u8, f: diff.FileDiff) []const u8 {
+        if (f.raw_hi <= f.raw_lo or f.raw_hi > raw.len) return "";
+        const sect = raw[f.raw_lo..f.raw_hi];
+        var at: usize = 0;
+        while (at < sect.len) {
+            const nl = std.mem.indexOfScalarPos(u8, sect, at, '\n') orelse sect.len;
+            if (std.mem.startsWith(u8, sect[at..], "@@")) break;
+            at = nl + 1;
+        }
+        if (at >= sect.len) at = 0; // no hunk header: a rename, a mode change
+
+        var end = at;
+        var lines: usize = 0;
+        while (end < sect.len and lines < preview_lines and end - at < preview_bytes) {
+            const nl = std.mem.indexOfScalarPos(u8, sect, end, '\n') orelse sect.len;
+            end = @min(nl + 1, sect.len);
+            lines += 1;
+        }
+        return arena.dupe(u8, sect[at..end]) catch "";
+    }
+
+    /// Whether a list may draw the panel beside it at all.
+    fn previews(self: *const App) bool {
+        return self.list_preview;
+    }
+
     /// The most of the pane a box with a panel in it may take.
     ///
     /// The file lists are allowed the whole thing, and should be: more files
@@ -1545,8 +1605,9 @@ pub const App = struct {
                 .removed = 0,
                 .in_review = false,
                 .plain = true,
-                .detail = detail,
-                .preview = try arena.dupe(u8, r.preview),
+                .detail = if (self.previews()) detail else "",
+                .preview = if (self.previews()) try arena.dupe(u8, r.preview) else "",
+                .preview_kind = .log,
             });
             if (r.target) at = i;
         }
@@ -1622,6 +1683,8 @@ pub const App = struct {
                 .added = f.added,
                 .removed = f.removed,
                 .status = f.status,
+                .preview = if (self.previews()) diffHead(arena, self.review.raw(), f) else "",
+                .preview_kind = .diff,
             }) catch return;
         }
         if (self.files_purpose == .comments) {
@@ -1662,10 +1725,10 @@ pub const App = struct {
                     // file rather than from it - and the row is clipped rather
                     // than elided towards a file name it does not end with.
                     .icon_path = n.path,
-                    .detail = std.mem.trimEnd(u8, detail, " "),
+                    .detail = if (self.previews()) std.mem.trimEnd(u8, detail, " ") else "",
                     // Copied for the reason the label is: the store is edited
                     // and deleted from while the list is open.
-                    .preview = arena.dupe(u8, n.body) catch "",
+                    .preview = if (self.previews()) arena.dupe(u8, n.body) catch "" else "",
                 }) catch return;
             }
             return;
@@ -1725,6 +1788,10 @@ pub const App = struct {
             self.file_list.totals = self.reviewTotals();
             self.file_list.extra_keys = &.{};
             self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
+            // A panel of its own costs rows. Same ceiling as the other two lists
+            // that have one, for the same reason: opened mid-hunk to answer
+            // something about the hunk.
+            self.file_list.max_share = picker_share;
             self.mode = .finder;
         }
     }
@@ -2610,6 +2677,72 @@ pub const App = struct {
             try testing.expect(std.mem.indexOf(u8, row.path, g.agent_mark) != null);
         }
         try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
+    }
+
+    test "a file row previews the head of its diff, not the header above it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const arena = fx.app.pick_arena.allocator();
+
+        const raw =
+            "diff --git a/a.zig b/a.zig\n" ++
+            "index 1111111..2222222 100644\n" ++
+            "--- a/a.zig\n" ++
+            "+++ b/a.zig\n" ++
+            "@@ -1,3 +1,3 @@\n" ++
+            " const std = @import(\"std\");\n" ++
+            "-const old = 1;\n" ++
+            "+const new = 2;\n";
+        const f: diff.FileDiff = .{
+            .old_path = "a.zig",
+            .new_path = "a.zig",
+            .status = .modified,
+            .raw_lo = 0,
+            .raw_hi = raw.len,
+        };
+
+        // From the first `@@`: the four lines above it say what the row said.
+        const head = App.diffHead(arena, raw, f);
+        try testing.expect(std.mem.startsWith(u8, head, "@@ -1,3 +1,3 @@"));
+        try testing.expect(std.mem.indexOf(u8, head, "diff --git") == null);
+        try testing.expect(std.mem.indexOf(u8, head, "+const new = 2;") != null);
+
+        // A rename or a mode change has no hunk at all, and its own lines are
+        // then the only thing there is to show.
+        const bare = "diff --git a/a.zig b/b.zig\nsimilarity index 100%\n";
+        const none: diff.FileDiff = .{
+            .old_path = "a.zig",
+            .new_path = "b.zig",
+            .status = .renamed,
+            .raw_lo = 0,
+            .raw_hi = bare.len,
+        };
+        try testing.expect(std.mem.startsWith(u8, App.diffHead(arena, bare, none), "diff --git"));
+
+        // A file the parser never gave a range is not guessed at.
+        try testing.expectEqualStrings("", App.diffHead(arena, raw, .{
+            .old_path = "a.zig",
+            .new_path = "a.zig",
+            .status = .modified,
+        }));
+    }
+
+    test "previews can be turned off, and then no list builds one" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        _ = try fx.app.comments.add("src/net.zig", 47, "a remark");
+        fx.app.list_preview = false;
+        fx.app.files_purpose = .comments;
+        fx.app.buildPickList();
+
+        // Not merely hidden at draw time: nothing is copied into the arena
+        // either, which is the point of a setting rather than a branch in the
+        // renderer.
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
+        // The row itself is untouched: the label is what the filter reads.
+        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].path, "a remark") != null);
     }
 
     test "a comment keeps its whole remark for the panel beside the list" {
@@ -3634,6 +3767,7 @@ pub const App = struct {
                 self.file_list.totals = null;
                 self.file_list.extra_keys = &.{};
                 self.file_list.open(0);
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             .compose_send_now => try self.composeSendNow(body),

@@ -247,6 +247,11 @@ assertions" follows behind, because a refactor that merges two checks into one
 looks the same. Zig, Go, Python, JavaScript, TypeScript, Rust and Swift are
 described; anything else stays silent rather than guessing.
 
+Every list draws a panel beside what you are on - the file list shows the head
+of that file's diff, the comment list the remark as you wrote it, the pane
+picker the pane's own screen. It moves to the side in a wide pane and under the
+list in a narrow one, and `[ui] preview = false` turns it off.
+
 ### 6. Get your work back
 
 `lgtm` snapshots the working tree whenever the agent stops writing, into git's
