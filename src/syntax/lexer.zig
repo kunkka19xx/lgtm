@@ -493,10 +493,12 @@ const Scan = struct {
             if (self.i != start and self.def.delim_start[p] and self.startsDelimiter()) break;
 
             if (self.def.blocks == .braces) {
-                if (p == '{') {
+                const opens = p == '{' or (self.def.block_brackets and p == '[');
+                const closes = p == '}' or (self.def.block_brackets and p == ']');
+                if (opens) {
                     self.st.depth += 1;
                     self.confirmPending();
-                } else if (p == '}') {
+                } else if (closes) {
                     self.st.depth -= 1;
                     self.closeBraceSpans();
                 }
@@ -629,6 +631,7 @@ const Scan = struct {
         }
         const set = set_buf[0..set_len];
 
+        var closed = false;
         while (self.i < self.end) {
             self.i = std.mem.indexOfAnyPos(u8, self.text[0..self.end], self.i, set) orelse {
                 self.i = self.end;
@@ -652,11 +655,41 @@ const Scan = struct {
             if (self.matchesClose(spec)) {
                 self.i += spec.close.len + @as(usize, self.st.hashes);
                 self.st.mode = .normal;
+                closed = true;
                 break;
             }
             self.i += 1;
         }
+
+        // Only a literal that opened and closed in this one step can be a key:
+        // a resumed segment has the opener on an earlier line, and an
+        // unterminated one recovered at the newline rather than closing.
+        if (closed and self.def.key_strings and start + spec.open.len < self.i) {
+            if (self.afterColon()) |j| {
+                // Only a key whose value is a block can name the lines under
+                // it, and `confirmPending` reaches the block only on this
+                // line. Testing it here rather than opening a span per key is
+                // what keeps a 10k-line config from appending one entry a
+                // line for spans that are all dropped again.
+                if (self.text[j] == '{' or (self.def.block_brackets and self.text[j] == '[')) {
+                    const name = self.text[start + spec.open.len .. self.i - spec.close.len];
+                    try self.openFn(name, false);
+                }
+                return self.emit(start, self.i, .type_name);
+            }
+        }
         try self.emit(start, self.i, .string);
+    }
+
+    /// `key_strings`: the first byte past the ':' that follows the literal
+    /// which just closed, or null if the next thing on the line is not one.
+    fn afterColon(self: Scan) ?usize {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        if (j >= self.end or self.text[j] != ':') return null;
+        j += 1;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        return if (j < self.end) j else null;
     }
 
     fn matchesClose(self: Scan, spec: StringSpec) bool {
@@ -950,6 +983,7 @@ const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
 const html_lang = @import("lang/html.zig");
+const json_lang = @import("lang/json.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
@@ -1648,6 +1682,76 @@ test "an html closing tag still names its element" {
     try expectTiles(runs, src, 0, @intCast(src.len));
     // `/` extends the lookahead that `<` opened rather than ending it.
     try testing.expectEqual(Kind.type_name, kindOf(runs, src, "footer").?);
+}
+
+test "json keys are told apart from their values" {
+    const src =
+        \\{
+        \\  "name": "lgtm",
+        \\  "version": 3,
+        \\  "private": true,
+        \\  "url": "https://example.com/a//b"
+        \\}
+        \\
+    ;
+    var lx: Lexer = .init(&json_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "\"name\"").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"lgtm\"").?);
+    try testing.expectEqual(Kind.number, kindOf(runs, src, "3").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "true").?);
+    // The `//` of a URL is inside the literal before any comment opener is
+    // tried, so the value stays one string and the line does not go grey.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "//b").?);
+}
+
+test "a json key names the lines under its block" {
+    const src =
+        \\{
+        \\  "scripts": {
+        \\    "build": "zig build",
+        \\    "test": "zig build test"
+        \\  },
+        \\  "files": [
+        \\    "src",
+        \\    "README.md"
+        \\  ]
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&json_lang.def);
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+
+    try testing.expectEqualStrings("scripts", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("scripts", st.enclosingFn(3).?.name);
+    // An array is a block too, or every list-valued key would name nothing.
+    try testing.expectEqualStrings("files", st.enclosingFn(6).?.name);
+    // A scalar key opens no span, so the brace lines outside every block are
+    // unnamed rather than named by the key above them.
+    try testing.expect(st.enclosingFn(0) == null);
+}
+
+test "a json string that is not a key stays a string" {
+    const src =
+        \\{
+        \\  "list": ["a", "b"],
+        \\  "note": "key: value"
+        \\}
+        \\
+    ;
+    var lx: Lexer = .init(&json_lang.def);
+    const runs = try lx.lexAll(testing.allocator, src);
+    defer testing.allocator.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"a\"").?);
+    // A colon inside the literal is not the one that follows it.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"key: value\"").?);
 }
 
 test "an unterminated string recovers at the end of the line" {

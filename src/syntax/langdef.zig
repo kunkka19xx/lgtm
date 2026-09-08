@@ -118,6 +118,17 @@ pub const LangDef = struct {
     /// lookahead, like `fn_decl`, but it names an element rather than a
     /// function, so it is typed `.type_name` and opens no span.
     angle_tags: bool = false,
+    /// JSON: a string literal with a ':' after it is an object key, not a
+    /// value. Typed `.type_name` so a config file reads as `key: value`
+    /// instead of one flat green, and it opens a span the way `fn_decl_body`
+    /// does - unconfirmed until a block opens on the same line, so
+    /// `"deps": {` names the lines under it and `"name": "lgtm"` names
+    /// nothing. That is the only enclosing name JSON has.
+    key_strings: bool = false,
+    /// JSON: '[' and ']' count toward block depth as braces do. Only safe in a
+    /// language with no indexing, which is why it is a flag: `a[0]` would
+    /// otherwise open a block that never closes on the line it opened.
+    block_brackets: bool = false,
 
     // -- what a test looks like ---------------------------------------------
     //

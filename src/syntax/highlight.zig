@@ -36,6 +36,7 @@ const javascript_lang = @import("lang/javascript.zig");
 const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
 const html_lang = @import("lang/html.zig");
+const json_lang = @import("lang/json.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -52,6 +53,7 @@ pub const languages = [_]*const LangDef{
     &typescript_lang.def,
     &css_lang.def,
     &html_lang.def,
+    &json_lang.def,
 };
 
 /// Extension match, lower-cased. Everything unrecognised renders plain.
