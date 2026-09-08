@@ -99,13 +99,10 @@ pub const Ui = struct {
     /// designed for is a split one, and a review that hides the end of a line
     /// is a review of the part that fit.
     wrap: bool = true,
-    /// The panel beside a list: the pane picker draws the pane's own screen
-    /// in it, the comment list the remark as it was written, the file lists
-    /// the head of that file's diff.
-    ///
-    /// One key for all three rather than one each. They are the same idea -
-    /// the row names a thing, the panel shows it - and a reader who does not
-    /// want a list explaining itself does not want it three times.
+    /// The panel beside a list: a pane's own screen, a comment as it was
+    /// written, the head of a file's diff. One key for all three - they are
+    /// the same idea, and a reader who does not want a list explaining itself
+    /// does not want it three times.
     preview: bool = true,
     /// The longest a scroll may take to arrive, in milliseconds. A short jump
     /// finishes sooner: it travels at one screen row per frame, which is the

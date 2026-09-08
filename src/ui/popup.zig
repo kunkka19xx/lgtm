@@ -250,59 +250,34 @@ pub const Metrics = struct {
     /// box past most panes. The grid is kept because a narrow list is the same
     /// code with `cols` of one.
     max_cols: u16 = 1,
-    /// The selected row has something to show beside the list. Only the pane
-    /// picker sets it; everywhere else the panel is not asked for and `fit`
-    /// returns the geometry it always did.
+    /// The selected row has something to show beside the list.
     preview: bool = false,
-    /// Rows the selected row's panel would like, before the bounds below.
-    /// Measured by the caller, which is the only one holding the text.
+    /// Rows its panel wants, before the bounds below. Measured by the caller,
+    /// which is the only one holding the text.
     preview_lines: u16 = 0,
-    /// Columns the text area may not go under, before the pane's own limit.
-    /// Zero lets the box be exactly as wide as its widest row, which is what
-    /// the `?` popup wants and what a list of paths does not - see
-    /// `min_list_width`.
+    /// Columns the text area may not go under. Zero fits the widest row
+    /// exactly, which is what the `?` popup wants and a list of paths does
+    /// not - see `min_list_width`.
     min_content: u16 = 0,
-    /// The most of the pane the box may take, as a percentage. A hundred is
-    /// every list but the panes: the `?` popup wants its twenty-three rows,
-    /// and a file list showing more files is a file list doing its job.
-    ///
-    /// The pane picker is the one that does not. It is opened from the middle
-    /// of reading a diff to answer "which of these is my agent", and a box
-    /// that covers the diff to answer it has taken away the thing the reader
-    /// was about to talk about. What it cannot show scrolls, which is what
-    /// `+N more` is for.
+    /// The most of the pane the box may take, as a percentage. Under a
+    /// hundred only for the lists opened from the middle of a hunk, where a
+    /// box covering the hunk hides what the reader is about to talk about.
     max_share: u8 = 100,
 };
 
-/// Narrowest panel worth drawing, and the widest worth spending on one. Below
-/// the first every line is a stub; past the second the list is being starved
-/// to show more of a terminal than anyone reads at a glance.
+/// Narrowest panel worth drawing, and the widest worth spending on one.
 pub const preview_min: u16 = 26;
 pub const preview_max: u16 = 64;
-/// What a stacked panel may take, and the fewest list rows worth keeping above
-/// one. A panel that pushed the list down to two rows would have answered
-/// "what is this" by taking away "which are there".
-///
-/// A floor as well as a ceiling: a panel one row tall is a sliver that reads
-/// as a rendering fault rather than as a small answer, and a pane with one
-/// line on it still deserves the shape that says "this is what it is showing".
+/// What a stacked panel may take, and the fewest list rows worth keeping
+/// above one. A floor as well as a ceiling: one row reads as a fault rather
+/// than as a small answer.
 pub const preview_rows_max: u16 = 8;
 pub const preview_rows_min: u16 = 3;
 const list_min_rows: u16 = 4;
 
-/// What a panel *beside* the list may grow to.
-///
-/// Far more than the stacked ceiling, because the two are paying for
-/// different things. A stacked panel spends rows the list wanted, so eight is
-/// as much as it can justify. A panel beside the list spends none: it fills
-/// the height the box already has, and the only reason the box was that tall
-/// was the length of the list. Eight files therefore bought a seven-line
-/// preview in a thirty-row pane, which is the whole feature working as hard
-/// as it can and still showing almost nothing.
-///
-/// The box grows to whichever of the list and the panel wants more, so this
-/// is a ceiling and not a floor: a two-line preview does not open a twenty-row
-/// box to draw two lines in it.
+/// What a panel *beside* the list may grow to. Larger than the stacked bound
+/// because beside it costs the list no rows: it fills height the box has.
+/// A ceiling, not a floor - the box takes whichever of the two wants more.
 pub const preview_rows_beside: u16 = 20;
 
 /// The space the box may float in: the body, or the whole pane in zen mode.
@@ -330,12 +305,11 @@ pub const Box = struct {
     /// Width of the text area, and of one column of the grid inside it.
     content: u16,
     column: u16,
-    /// Columns the rows themselves may use. Narrower than `content` only when
-    /// a panel sits beside them; every other list has the whole width and
-    /// never has to know the field exists.
+    /// Columns the rows may use. Narrower than `content` only with a panel
+    /// beside them.
     list_width: u16,
-    /// The preview panel, in columns of `content` and rows of the list area.
-    /// Zero width when there is none, which is every list but the panes.
+    /// The panel, in columns of `content` and rows of the list area. Zero
+    /// width when there is none.
     preview_col: u16 = 0,
     preview_width: u16 = 0,
     preview_top: u16 = 0,
@@ -345,17 +319,10 @@ pub const Box = struct {
 /// Columns between the key and its description, and between two columns.
 pub const gap: u16 = 2;
 
-/// The floor under a list of paths, in columns of text.
-///
-/// Without one the box is exactly as wide as its widest row, so a review of
-/// `src/main.zig` and `build.zig` opened a box narrower than its own footer -
-/// and every keystroke of the filter resized it, because the widest row kept
-/// changing under the reader's hands. A list that jumps about while being
-/// narrowed is a list that is hard to aim at.
-///
-/// Forty-eight of the eighty columns a split tmux pane has. Wider panes are
-/// not spent on it: this is a floor, not a share, and a list of short names
-/// has no use for a hundred columns.
+/// The floor under a list of paths. Without one the box tracks its widest row
+/// and resizes on every keystroke of the filter, which is hard to aim at.
+/// Forty-eight of the eighty columns a split pane has, and a floor rather than
+/// a share: a list of short names has no use for a wider one.
 pub const min_list_width: u16 = 48;
 
 /// The whole geometry, as a pure function of the measurements. Null when there
@@ -384,10 +351,8 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
         content = @min(max_content, one);
     }
 
-    // The panel goes beside the list where the width allows and under it
-    // where only the height does. Beside is the better of the two - the list
-    // keeps every row it had - so it is tried first, and the fallback is a
-    // fallback rather than a narrow-screen design of its own.
+    // Beside where the width allows, under where only the height does.
+    // Beside first: the list keeps every row it had.
     var beside: u16 = 0;
     if (m.preview and cols == 1 and max_content >= one + gap + preview_min) {
         beside = @min(preview_max, max_content - one - gap);
@@ -395,26 +360,19 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     }
 
     // Rows: two borders and the filter line are chrome; the rest is the list.
-    //
-    // Out of the share the box is allowed rather than out of the pane, so a
-    // ceiling applies to the whole box - a list capped on its own would still
-    // fill the screen once a panel was under it. Six rows is the floor
-    // whatever the share says, or a tall enough ceiling on a short enough
-    // pane would leave no list at all.
+    // Measured out of the share the box is allowed, not out of the pane: a
+    // list capped alone would still fill the screen with a panel under it.
+    // Six is the floor whatever the share says, or there is no list at all.
     const room: u16 = if (m.max_share >= 100)
         area.height
     else
         @max(6, @as(u16, @intCast(@as(u32, area.height) * m.max_share / 100)));
     var list_max = room -| 3;
     if (list_max == 0) return null;
-    // Stacked, only when there was no room beside and taking the rows still
-    // leaves a list worth reading. A rule and the panel under it.
-    //
-    // Sized to what the selection actually has to show, between the two
-    // bounds: a `zsh` pane with a prompt on it was taking eight rows to draw
-    // three, and five rows of nothing under a list is the box looking broken.
-    // The room it is *allowed* is what the list is measured against, though,
-    // so the list does not grow and shrink as the selection moves.
+    // Stacked, only when there was no room beside and the rows it takes still
+    // leave a list worth reading. Sized to what the selection has to show;
+    // the list is measured against what the panel is *allowed*, so its height
+    // does not follow the selection.
     var under: u16 = 0;
     if (m.preview and beside == 0 and list_max >= list_min_rows + preview_rows_max + 1) {
         under = std.math.clamp(m.preview_lines, preview_rows_min, preview_rows_max);
@@ -439,10 +397,8 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     const width = content + 4;
     const height = list_rows + 3 + (if (under > 0) under + 1 else 0);
     const col = (area.width -| width) / 2;
-    // Placed as though the panel were always as tall as it may be. A centred
-    // box whose height follows the selection walks up and down the screen as
-    // the reader moves, taking the list with it - so the top is pinned to the
-    // tallest the box could be and only its bottom edge moves.
+    // Pinned to the tallest the box could be: a centred box whose height
+    // followed the selection would walk up the screen, taking the list.
     const height_max = list_rows + 3 + (if (under > 0) preview_rows_max + 1 else 0);
     const top = area.top + (area.height -| height_max) / 2;
     return .{
@@ -630,9 +586,7 @@ test "the preview goes beside the list, or under it, or not at all" {
     try testing.expectEqual(wide.top + 2, wide.preview_top);
 
     // Beside, the box grows to whichever of the list and the panel wants
-    // more. Eight files in a thirty-row pane bought a seven-line preview,
-    // because the box was only ever as tall as the list - and a panel beside
-    // the list costs the list nothing to make taller.
+    // more: a panel there costs the list no rows.
     var few = m;
     few.entries = 8;
     few.preview_lines = preview_rows_beside;
@@ -652,8 +606,7 @@ test "the preview goes beside the list, or under it, or not at all" {
     try testing.expect(shallow.preview_rows < preview_rows_beside);
     try testing.expect(shallow.height <= 14);
 
-    // A very wide pane does not spend all of it on a terminal nobody reads at
-    // a glance.
+    // A very wide pane is not all spent on the panel.
     const huge = fit(m, 0, .{ .width = 400, .top = 2, .height = 24 }).?;
     try testing.expectEqual(preview_max, huge.preview_width);
 
@@ -666,10 +619,8 @@ test "the preview goes beside the list, or under it, or not at all" {
     // The list is still a list: the panel took rows it could spare.
     try testing.expect(tall.shown >= list_min_rows);
 
-    // A pane with two lines on it takes the floor, not the ceiling - and the
-    // list keeps exactly the rows it had, because it is measured against what
-    // the panel is allowed rather than what it took. That is what stops the
-    // list changing height as the selection moves.
+    // Two lines take the floor, not the ceiling - and the list keeps the rows
+    // it had, being measured against what the panel is allowed.
     m.preview_lines = 2;
     const short = fit(m, 0, .{ .width = 40, .top = 2, .height = 24 }).?;
     try testing.expectEqual(preview_rows_min, short.preview_rows);
@@ -823,16 +774,15 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         m.keys = @max(m.keys, lead + f.win.gwidth(e.path));
         m.desc = @max(m.desc, countsWidth(e));
     }
-    // Asked for by the rows themselves rather than by a flag on the view: a
-    // list whose selection has something to show is a list that wants a panel,
-    // and every other list leaves the field empty and gets the old geometry.
+    // Asked for by the rows, not by a flag on the view: a selection with
+    // something to show is a list that wants a panel.
     const shown_sel = @min(v.index, entries.len -| 1);
     const detail: ?frame_mod.FileEntry = if (entries.len > 0) entries[shown_sel] else null;
     m.preview = if (detail) |d| d.preview.len > 0 or d.detail.len > 0 else false;
     if (detail) |d| m.preview_lines = previewLines(d);
     m.max_share = v.max_share;
-    // Every list this widget draws, not one of them: three lists of paths
-    // that each settled on a different width would read as three widgets.
+    // Every list this widget draws: three that settled on different widths
+    // would read as three widgets.
     m.min_content = min_list_width;
 
     // No tabs: the file list is one list. A `Footer` with no marked span

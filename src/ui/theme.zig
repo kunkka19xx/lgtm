@@ -81,19 +81,15 @@ pub const Glyphs = struct {
     /// "several of these" rather than as one more of them.
     run_mark: []const u8,
 
-    /// A pane in the picker that is running something other than a shell, an
-    /// editor or a pager - which is the only evidence there is that it holds
-    /// an agent.
+    /// A pane running something that is not a shell, an editor or a pager -
+    /// the only evidence there is that it holds an agent.
     ///
-    /// An asterisk in both sets, where a dot would have looked better. The
-    /// mark is part of the row's text, so the filter reaches it - and a mark
-    /// nobody can type is a mark nobody can filter by. `*` narrows the list
-    /// to the agents; `\u{25cf}` would have needed a keyboard that has one.
+    /// An asterisk in both sets, where a dot would look better: the mark is
+    /// part of the row's text, so `*` narrows the list to the agents and a
+    /// glyph nobody can type could not.
     agent_mark: []const u8,
 
-    /// The pane sends currently go to. Takes precedence over `agent_mark` in
-    /// the one column they share, because "where it already goes" is what the
-    /// reader opened the picker to check.
+    /// The pane sends currently go to.
     target_mark: []const u8,
 
     ellipsis: []const u8,

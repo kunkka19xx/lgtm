@@ -73,14 +73,12 @@ pub fn elideFront(
     return elide(arena, text, max, ell, method);
 }
 
-/// `text` fitted into `max` columns by dropping the *tail*, which is what a
-/// terminal would have done anyway.
+/// `text` fitted into `max` columns by dropping the *tail*.
 ///
-/// For a row that is not a path. `elide` protects the file name by eating the
-/// middle, and a composed row - `%604  lgtm:1.0  claude  fixing the parser` -
-/// has no file name to protect: eating its middle takes the columns that made
-/// it a table and leaves `%604  lgtm:1.0…fixing the parser`, which is worse
-/// than a clean cut. The front is where the identity is, so the front stays.
+/// For a row that is not a path. `elide` protects a file name by eating the
+/// middle; a composed row - `%604  lgtm:1.0  claude  fixing the parser` - has
+/// none to protect, and eating its middle takes the columns that made it a
+/// table. The front is where the identity is, so the front stays.
 pub fn clip(
     arena: Allocator,
     text: []const u8,

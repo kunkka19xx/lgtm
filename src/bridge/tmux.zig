@@ -42,11 +42,9 @@ pub const Pane = struct {
     /// binary have the same `command` and nothing else to tell them apart;
     /// where they are is the first thing that does.
     where: []const u8 = "",
-    /// The session name alone, which is `where` up to its ':'. Split here
-    /// rather than by the caller because `session:window.pane` is this file's
-    /// own format string, and nothing above `bridge/` should have to know it.
-    /// The picker groups by it: panes of one session belong together on
-    /// screen, whatever each is running.
+    /// The session name alone. Split here rather than by the caller because
+    /// `session:window.pane` is this file's own format string. The picker
+    /// groups by it.
     session: []const u8 = "",
     /// `#{pane_title}`, which is what most agents write their current task
     /// into - and so the field that makes a list of five identical commands
@@ -89,18 +87,15 @@ pub fn listArgv(arena: Allocator, all_sessions: bool) Allocator.Error![]const []
 /// to not know a format variable prints it back verbatim, and losing one pane
 /// from a picker is better than losing the picker.
 ///
-/// The rest are optional for the same reason, and they come last so that they
-/// can be: a tmux that answers three fields still drives inference, which only
-/// ever needed the id. The title takes everything remaining, tabs included,
-/// because it is a user's sentence and not a field this wrote.
+/// The rest are optional for the same reason and come last so that they can
+/// be: three fields still drive inference, which only ever needed the id. The
+/// title takes everything remaining, tabs included, because it is a user's
+/// sentence.
 ///
-/// `#{window_panes}` decides whether `.pane` is worth printing. In a window
-/// with one pane it is always `.0` and says nothing, and thirteen rows of a
-/// fifteen-row picker ending in `.0` read as a decimal point rather than as
-/// tmux's `window.pane`. Dropped there, kept where a window really is split -
-/// so the suffix appearing is itself the row saying so. A tmux too old to
-/// know the variable prints it back verbatim, which is not `1`, so the
-/// suffix stays and nothing is lost.
+/// `#{window_panes}` decides whether `.pane` is worth printing: in an unsplit
+/// window it is always `.0`, and a column of them reads as a decimal point
+/// rather than as `window.pane`. A tmux too old to know the variable prints
+/// it back verbatim, which is not `1`, so the suffix stays.
 pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
     var panes: std.ArrayList(Pane) = .empty;
     var lines = std.mem.tokenizeScalar(u8, out, '\n');
@@ -133,23 +128,15 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
 
 /// A capture of every listed pane, in one subprocess.
 ///
-/// The picker's rows say `%604`, which identifies a pane to tmux and to nobody
-/// else. What a reader recognises is what the pane is *showing* - a splash
-/// screen, a prompt, an agent halfway through a sentence - so the picker shows
-/// them that and the id stops having to carry the whole job.
-///
-/// One process for all of them, not one each: tmux takes a command sequence,
-/// so fifteen panes cost a single fork. Measured at 7 ms for the whole batch,
-/// which is why this happens when the picker opens rather than on every
-/// keystroke, with no debounce and no second event to wire.
+/// What a reader recognises about a pane is what it is showing, not its id.
+/// One process for all of them: tmux takes a command sequence, so fifteen
+/// panes cost a single fork - 7 ms measured, which is why this runs when the
+/// picker opens rather than on every keystroke.
 const capture_output_max = 1 << 20;
 
-/// Sections are split on a line the panes cannot be showing. A pane can
-/// display any fixed string - including one out of this file, if what it is
-/// running is an agent editing this file - so the marker carries a nonce and
-/// the split is checked against the number of panes asked for. A capture that
-/// does not divide cleanly is dropped whole: a preview of the wrong pane is
-/// worse than no preview.
+/// Sections split on a line the panes cannot be showing. A pane can display
+/// any fixed string - including one out of this file - so the marker carries
+/// a nonce, and the split is checked against the number of panes asked for.
 pub fn captureMarker(buf: []u8, io: std.Io) []const u8 {
     const ts = std.Io.Timestamp.now(io, .real).toNanoseconds();
     const nonce: u64 = @truncate(@as(u96, @bitCast(ts)));
@@ -158,10 +145,9 @@ pub fn captureMarker(buf: []u8, io: std.Io) []const u8 {
 
 /// `capture-pane -p -t %A ; display-message -p <marker> ; capture-pane ...`
 ///
-/// A bare `;` is tmux's own command separator, and in an argv there is no
-/// shell to quote it away from. The marker follows each capture rather than
-/// preceding it, so the split is on what closes a section and the first
-/// section needs no special case.
+/// A bare `;` is tmux's command separator, and an argv has no shell to quote
+/// it away from. The marker follows each capture, so the split is on what
+/// closes a section and the first needs no special case.
 pub fn captureArgv(
     arena: Allocator,
     ids: []const []const u8,
@@ -177,12 +163,9 @@ pub fn captureArgv(
 }
 
 /// The captured text, one slice per id, or null when the output did not split
-/// into exactly that many sections.
-///
-/// Trailing blank lines go: tmux drops the ones at the very bottom of a pane
-/// and keeps the ones above them, so a pane whose last output is halfway up
-/// arrives with a tail of nothing. The reader wants the last thing that was
-/// said, not the empty rows under it.
+/// into exactly that many sections. Trailing blank lines go: tmux keeps the
+/// ones above the bottom, so a pane whose last output is halfway up arrives
+/// with a tail of nothing.
 pub fn parseCaptures(
     arena: Allocator,
     out: []const u8,
@@ -191,9 +174,8 @@ pub fn parseCaptures(
 ) Allocator.Error!?[][]const u8 {
     if (n == 0) return null;
     var caps: std.ArrayList([]const u8) = .empty;
-    // Where the current section began, and where the search is - two cursors,
-    // because a marker that turned out to be part of a line advances only the
-    // second. One cursor let a rejected marker eat the section's own head.
+    // Two cursors: a marker that turned out to be part of a line advances
+    // only the search. One let a rejected marker eat the section's head.
     var at: usize = 0;
     var scan: usize = 0;
     while (std.mem.indexOfPos(u8, out, scan, marker)) |hit| {
@@ -411,7 +393,6 @@ test "a pane listing carries where it is and what it calls itself" {
     try testing.expectEqual(@as(usize, 1), panes.len);
     try testing.expectEqualStrings("%604", panes[0].id);
     try testing.expectEqualStrings("2.1.261", panes[0].command);
-    // Window 3 is split, so which pane of it is worth saying.
     try testing.expectEqualStrings("lgtm:3.0", panes[0].where);
     // The session alone, for the picker's grouping.
     try testing.expectEqualStrings("lgtm", panes[0].session);

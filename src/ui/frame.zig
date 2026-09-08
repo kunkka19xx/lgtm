@@ -387,30 +387,23 @@ pub const FileEntry = struct {
     /// worth having: it is the same argument the file list makes, that shape
     /// and hue together find the one you want without reading a name.
     icon_path: []const u8 = "",
-    /// One line of facts about the row, drawn above `preview`. Where the pane
-    /// picker puts the `%604` its rows no longer carry: an address is not what
-    /// a reader recognises a pane by, but it is what `--pane` wants.
+    /// One line of facts, drawn above `preview`. Where the pane picker keeps
+    /// the id its rows no longer carry.
     detail: []const u8 = "",
-    /// What this row is, shown beside the list rather than described by them.
-    /// A pane picker draws the pane's own screen here, which answers "which
-    /// one is my agent" in a way no amount of columns could. Empty on every
-    /// other list, and an empty one draws no panel.
+    /// What this row is, shown beside the list rather than described by it:
+    /// a pane's own screen, a comment's text, the head of a file's diff.
+    /// Empty draws no panel.
     preview: []const u8 = "",
-    /// What `preview` holds, which decides which end of it is shown and
-    /// whether its lines carry a meaning worth colouring.
-    ///
-    /// An enum rather than two flags because the three lists want three
-    /// different combinations and a pair of booleans would allow a fourth
-    /// that means nothing.
+    /// What `preview` holds: which end of it is shown, and whether its lines
+    /// mean anything worth colouring. An enum rather than two flags, which
+    /// would allow a fourth combination that means nothing.
     preview_kind: enum {
-        /// Prose. Read from the top, drawn in one colour. A comment.
+        /// Prose. From the top, one colour.
         text,
-        /// Unified diff. Read from the top, and its signs coloured - a grey
-        /// diff is most of the way to no diff.
+        /// Unified diff. From the top, signs coloured.
         diff,
-        /// A terminal's screen. Read from the *bottom*, because the last
-        /// lines are the live ones, and drawn in one colour: a `+` at the
-        /// start of a line someone's shell printed means nothing.
+        /// A terminal's screen. From the *bottom*, where the live lines are,
+        /// and uncoloured: a `+` a shell printed means nothing.
         log,
     } = .text,
     /// A number this row *is*, as against a number that appears in its label.
@@ -428,8 +421,8 @@ pub const FilesView = struct {
     entries: []const FileEntry,
     /// Extra keys for this list, drawn in its footer beside the shared ones.
     extra_keys: []const keytext.HelpEntry = &.{},
-    /// Whether to keep the columns before each row for the "you are here"
-    /// mark and the filetype icon. False on a list whose rows are neither.
+    /// Keep the columns before each row for the "you are here" mark and the
+    /// filetype icon. False on a list whose rows are neither.
     gutter: bool = true,
     /// The most of the pane this list's box may take, as a percentage.
     max_share: u8 = 100,
