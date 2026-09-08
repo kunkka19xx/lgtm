@@ -52,6 +52,8 @@ pub const Files = struct {
     /// was already fighting for width. Set by whoever opens the list, not
     /// derived from the rows, so it cannot change while the reader filters.
     gutter: bool = true,
+    /// The most of the pane this list's box may take, as a percentage.
+    max_share: u8 = 100,
     /// The whole change, for the top border. Set by the caller that knows
     /// which list this is: a project browse or a comment list has no total
     /// worth drawing, and `null` is how they say so.
@@ -65,8 +67,9 @@ pub const Files = struct {
         // Restored here rather than set by each opener: there are six of them
         // and the seventh would inherit whatever the last one left behind. A
         // list that wants no gutter says so after opening; the rest say
-        // nothing and get one.
+        // nothing and get one. Same for the ceiling below it.
         self.gutter = true;
+        self.max_share = 100;
     }
 
     pub fn close(self: *Files) void {
@@ -154,6 +157,7 @@ pub const Files = struct {
             .title = self.title,
             .extra_keys = self.extra_keys,
             .gutter = self.gutter,
+            .max_share = self.max_share,
             .query = filter,
             .index = self.index,
             .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),

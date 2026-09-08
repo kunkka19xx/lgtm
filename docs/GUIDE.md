@@ -195,7 +195,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>c` | write a comment on this line — on removed code too |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
-| `<Space>lc` | list every comment; the filter reaches the file, the line and the text |
+| `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the one you are on as you wrote it |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |

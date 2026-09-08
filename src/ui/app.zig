@@ -1024,6 +1024,10 @@ pub const App = struct {
                 // from the keymap, so a remap moves them.
                 self.file_list.extra_keys = self.commentListKeys(self.pick_arena.allocator());
                 self.file_list.open(0);
+                // After `open`, which restores the default: a panel of its own
+                // costs rows, and this list is opened from the middle of a
+                // review for the same reason the pane picker is.
+                self.file_list.max_share = picker_share;
                 self.mode = .finder;
             },
             .comment_send => try self.commentSend(),
@@ -1408,6 +1412,22 @@ pub const App = struct {
     /// the list.
     const pane_where_max: usize = 14;
 
+    /// The most of the pane a box with a panel in it may take.
+    ///
+    /// The file lists are allowed the whole thing, and should be: more files
+    /// on screen is the file list working. The pane picker and the comment
+    /// list are different because of when they are opened - in the middle of
+    /// reading a hunk, to answer something about that hunk. A box that covers
+    /// the hunk to answer it has taken away what the reader was about to talk
+    /// about. What does not fit scrolls, and `+N more` says how much.
+    ///
+    /// Eighty rather than something rounder. Seventy read well in a wide pane
+    /// and badly in a narrow one, because a stacked panel spends nine rows
+    /// before the list gets any: the box came out of a thirty-two row pane
+    /// showing six panes out of sixteen. Eighty leaves seven rows of diff and
+    /// still shows most of the list.
+    const picker_share: u8 = 80;
+
     fn shortWhere(arena: Allocator, where: []const u8, ell: []const u8, ell_w: usize) Allocator.Error![]const u8 {
         // ASCII from the multiplexer, so bytes are columns.
         if (where.len <= pane_where_max) return where;
@@ -1465,12 +1485,17 @@ pub const App = struct {
         // sentence and is last precisely so that it never has to be measured.
         // Shortened first, then measured: padding to the widest of what is
         // drawn, not of what was handed in.
+        //
+        // The id stands in for a backend that reports nothing else. Only tmux
+        // answers where a pane is and what it runs; WezTerm, kitty and herdr
+        // list ids, and a row built from the fields they leave empty would be
+        // a blank line you could still press Enter on.
         const ell = self.glyphs.ellipsis;
         const ell_w = wrap_mod.columns(ell, .{ .method = .unicode });
         const wheres = try arena.alloc([]const u8, ordered.len);
         var w_where: usize = 0;
         for (ordered, wheres) |r, *w| {
-            w.* = try shortWhere(arena, r.where, ell, ell_w);
+            w.* = try shortWhere(arena, if (r.where.len > 0) r.where else r.id, ell, ell_w);
             w_where = @max(w_where, wrap_mod.columns(w.*, .{ .method = .unicode }));
         }
 
@@ -1503,7 +1528,13 @@ pub const App = struct {
                 pad(arena, w_where -| where_w),
                 what,
             });
-            const detail = try std.fmt.allocPrint(arena, "{s}  {s}  {s}", .{ r.id, r.where, r.command });
+            // Only what the row does not already say. A backend that reports
+            // an id and nothing else has the id in the row itself, and a
+            // panel repeating it is a panel opened to say nothing.
+            const detail = if (r.where.len > 0)
+                try std.fmt.allocPrint(arena, "{s}  {s}  {s}", .{ r.id, r.where, r.command })
+            else
+                "";
             const id = try arena.dupe(u8, r.id);
             try self.pane_ids.append(self.gpa, id);
             try self.pick_list.append(self.gpa, .{
@@ -1531,6 +1562,7 @@ pub const App = struct {
         // No row here is a file: none takes an icon, and `listCurrent` marks
         // none, so the columns those two want are blank on every row.
         self.file_list.gutter = false;
+        self.file_list.max_share = picker_share;
         self.mode = .finder;
     }
 
@@ -1604,16 +1636,36 @@ pub const App = struct {
                 // A stale or already-sent comment has no dot on screen - one
                 // points at code that moved, the other has been handed over -
                 // so a list showing four when two are visible has to say why.
-                const label = switch (n.state) {
-                    .open => std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{ n.path, n.line, body }),
-                    .sent => std.fmt.allocPrint(arena, "{s}:{d}  [sent] {s}", .{ n.path, n.line, body }),
-                    .stale => std.fmt.allocPrint(arena, "{s}:{d}  [stale] {s}", .{ n.path, n.line, body }),
-                } catch continue;
+                const mark = switch (n.state) {
+                    .open => "",
+                    .sent => "[sent] ",
+                    .stale => "[stale] ",
+                };
+                const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
+                    n.path, n.line, mark, body,
+                }) catch continue;
+                // The row keeps the flattened body, because the filter reaches
+                // only what the label holds and typing part of a remark is how
+                // one is found. The panel gets the remark as it was written:
+                // `flatten` puts a paragraph on one line and the buffer above
+                // cuts it at 256 bytes, so a long comment was a first sentence
+                // and no way to read the rest.
+                const detail = std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{
+                    n.path, n.line, mark,
+                }) catch continue;
                 self.pick_list.append(self.gpa, .{
                     .path = label,
                     .added = 0,
                     .removed = 0,
                     .in_review = false,
+                    // The label is composed, so the icon is looked up from the
+                    // file rather than from it - and the row is clipped rather
+                    // than elided towards a file name it does not end with.
+                    .icon_path = n.path,
+                    .detail = std.mem.trimEnd(u8, detail, " "),
+                    // Copied for the reason the label is: the store is edited
+                    // and deleted from while the list is open.
+                    .preview = arena.dupe(u8, n.body) catch "",
                 }) catch return;
             }
             return;
@@ -2558,6 +2610,45 @@ pub const App = struct {
             try testing.expect(std.mem.indexOf(u8, row.path, g.agent_mark) != null);
         }
         try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
+    }
+
+    test "a comment keeps its whole remark for the panel beside the list" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const body = "the retry loop here\nnever backs off, so a flapping\nhost gets hammered";
+        _ = try fx.app.comments.add("src/net.zig", 47, body);
+        fx.app.files_purpose = .comments;
+        fx.app.buildPickList();
+
+        const row = fx.app.pick_list.items[0];
+        // The row keeps the flattened body, because the filter reaches only
+        // what the label holds.
+        try testing.expect(std.mem.indexOf(u8, row.path, "src/net.zig:47") != null);
+        try testing.expect(std.mem.indexOfScalar(u8, row.path, '\n') == null);
+        // The panel gets it as it was written. `flatten` and its 256-byte
+        // buffer turned a paragraph into a first sentence with no way to read
+        // the rest.
+        try testing.expectEqualStrings(body, row.preview);
+        try testing.expectEqualStrings("src/net.zig:47", row.detail);
+    }
+
+    test "a backend that reports only ids still gets a list worth reading" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // WezTerm, kitty and herdr answer ids and nothing else. Built from
+        // the fields they leave empty, every row was a blank line you could
+        // still press Enter on.
+        const rows = [_]App.PaneRow{ .{ .id = "1" }, .{ .id = "12" } };
+        try fx.app.openPanePicker(&rows, null);
+
+        try testing.expectEqualStrings("   1", fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("   12", fx.app.pick_list.items[1].path);
+        // And no panel: the id is already in the row, so one saying it again
+        // would be a panel opened to repeat the list.
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
+        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
     }
 
     test "the picker opens on the pane sends already go to" {

@@ -414,6 +414,8 @@ pub const FilesView = struct {
     /// Whether to keep the columns before each row for the "you are here"
     /// mark and the filetype icon. False on a list whose rows are neither.
     gutter: bool = true,
+    /// The most of the pane this list's box may take, as a percentage.
+    max_share: u8 = 100,
     /// What the box is listing, drawn in its title. The same widget shows the
     /// changed files, every file in the project, and every comment; saying
     /// which spares the reader working it out from the rows.
