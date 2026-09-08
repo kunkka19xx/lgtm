@@ -1358,9 +1358,86 @@ pub const App = struct {
     /// an unchanged file to an agent is the whole point of `@`, and the file
     /// you are looking at is the one you are most likely to name.
     /// One row of the pane picker, in this file's own vocabulary. The loop
-    /// composes these from whatever its bridge knows: `ui/app.zig` never sees
-    /// a multiplexer, and a picker is not the place to start.
-    pub const PaneRow = struct { id: []const u8, label: []const u8 };
+    /// fills these from whatever its bridge knows: `ui/app.zig` never sees a
+    /// multiplexer, and a picker is not the place to start. The fields are
+    /// the parts, not a finished line - ordering and column widths are
+    /// decisions about a list, which is what this file is for.
+    pub const PaneRow = struct {
+        id: []const u8,
+        /// Where the pane is, in whatever the multiplexer calls places.
+        where: []const u8 = "",
+        /// What it is running.
+        command: []const u8 = "",
+        /// What it calls itself. Last, and unpadded: it is a sentence, and it
+        /// is the field worth the leftover width.
+        title: []const u8 = "",
+        /// Which group the row belongs to. Rows sharing one stay together.
+        session: []const u8 = "",
+        /// That group is the one lgtm is running in.
+        here: bool = false,
+        /// Running something that is not a shell, an editor or a pager.
+        agent: bool = false,
+        /// Sends already go here.
+        target: bool = false,
+        /// What the pane is showing, for the panel beside the list.
+        preview: []const u8 = "",
+    };
+
+    /// Which row the list should mark as "you are here", or none.
+    ///
+    /// `file_index` means the file the review is showing, which is a fact
+    /// about a list of files. On a list of panes it marked whichever row
+    /// happened to be at that index, and the mark then argued with the cursor
+    /// about which row was the one in question.
+    pub fn listCurrent(self: *const App) u32 {
+        return switch (self.files_purpose) {
+            .jump, .mention, .browse => self.file_index,
+            .comments, .turns, .panes => std.math.maxInt(u32),
+        };
+    }
+
+    /// The location column's ceiling. `noah-tech-cl-v2:1.0` is nineteen
+    /// columns and three rows of fifteen are that wide, so padding to the
+    /// widest made the other twelve pay for them. Fourteen holds
+    /// `session:W.P` for a session named after a repository, which is what a
+    /// session is usually named after.
+    ///
+    /// The head is what goes, not the tail: `:window.pane` is the part that
+    /// tells the rows of one session apart, and the session is repeated on
+    /// every row of a group anyway. The whole of it is in the panel beside
+    /// the list.
+    const pane_where_max: usize = 14;
+
+    fn shortWhere(arena: Allocator, where: []const u8, ell: []const u8, ell_w: usize) Allocator.Error![]const u8 {
+        // ASCII from the multiplexer, so bytes are columns.
+        if (where.len <= pane_where_max) return where;
+        const colon = std.mem.lastIndexOfScalar(u8, where, ':') orelse where.len;
+        const tail = where[colon..];
+        if (tail.len + ell_w + 1 > pane_where_max) return where[0..pane_where_max];
+        return std.fmt.allocPrint(arena, "{s}{s}{s}", .{
+            where[0 .. pane_where_max - tail.len - ell_w],
+            ell,
+            tail,
+        });
+    }
+
+    /// The picker's order: our own session first, then the other sessions by
+    /// name, then agents ahead of shells inside each, then whatever order the
+    /// multiplexer listed them in.
+    ///
+    /// Grouping outranks agent-ness deliberately. Sorting every agent to the
+    /// top reads as one list of agents and scatters the sessions they belong
+    /// to, and a session is how a reader knows *which* agent - the panes of
+    /// one piece of work sit together on screen or the grouping is not doing
+    /// anything. Within a group the agent is what was being looked for, so it
+    /// leads.
+    fn paneBefore(_: void, a: PaneRow, b: PaneRow) bool {
+        if (a.here != b.here) return a.here;
+        const by_name = std.mem.order(u8, a.session, b.session);
+        if (by_name != .eq) return by_name == .lt;
+        if (a.agent != b.agent) return a.agent;
+        return false;
+    }
 
     /// Opens the picker over a list the loop has already gathered.
     ///
@@ -1376,28 +1453,93 @@ pub const App = struct {
         _ = self.pick_arena.reset(.retain_capacity);
         const arena = self.pick_arena.allocator();
 
-        for (rows) |r| {
-            // Copied for the reason the comment labels are: this list is read
-            // on every keystroke of the filter, and whatever the loop built it
-            // from is gone by then.
-            const label = try arena.dupe(u8, r.label);
+        const ordered = try arena.dupe(PaneRow, rows);
+        // Insertion, not pdq: the tail of the comparison is "the order the
+        // multiplexer gave them", which only a stable sort preserves. A pane
+        // list is tens of rows, so the algorithm is not the cost.
+        std.sort.insertion(PaneRow, ordered, {}, paneBefore);
+
+        // Padded to the widest of each, so the eye runs down a column instead
+        // of hunting along a line. Every field but the title is ASCII from a
+        // multiplexer, so bytes are columns here; the title is a person's
+        // sentence and is last precisely so that it never has to be measured.
+        // Shortened first, then measured: padding to the widest of what is
+        // drawn, not of what was handed in.
+        const ell = self.glyphs.ellipsis;
+        const ell_w = wrap_mod.columns(ell, .{ .method = .unicode });
+        const wheres = try arena.alloc([]const u8, ordered.len);
+        var w_where: usize = 0;
+        for (ordered, wheres) |r, *w| {
+            w.* = try shortWhere(arena, r.where, ell, ell_w);
+            w_where = @max(w_where, wrap_mod.columns(w.*, .{ .method = .unicode }));
+        }
+
+        var at: usize = 0;
+        for (ordered, 0..) |r, i| {
+            // Two marker columns, not one. They were one, with the target
+            // winning, and the agent that sends already went to then lost its
+            // `*` - so filtering by `*` hid the very pane the reader is most
+            // likely to be looking for. Two states, two columns.
+            const target = if (r.target) self.glyphs.target_mark else " ";
+            const agent = if (r.agent) self.glyphs.agent_mark else " ";
+            // One column for what the pane *is*, not two. On an agent row the
+            // command is the noise - `2.1.263` beside a dot that already said
+            // "agent" - and the title is the answer. On a shell row it is the
+            // other way round: the command is `zsh` and the title is whatever
+            // default the terminal set, which is the same string on every one
+            // of them. Picking per row is what buys back the width that made
+            // this list unreadable in a narrow pane.
+            const what = if (r.agent and r.title.len > 0) r.title else r.command;
+            // No `%604`. It identifies a pane to the multiplexer and to
+            // nobody else, it is never typed, and the row has four columns of
+            // better things to say. It survives in `detail`, beside the
+            // preview, for the reader who wants it for `--pane`.
+            const shown_where = wheres[i];
+            const where_w = wrap_mod.columns(shown_where, .{ .method = .unicode });
+            const label = try std.fmt.allocPrint(arena, "{s}{s} {s}{s}  {s}", .{
+                target,
+                agent,
+                shown_where,
+                pad(arena, w_where -| where_w),
+                what,
+            });
+            const detail = try std.fmt.allocPrint(arena, "{s}  {s}  {s}", .{ r.id, r.where, r.command });
             const id = try arena.dupe(u8, r.id);
             try self.pane_ids.append(self.gpa, id);
             try self.pick_list.append(self.gpa, .{
-                .path = label,
+                // A row with no title would otherwise end in the padding that
+                // was there to align a column nothing follows.
+                .path = std.mem.trimEnd(u8, label, " "),
                 .added = 0,
                 .removed = 0,
                 .in_review = false,
                 .plain = true,
+                .detail = detail,
+                .preview = try arena.dupe(u8, r.preview),
             });
+            if (r.target) at = i;
         }
 
         self.pending_send = if (pending) |t| try arena.dupe(u8, t) else null;
         self.file_list.title = " panes ";
         self.file_list.totals = null;
         self.file_list.extra_keys = &.{};
-        self.file_list.open(0);
+        // On the pane sends already go to when there is one, so reconnecting
+        // is a confirmation rather than a search. Otherwise the top, which
+        // the ordering has already made the likeliest answer.
+        self.file_list.open(at);
+        // No row here is a file: none takes an icon, and `listCurrent` marks
+        // none, so the columns those two want are blank on every row.
+        self.file_list.gutter = false;
         self.mode = .finder;
+    }
+
+    /// `n` spaces. The arena is the frame's, and the widest column in a pane
+    /// listing is a handful of bytes.
+    fn pad(arena: Allocator, n: usize) []const u8 {
+        const buf = arena.alloc(u8, n) catch return "";
+        @memset(buf, ' ');
+        return buf;
     }
 
     /// `<CR>` in the picker: connect to that pane, and send what was waiting.
@@ -2255,31 +2397,191 @@ pub const App = struct {
         defer fx.deinit();
 
         const rows = [_]App.PaneRow{
-            .{ .id = "%1", .label = "%1  a:1.0  zsh  shell" },
-            .{ .id = "%7", .label = "%7  a:2.0  claude  reviewing the diff" },
+            .{ .id = "%1", .where = "a:1.0", .command = "zsh", .title = "shell", .session = "a" },
+            .{
+                .id = "%7",
+                .where = "a:2.0",
+                .command = "claude",
+                .title = "reviewing the diff",
+                .session = "a",
+                .agent = true,
+            },
         };
         try fx.app.openPanePicker(&rows, "#3 src/main.zig:12");
 
         try testing.expectEqual(event.Mode.finder, fx.app.mode);
         try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
-        try testing.expectEqualStrings("%7  a:2.0  claude  reviewing the diff", fx.app.pick_list.items[1].path);
+        // The agent leads its session, so the shell handed in first is second
+        // on screen - and the ids move with it.
+        try testing.expectEqualStrings("%7", fx.app.pane_ids.items[0]);
+        try testing.expectEqualStrings("%1", fx.app.pane_ids.items[1]);
         // Rows are labels, not paths: no filetype icon is guessed from one.
         try testing.expect(fx.app.pick_list.items[1].plain);
 
         // Picking asks the loop for two things at once, which is the point:
         // connect, and deliver what the failed send was carrying.
-        fx.app.pickPane(1);
+        fx.app.pickPane(0);
         try testing.expectEqualStrings("%7", fx.app.want_target.?);
         try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
         try testing.expectEqualStrings("#3 src/main.zig:12", fx.app.outgoing.items);
         try testing.expectEqual(event.Mode.normal, fx.app.mode);
     }
 
+    test "the picker groups by session, ours first, agents leading each" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Handed in the order tmux lists them, which is by session name: the
+        // one we are in is in the middle of it.
+        const rows = [_]App.PaneRow{
+            .{ .id = "%566", .where = "look:1.0", .command = "2.1.261", .session = "look", .agent = true },
+            .{ .id = "%665", .where = "look:4.0", .command = "zsh", .session = "look" },
+            .{ .id = "%645", .where = "lgtm:2.0", .command = "zsh", .session = "lgtm", .here = true },
+            .{ .id = "%667", .where = "lgtm:4.0", .command = "zsh", .session = "lgtm", .here = true },
+            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .here = true, .agent = true },
+            .{ .id = "%540", .where = "setting:1.0", .command = "zsh", .session = "setting" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        const want = [_][]const u8{ "%604", "%645", "%667", "%566", "%665", "%540" };
+        for (want, 0..) |id, i| try testing.expectEqualStrings(id, fx.app.pane_ids.items[i]);
+
+        // Our session's three stay together and lead, its agent at the top of
+        // them; the other sessions follow by name, each with its own agent
+        // first. Two shells of one session keep the order tmux gave them.
+    }
+
+    test "a pane row is padded into columns and marked" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .agent = true, .title = "JSON highlighting" },
+            .{ .id = "%7", .where = "lgtm:12.0", .command = "zsh", .title = "kunkka07xx", .session = "lgtm" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // The location is padded to the widest, so the last column starts in
+        // the same place on every row. On the agent that column is its title;
+        // on the shell it is `zsh`, because `kunkka07xx` is the default title
+        // every shell here carries. No `%604`: it is an address, and it moved
+        // to the detail line beside the preview.
+        const first = try std.fmt.allocPrint(
+            testing.allocator,
+            " {s} lgtm:1.0   JSON highlighting",
+            .{fx.app.glyphs.agent_mark},
+        );
+        defer testing.allocator.free(first);
+        try testing.expectEqualStrings(first, fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("   lgtm:12.0  zsh", fx.app.pick_list.items[1].path);
+        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
+    }
+
+    test "what a pane is showing reaches the row that draws it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{.{
+            .id = "%604",
+            .where = "lgtm:1.0",
+            .command = "2.1.263",
+            .title = "JSON highlighting",
+            .session = "lgtm",
+            .agent = true,
+            .preview = "> waiting\n$ zig build test\n",
+        }};
+        try fx.app.openPanePicker(&rows, null);
+
+        // Owned by the pick arena, like the labels: whatever the loop captured
+        // it from is gone by the next frame.
+        try testing.expectEqualStrings("> waiting\n$ zig build test\n", fx.app.pick_list.items[0].preview);
+        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
+
+        // The field defaults empty, so every other list draws no panel and
+        // keeps the geometry it always had.
+        const plain: render.FileEntry = .{ .path = "src/main.zig", .added = 0, .removed = 0 };
+        try testing.expectEqualStrings("", plain.preview);
+        try testing.expectEqualStrings("", plain.detail);
+    }
+
+    test "only a list of files marks a row as the one you are on" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        fx.app.files_purpose = .jump;
+        try testing.expectEqual(fx.app.file_index, fx.app.listCurrent());
+
+        // On a list of panes `file_index` names a file, and the row at that
+        // index is whichever pane happened to land there - a mark that argues
+        // with the cursor about which row is the one in question.
+        fx.app.files_purpose = .panes;
+        try testing.expectEqual(std.math.maxInt(u32), fx.app.listCurrent());
+    }
+
+    test "a long session name loses its head, not the pane it names" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .where = "noah-tech-cl-v2:1.0", .command = "zsh", .session = "noah-tech-cl-v2" },
+            .{ .id = "%2", .where = "noah-tech-cl-v2:2.0", .command = "zsh", .session = "noah-tech-cl-v2" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // Capped, and `:1.0` survives - it is the only thing telling two rows
+        // of one session apart, and the session is repeated on both anyway.
+        const e = fx.app.glyphs.ellipsis;
+        const want = try std.fmt.allocPrint(testing.allocator, "   noah-tech{s}:1.0  zsh", .{e});
+        defer testing.allocator.free(want);
+        try testing.expectEqualStrings(want, fx.app.pick_list.items[0].path);
+        // The whole of it is still one keystroke away, beside the list.
+        try testing.expectEqualStrings("%1  noah-tech-cl-v2:1.0  zsh", fx.app.pick_list.items[0].detail);
+    }
+
+    test "the agent mark survives being the target, so the filter still finds it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .where = "a:1.0", .command = "claude", .session = "a", .agent = true, .target = true },
+            .{ .id = "%2", .where = "a:2.0", .command = "claude", .session = "a", .agent = true },
+            .{ .id = "%3", .where = "a:3.0", .command = "zsh", .session = "a" },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        const g = fx.app.glyphs;
+        // Two columns: where sends go, and whether it is an agent. One column
+        // with the target winning it hid this row from a `*` filter, which is
+        // the row a reader is most likely to want.
+        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[0].path, g.target_mark));
+        for (fx.app.pick_list.items[0..2]) |row| {
+            try testing.expect(std.mem.indexOf(u8, row.path, g.agent_mark) != null);
+        }
+        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
+    }
+
+    test "the picker opens on the pane sends already go to" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const rows = [_]App.PaneRow{
+            .{ .id = "%1", .command = "zsh", .session = "a" },
+            .{ .id = "%2", .command = "zsh", .session = "a", .target = true },
+        };
+        try fx.app.openPanePicker(&rows, null);
+
+        // The marker takes the column an agent dot would have had, and the
+        // cursor starts there rather than at the top.
+        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[1].path, fx.app.glyphs.target_mark));
+        fx.app.pickPane(@intCast(fx.app.file_list.index));
+        try testing.expectEqualStrings("%2", fx.app.want_target.?);
+    }
+
     test "the picker opened by hand sends nothing" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
         try fx.app.openPanePicker(&rows, null);
         fx.app.pickPane(0);
 
@@ -2293,7 +2595,7 @@ pub const App = struct {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        const rows = [_]App.PaneRow{.{ .id = "%2", .label = "%2  b:1.0  bash" }};
+        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
         try fx.app.openPanePicker(&rows, "text");
         fx.app.pickPane(null);
 

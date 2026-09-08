@@ -73,6 +73,28 @@ pub fn elideFront(
     return elide(arena, text, max, ell, method);
 }
 
+/// `text` fitted into `max` columns by dropping the *tail*, which is what a
+/// terminal would have done anyway.
+///
+/// For a row that is not a path. `elide` protects the file name by eating the
+/// middle, and a composed row - `%604  lgtm:1.0  claude  fixing the parser` -
+/// has no file name to protect: eating its middle takes the columns that made
+/// it a table and leaves `%604  lgtm:1.0…fixing the parser`, which is worse
+/// than a clean cut. The front is where the identity is, so the front stays.
+pub fn clip(
+    arena: Allocator,
+    text: []const u8,
+    max: u16,
+    ell: []const u8,
+    method: wrap.Metrics,
+) Allocator.Error![]const u8 {
+    if (wrap.columns(text, method) <= max) return text;
+    const ell_w = wrap.columns(ell, method);
+    if (max <= ell_w) return text[0..wrap.fitFront(text, max, method)];
+    const keep = wrap.fitFront(text, max - ell_w, method);
+    return std.fmt.allocPrint(arena, "{s}{s}", .{ text[0..keep], ell });
+}
+
 pub fn moved(arena: Allocator, old: []const u8, new: []const u8) Allocator.Error![]const u8 {
     const head = commonHead(old, new);
     const tail = commonTail(old, new);
@@ -169,6 +191,30 @@ const test_method: wrap.Metrics = .{ .method = .unicode };
 
 fn check(text: []const u8, max: u16) ![]const u8 {
     return elide(testing.allocator, text, max, "\u{2026}", test_method);
+}
+
+test "a composed row loses its tail, not the columns that made it a table" {
+    var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+    const row = "%604  lgtm:1.0  fixing the json lexer";
+
+    // Fits: returned untouched, and the same bytes rather than a copy.
+    const whole = try clip(arena, row, 40, "...", test_method);
+    try std.testing.expectEqualStrings(row, whole);
+
+    // Does not fit: the front - which is what identifies the pane - survives.
+    const cut = try clip(arena, row, 20, "...", test_method);
+    try std.testing.expectEqualStrings("%604  lgtm:1.0  f...", cut);
+
+    // `elide` would have eaten the middle instead, taking the columns with
+    // it, which is the bug this exists to avoid.
+    const wrong = try elide(arena, row, 20, "...", test_method);
+    try std.testing.expect(!std.mem.eql(u8, cut, wrong));
+
+    // No room even to say something was left out: a bare clip, no ellipsis.
+    const tiny = try clip(arena, row, 2, "...", test_method);
+    try std.testing.expectEqualStrings("%6", tiny);
 }
 
 test "a path that fits is untouched" {

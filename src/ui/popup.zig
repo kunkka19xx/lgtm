@@ -250,7 +250,22 @@ pub const Metrics = struct {
     /// box past most panes. The grid is kept because a narrow list is the same
     /// code with `cols` of one.
     max_cols: u16 = 1,
+    /// The selected row has something to show beside the list. Only the pane
+    /// picker sets it; everywhere else the panel is not asked for and `fit`
+    /// returns the geometry it always did.
+    preview: bool = false,
 };
+
+/// Narrowest panel worth drawing, and the widest worth spending on one. Below
+/// the first every line is a stub; past the second the list is being starved
+/// to show more of a terminal than anyone reads at a glance.
+pub const preview_min: u16 = 26;
+pub const preview_max: u16 = 64;
+/// Rows a stacked panel takes, and the fewest list rows worth keeping above
+/// one. A panel that pushed the list down to two rows would have answered
+/// "what is this" by taking away "which are there".
+pub const preview_rows: u16 = 8;
+const list_min_rows: u16 = 4;
 
 /// The space the box may float in: the body, or the whole pane in zen mode.
 pub const Area = struct {
@@ -277,6 +292,16 @@ pub const Box = struct {
     /// Width of the text area, and of one column of the grid inside it.
     content: u16,
     column: u16,
+    /// Columns the rows themselves may use. Narrower than `content` only when
+    /// a panel sits beside them; every other list has the whole width and
+    /// never has to know the field exists.
+    list_width: u16,
+    /// The preview panel, in columns of `content` and rows of the list area.
+    /// Zero width when there is none, which is every list but the panes.
+    preview_col: u16 = 0,
+    preview_width: u16 = 0,
+    preview_top: u16 = 0,
+    preview_rows: u16 = 0,
 };
 
 /// Columns between the key and its description, and between two columns.
@@ -305,8 +330,26 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
         content = @min(max_content, one);
     }
 
+    // The panel goes beside the list where the width allows and under it
+    // where only the height does. Beside is the better of the two - the list
+    // keeps every row it had - so it is tried first, and the fallback is a
+    // fallback rather than a narrow-screen design of its own.
+    var beside: u16 = 0;
+    if (m.preview and cols == 1 and max_content >= one + gap + preview_min) {
+        beside = @min(preview_max, max_content - one - gap);
+        content = @min(max_content, one + gap + beside);
+    }
+
     // Rows: two borders and the filter line are chrome; the rest is the list.
-    const list_max = area.height - 3;
+    var list_max = area.height - 3;
+    // Stacked, only when there was no room beside and taking the rows still
+    // leaves a list worth reading. A rule and the panel under it.
+    var under: u16 = 0;
+    if (m.preview and beside == 0 and list_max >= list_min_rows + preview_rows + 1) {
+        under = preview_rows;
+        list_max -= under + 1;
+    }
+
     const per_full: usize = (m.entries + cols - 1) / cols;
     var per: usize = @max(@min(per_full, list_max), 1);
     // A row of the list is spent on the "+N more" marker when there is more.
@@ -318,21 +361,31 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     const shown = @min(m.entries -| offset, window);
     const hidden = m.entries - offset - shown;
 
-    const list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
+    var list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
+    // A panel beside the list is as tall as the list, so a short list makes a
+    // short panel rather than a box with a hole in it.
+    if (beside > 0) list_rows = @max(list_rows, @min(preview_rows, area.height -| 3));
     const width = content + 4;
-    const height = list_rows + 3;
+    const height = list_rows + 3 + (if (under > 0) under + 1 else 0);
+    const col = (area.width -| width) / 2;
+    const top = area.top + (area.height -| height) / 2;
     return .{
         .cols = cols,
         .per = per,
         .offset = offset,
         .shown = shown,
         .hidden = hidden,
-        .col = (area.width -| width) / 2,
-        .top = area.top + (area.height -| height) / 2,
+        .col = col,
+        .top = top,
         .width = width,
         .height = height,
         .content = content,
         .column = one,
+        .list_width = if (beside > 0) content - beside - gap else content,
+        .preview_col = if (beside > 0) col + 2 + content - beside else if (under > 0) col + 2 else 0,
+        .preview_width = if (beside > 0) beside else if (under > 0) content else 0,
+        .preview_top = if (beside > 0) top + 2 else if (under > 0) top + 2 + list_rows + 1 else 0,
+        .preview_rows = if (beside > 0) list_rows else under,
     };
 }
 
@@ -486,6 +539,44 @@ test "one column by default, and the grid still fits two when asked" {
     try testing.expect(fit(m, 0, .{ .width = 20, .top = 0, .height = 22 }) == null);
 }
 
+test "the preview goes beside the list, or under it, or not at all" {
+    var m: Metrics = .{ .keys = 10, .desc = 0, .entries = 15, .title = 6, .footer = 40, .preview = true };
+    const one = @max(m.keys + gap + m.desc, 12);
+
+    // Wide: beside. The list keeps the width it would have had and the panel
+    // takes what is left, so no row is narrower for having a panel.
+    const wide = fit(m, 0, .{ .width = 120, .top = 2, .height = 24 }).?;
+    try testing.expect(wide.preview_width >= preview_min);
+    try testing.expectEqual(one, wide.list_width);
+    try testing.expectEqual(wide.col + 2 + wide.content - wide.preview_width, wide.preview_col);
+    // Beside means level with the list, so the box has no hole in it.
+    try testing.expectEqual(wide.top + 2, wide.preview_top);
+
+    // A very wide pane does not spend all of it on a terminal nobody reads at
+    // a glance.
+    const huge = fit(m, 0, .{ .width = 400, .top = 2, .height = 24 }).?;
+    try testing.expectEqual(preview_max, huge.preview_width);
+
+    // Narrow but tall: under, full width, with a row between.
+    const tall = fit(m, 0, .{ .width = 40, .top = 2, .height = 24 }).?;
+    try testing.expectEqual(@as(u16, 0), tall.preview_width -| tall.content);
+    try testing.expectEqual(preview_rows, tall.preview_rows);
+    try testing.expect(tall.preview_top > tall.top + 2);
+    // The list is still a list: the panel took rows it could spare.
+    try testing.expect(tall.shown >= list_min_rows);
+
+    // Narrow and short: neither fits, so the picker is the picker it was.
+    const small = fit(m, 0, .{ .width = 40, .top = 0, .height = 10 }).?;
+    try testing.expectEqual(@as(u16, 0), small.preview_width);
+    try testing.expectEqual(small.content, small.list_width);
+
+    // And a list that asked for nothing gets the geometry it always had.
+    m.preview = false;
+    const plain = fit(m, 0, .{ .width = 120, .top = 2, .height = 24 }).?;
+    try testing.expectEqual(@as(u16, 0), plain.preview_width);
+    try testing.expectEqual(plain.content, plain.list_width);
+}
+
 test "a list too tall keeps a row for the count of what is left" {
     // The marker is not decoration: a silently short list is indistinguishable
     // from a keymap that really is that small.
@@ -549,13 +640,19 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     // a slot that is only sometimes there steps every path beside it one
     // column sideways.
     const icons = f.glyphs.file_icons;
-    const lead: u16 = 2 + @as(u16, if (icons) 2 else 0);
+    const lead: u16 = if (v.gutter) 2 + @as(u16, if (icons) 2 else 0) else 0;
 
     var m: Metrics = .{ .entries = entries.len, .max_cols = 1 };
     for (entries) |e| {
         m.keys = @max(m.keys, lead + f.win.gwidth(e.path));
         m.desc = @max(m.desc, countsWidth(e));
     }
+    // Asked for by the rows themselves rather than by a flag on the view: a
+    // list whose selection has something to show is a list that wants a panel,
+    // and every other list leaves the field empty and gets the old geometry.
+    const shown_sel = @min(v.index, entries.len -| 1);
+    const detail: ?frame_mod.FileEntry = if (entries.len > 0) entries[shown_sel] else null;
+    m.preview = if (detail) |d| d.preview.len > 0 or d.detail.len > 0 else false;
 
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
@@ -597,13 +694,15 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         const e = entries[box.offset + i];
         const on = box.offset + i == sel;
         const bg = if (on) f.theme.cursor_line.bg else null;
-        if (on) f.put(row, text_col - 1, blank[0 .. box.content + 2], f.theme.cursor_line);
+        if (on) f.put(row, text_col - 1, blank[0 .. box.list_width + 2], f.theme.cursor_line);
 
         // The file the review is on is marked rather than merely selected:
         // "where I am" and "what I am pointing at" are different questions,
         // and the list is opened to answer the first.
-        const here = if (e.current) f.glyphs.sep else " ";
-        f.put(row, text_col, here, frame_mod.withBg(f.theme.accent, bg));
+        if (v.gutter) {
+            const here = if (e.current) f.glyphs.sep else " ";
+            f.put(row, text_col, here, frame_mod.withBg(f.theme.accent, bg));
+        }
 
         // The row carries its status in one colour: green arrived, red left,
         // amber changed, blue moved, grey cannot be read. One colour and not
@@ -645,13 +744,19 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         // loses its middle rather than its tail: a terminal clips from the
         // right, and for a path that removes the file name - the one part
         // that says which file this is (`ui/path.zig`).
-        const budget = box.content -| (lead + m.desc + gap);
-        const shown = try path_mod.elide(f.arena, e.path, budget, f.glyphs.ellipsis, f.method());
+        const budget = box.list_width -| (lead + m.desc + gap);
+        // `plain` is the row saying it is not a path, and a row that is not a
+        // path has no name in the middle worth saving - clipping the tail
+        // keeps the columns it was built out of.
+        const shown = if (e.plain)
+            try path_mod.clip(f.arena, e.path, budget, f.glyphs.ellipsis, f.method())
+        else
+            try path_mod.elide(f.arena, e.path, budget, f.glyphs.ellipsis, f.method());
         f.put(row, text_col + lead, shown, on_row);
 
         // Counts right-aligned inside the box, so the paths stay readable as a
         // column even when one of them is very long.
-        const counts_col = text_col + box.content - countsWidth(e);
+        const counts_col = text_col + box.list_width - countsWidth(e);
         if (countsWidth(e) > 0 and counts_col > text_col + lead + f.win.gwidth(shown)) {
             var col = counts_col;
             col += try f.print(row, col, frame_mod.withBg(f.theme.added_count, bg), "+{d}", .{e.added}) + 1;
@@ -664,6 +769,63 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
         f.put(list_top + @as(u16, @intCast(box.per)), text_col, more, f.theme.dim);
     }
     if (entries.len == 0) f.put(list_top, text_col, emptyWhy(v.query), f.theme.dim);
+
+    if (box.preview_width > 0) {
+        // Stacked: a rule where the panel is under the list, because two
+        // blocks of text sharing a box with nothing between them read as one
+        // block that has gone wrong. Nothing beside a panel that sits to the
+        // right: the gap between the columns is already the boundary.
+        if (box.preview_col == text_col and box.preview_top > list_top) {
+            // Sized in columns and allocated in bytes: the rule glyph is one
+            // column and three bytes, and using the byte count for both drew
+            // a third of a rule.
+            const g = f.glyphs.gap;
+            const rule = try f.arena.alloc(u8, @as(usize, box.list_width) * g.len);
+            var at: usize = 0;
+            while (at < rule.len) : (at += g.len) @memcpy(rule[at..][0..g.len], g);
+            f.put(box.preview_top - 1, text_col, rule, f.theme.rule);
+        }
+        if (detail) |d| try drawPreview(f, box, d);
+    }
+}
+
+/// The panel: one line of facts, then what the thing itself is showing.
+///
+/// The tail, not the head. A pane's screen is a log, and the last lines are
+/// what it is doing now - which is the question the panel is here to answer.
+/// Dimmed, because it is evidence rather than a list to move through, and the
+/// selection has to stay the brightest thing in the box.
+fn drawPreview(f: Frame, box: Box, e: frame_mod.FileEntry) Allocator.Error!void {
+    var row = box.preview_top;
+    const last = box.preview_top + box.preview_rows;
+    if (e.detail.len > 0 and row < last) {
+        const line = try path_mod.clip(f.arena, e.detail, box.preview_width, f.glyphs.ellipsis, f.method());
+        f.put(row, box.preview_col, line, f.theme.dim);
+        row += 1;
+        // A blank between the facts and the screen, when there is a screen and
+        // room to separate them.
+        if (e.preview.len > 0 and row < last) row += 1;
+    }
+    if (e.preview.len == 0 or row >= last) return;
+
+    // Count backwards for the tail that fits, then draw forwards.
+    const room = last - row;
+    var start = e.preview.len;
+    var lines: u16 = 0;
+    while (lines < room) {
+        const cut = std.mem.lastIndexOfScalar(u8, e.preview[0..start -| 1], '\n');
+        start = if (cut) |n| n + 1 else 0;
+        lines += 1;
+        if (start == 0) break;
+    }
+
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, e.preview[start..], "\n"), '\n');
+    while (it.next()) |raw| {
+        if (row >= last) break;
+        const line = try path_mod.clip(f.arena, raw, box.preview_width, f.glyphs.ellipsis, f.method());
+        f.put(row, box.preview_col, line, f.theme.comment);
+        row += 1;
+    }
 }
 
 /// What an empty list says, and why it is two sentences rather than one.
@@ -841,6 +1003,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
         .height = box_h,
         .content = content,
         .column = content,
+        .list_width = content,
     };
     _ = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
 
@@ -957,6 +1120,7 @@ fn drawPresetList(
         .height = rows + 2,
         .content = content,
         .column = content,
+        .list_width = content,
     };
     const blank = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
 

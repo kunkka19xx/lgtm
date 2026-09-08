@@ -387,6 +387,15 @@ pub const FileEntry = struct {
     /// worth having: it is the same argument the file list makes, that shape
     /// and hue together find the one you want without reading a name.
     icon_path: []const u8 = "",
+    /// One line of facts about the row, drawn above `preview`. Where the pane
+    /// picker puts the `%604` its rows no longer carry: an address is not what
+    /// a reader recognises a pane by, but it is what `--pane` wants.
+    detail: []const u8 = "",
+    /// What this row is, shown beside the list rather than described by them.
+    /// A pane picker draws the pane's own screen here, which answers "which
+    /// one is my agent" in a way no amount of columns could. Empty on every
+    /// other list, and an empty one draws no panel.
+    preview: []const u8 = "",
     /// A number this row *is*, as against a number that appears in its label.
     ///
     /// The turn list's rows carry an age and two counts, so fuzzy-matching `2`
@@ -402,6 +411,9 @@ pub const FilesView = struct {
     entries: []const FileEntry,
     /// Extra keys for this list, drawn in its footer beside the shared ones.
     extra_keys: []const keytext.HelpEntry = &.{},
+    /// Whether to keep the columns before each row for the "you are here"
+    /// mark and the filetype icon. False on a list whose rows are neither.
+    gutter: bool = true,
     /// What the box is listing, drawn in its title. The same widget shows the
     /// changed files, every file in the project, and every comment; saying
     /// which spares the reader working it out from the rows.

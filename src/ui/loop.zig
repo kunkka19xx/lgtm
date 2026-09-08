@@ -334,21 +334,26 @@ fn offerPanes(app: *App, br: *bridge.Bridge, cx: bridge.Ctx, text: ?[]const u8) 
     const found = br.candidates(cx, arena) catch return false;
     if (found.len == 0) return false;
 
+    // Where sends go now, so the picker can mark it and open on it. Read
+    // before the rows are built because it is the only thing here the bridge
+    // knows and the list does not.
+    const current = if (br.panes()) |p| p.pane() else null;
+
     var rows: std.ArrayList(App.PaneRow) = .empty;
     for (found) |c| {
-        // Everything the backend knew, in one line the filter can reach all
-        // of: two agents running the same binary differ by where they are and
-        // by what they have called themselves, and nothing else.
-        const label = std.fmt.allocPrint(arena, "{s}{s}{s}{s}{s}{s}{s}", .{
-            c.id,
-            if (c.where.len > 0) "  " else "",
-            c.where,
-            if (c.command.len > 0) "  " else "",
-            c.command,
-            if (c.title.len > 0) "  " else "",
-            c.title,
+        // Everything the backend knew, handed over as parts: what the row
+        // ends up looking like, and in what order, is the picker's decision.
+        rows.append(arena, .{
+            .id = c.id,
+            .where = c.where,
+            .command = c.command,
+            .title = c.title,
+            .session = c.session,
+            .here = c.same_session,
+            .agent = bridge.Bridge.looksLikeAgent(c.command),
+            .target = if (current) |t| std.mem.eql(u8, c.id, t) else false,
+            .preview = c.preview,
         }) catch continue;
-        rows.append(arena, .{ .id = c.id, .label = label }) catch continue;
     }
     if (rows.items.len == 0) return false;
 
@@ -544,7 +549,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.bindings = app.km.bindings;
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
-        shown.files = try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena);
+        shown.files = try app.file_list.view(app.mode, app.pick_list.items, app.listCurrent(), app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
@@ -583,7 +588,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
                 room = box.room(0, win.height);
             }
         }
-        if (try app.file_list.view(app.mode, app.pick_list.items, app.file_index, app.km.bindings, arena)) |fv| {
+        if (try app.file_list.view(app.mode, app.pick_list.items, app.listCurrent(), app.km.bindings, arena)) |fv| {
             try render.drawFileList(frameOf(app, win, arena), fv, room_top, room);
         }
         // The bottom row is the prompt when one is open, and whatever the last

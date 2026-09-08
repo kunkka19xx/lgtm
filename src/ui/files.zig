@@ -43,6 +43,15 @@ pub const Files = struct {
     title: []const u8 = " files ",
     /// Keys this list adds to the shared footer.
     extra_keys: []const keytext.HelpEntry = &.{},
+    /// Whether the rows keep the two columns before them for the "you are
+    /// here" mark, and the two after that for a filetype icon.
+    ///
+    /// A list of panes has neither: no row is a file, so none gets an icon,
+    /// and `listCurrent` marks nothing, so the mark is a blank column on
+    /// every row for ever. Four columns of nothing on the left of a list that
+    /// was already fighting for width. Set by whoever opens the list, not
+    /// derived from the rows, so it cannot change while the reader filters.
+    gutter: bool = true,
     /// The whole change, for the top border. Set by the caller that knows
     /// which list this is: a project browse or a comment list has no total
     /// worth drawing, and `null` is how they say so.
@@ -53,6 +62,11 @@ pub const Files = struct {
     pub fn open(self: *Files, at: usize) void {
         self.filter.start(.help_filter);
         self.index = at;
+        // Restored here rather than set by each opener: there are six of them
+        // and the seventh would inherit whatever the last one left behind. A
+        // list that wants no gutter says so after opening; the rest say
+        // nothing and get one.
+        self.gutter = true;
     }
 
     pub fn close(self: *Files) void {
@@ -139,6 +153,7 @@ pub const Files = struct {
             .entries = try entries(files, current, filter, arena),
             .title = self.title,
             .extra_keys = self.extra_keys,
+            .gutter = self.gutter,
             .query = filter,
             .index = self.index,
             .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),

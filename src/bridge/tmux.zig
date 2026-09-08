@@ -42,6 +42,12 @@ pub const Pane = struct {
     /// binary have the same `command` and nothing else to tell them apart;
     /// where they are is the first thing that does.
     where: []const u8 = "",
+    /// The session name alone, which is `where` up to its ':'. Split here
+    /// rather than by the caller because `session:window.pane` is this file's
+    /// own format string, and nothing above `bridge/` should have to know it.
+    /// The picker groups by it: panes of one session belong together on
+    /// screen, whatever each is running.
+    session: []const u8 = "",
     /// `#{pane_title}`, which is what most agents write their current task
     /// into - and so the field that makes a list of five identical commands
     /// pickable. Empty when tmux does not give one.
@@ -99,15 +105,124 @@ pub fn parsePanes(arena: Allocator, out: []const u8) Allocator.Error![]Pane {
         if (id.len == 0 or id[0] != pane_sigil) continue;
         const where = fields.next() orelse "";
         const title = fields.rest();
+        const colon = std.mem.indexOfScalar(u8, where, ':');
         try panes.append(arena, .{
             .id = id,
             .active = std.mem.eql(u8, active, "1"),
             .command = command,
             .where = where,
+            .session = if (colon) |n| where[0..n] else where,
             .title = std.mem.trimEnd(u8, title, "\r"),
         });
     }
     return panes.toOwnedSlice(arena);
+}
+
+/// A capture of every listed pane, in one subprocess.
+///
+/// The picker's rows say `%604`, which identifies a pane to tmux and to nobody
+/// else. What a reader recognises is what the pane is *showing* - a splash
+/// screen, a prompt, an agent halfway through a sentence - so the picker shows
+/// them that and the id stops having to carry the whole job.
+///
+/// One process for all of them, not one each: tmux takes a command sequence,
+/// so fifteen panes cost a single fork. Measured at 7 ms for the whole batch,
+/// which is why this happens when the picker opens rather than on every
+/// keystroke, with no debounce and no second event to wire.
+const capture_output_max = 1 << 20;
+
+/// Sections are split on a line the panes cannot be showing. A pane can
+/// display any fixed string - including one out of this file, if what it is
+/// running is an agent editing this file - so the marker carries a nonce and
+/// the split is checked against the number of panes asked for. A capture that
+/// does not divide cleanly is dropped whole: a preview of the wrong pane is
+/// worse than no preview.
+pub fn captureMarker(buf: []u8, io: std.Io) []const u8 {
+    const ts = std.Io.Timestamp.now(io, .real).toNanoseconds();
+    const nonce: u64 = @truncate(@as(u96, @bitCast(ts)));
+    return std.fmt.bufPrint(buf, "@@lgtm-{x}@@", .{nonce}) catch "@@lgtm@@";
+}
+
+/// `capture-pane -p -t %A ; display-message -p <marker> ; capture-pane ...`
+///
+/// A bare `;` is tmux's own command separator, and in an argv there is no
+/// shell to quote it away from. The marker follows each capture rather than
+/// preceding it, so the split is on what closes a section and the first
+/// section needs no special case.
+pub fn captureArgv(
+    arena: Allocator,
+    ids: []const []const u8,
+    marker: []const u8,
+) Allocator.Error![]const []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    try argv.append(arena, "tmux");
+    for (ids, 0..) |id, i| {
+        if (i > 0) try argv.append(arena, ";");
+        try argv.appendSlice(arena, &.{ "capture-pane", "-p", "-t", id, ";", "display-message", "-p", marker });
+    }
+    return argv.toOwnedSlice(arena);
+}
+
+/// The captured text, one slice per id, or null when the output did not split
+/// into exactly that many sections.
+///
+/// Trailing blank lines go: tmux drops the ones at the very bottom of a pane
+/// and keeps the ones above them, so a pane whose last output is halfway up
+/// arrives with a tail of nothing. The reader wants the last thing that was
+/// said, not the empty rows under it.
+pub fn parseCaptures(
+    arena: Allocator,
+    out: []const u8,
+    marker: []const u8,
+    n: usize,
+) Allocator.Error!?[][]const u8 {
+    if (n == 0) return null;
+    var caps: std.ArrayList([]const u8) = .empty;
+    // Where the current section began, and where the search is - two cursors,
+    // because a marker that turned out to be part of a line advances only the
+    // second. One cursor let a rejected marker eat the section's own head.
+    var at: usize = 0;
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, out, scan, marker)) |hit| {
+        // The marker owns its whole line, so a pane showing it inside another
+        // line does not split the capture there.
+        const line_start = if (std.mem.lastIndexOfScalar(u8, out[0..hit], '\n')) |nl| nl + 1 else 0;
+        const line_end = hit + marker.len;
+        scan = line_end;
+        if (line_start != hit or (line_end < out.len and out[line_end] != '\n')) continue;
+        try caps.append(arena, trimBlankTail(out[at..line_start]));
+        at = @min(line_end + 1, out.len);
+        scan = at;
+    }
+    if (caps.items.len != n) return null;
+    return try caps.toOwnedSlice(arena);
+}
+
+fn trimBlankTail(text: []const u8) []const u8 {
+    var end = text.len;
+    while (end > 0) {
+        const line_start = if (std.mem.lastIndexOfScalar(u8, text[0 .. end - 1], '\n')) |nl| nl + 1 else 0;
+        const line = std.mem.trimEnd(u8, text[line_start .. end - 1], " \t\r");
+        if (line.len > 0) break;
+        end = line_start;
+    }
+    return text[0..end];
+}
+
+pub fn capture(
+    gpa: Allocator,
+    arena: Allocator,
+    io: std.Io,
+    ids: []const []const u8,
+) SendError!?[][]const u8 {
+    if (ids.len == 0) return null;
+    var buf: [48]u8 = undefined;
+    const marker = captureMarker(&buf, io);
+    const argv = try captureArgv(arena, ids, marker);
+    const out = proc.run(gpa, io, argv, capture_output_max) catch return error.TmuxFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.TmuxFailed;
+    return parseCaptures(arena, try arena.dupe(u8, out.stdout), marker, ids.len);
 }
 
 /// The target, when there is only one it could be.
@@ -284,6 +399,8 @@ test "a pane listing carries where it is and what it calls itself" {
     try testing.expectEqualStrings("%604", panes[0].id);
     try testing.expectEqualStrings("2.1.261", panes[0].command);
     try testing.expectEqualStrings("lgtm:3.0", panes[0].where);
+    // The session alone, for the picker's grouping.
+    try testing.expectEqualStrings("lgtm", panes[0].session);
     // The title is a person's sentence, so it takes the rest of the line -
     // tabs in it are the title's, not a field boundary.
     try testing.expectEqualStrings("lgtm#1 language support", panes[0].title);
@@ -310,6 +427,60 @@ test "a line tmux could not format is skipped, not fatal" {
     const panes = try parsePanes(a.allocator(), "#{pane_id}\t1\tsh\n%2\t0\tclaude\ngarbage\n");
     try testing.expectEqual(@as(usize, 1), panes.len);
     try testing.expectEqualStrings("%2", panes[0].id);
+}
+
+test "a capture is one subprocess, split on a line the panes cannot show" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const argv = try captureArgv(arena, &.{ "%1", "%2" }, "@@m@@");
+    try testing.expectEqualStrings("tmux", argv[0]);
+    // A bare `;` is tmux's separator, and there is no shell here to quote it.
+    try testing.expectEqualStrings(";", argv[5]);
+    try testing.expectEqualStrings("@@m@@", argv[8]);
+    try testing.expectEqualStrings(";", argv[9]);
+    try testing.expectEqualStrings("%2", argv[13]);
+
+    const caps = (try parseCaptures(arena, "one\ntwo\n@@m@@\nthree\n@@m@@\n", "@@m@@", 2)).?;
+    try testing.expectEqual(@as(usize, 2), caps.len);
+    try testing.expectEqualStrings("one\ntwo\n", caps[0]);
+    try testing.expectEqualStrings("three\n", caps[1]);
+}
+
+test "a pane showing the marker does not split its own capture" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // The marker inside a line is text, not a boundary: only a line that is
+    // nothing but the marker ends a section.
+    const caps = (try parseCaptures(arena, "grep @@m@@ file\n@@m@@\n", "@@m@@", 1)).?;
+    try testing.expectEqual(@as(usize, 1), caps.len);
+    try testing.expectEqualStrings("grep @@m@@ file\n", caps[0]);
+}
+
+test "a capture that does not divide cleanly is dropped whole" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // Two panes asked for, one section back. A preview of the wrong pane is
+    // worse than no preview, so nothing is returned rather than a guess.
+    try testing.expect(try parseCaptures(arena, "only\n@@m@@\n", "@@m@@", 2) == null);
+}
+
+test "a pane whose last output is halfway up loses the blank rows under it" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const caps = (try parseCaptures(arena, "said\n\n   \n\n@@m@@\n", "@@m@@", 1)).?;
+    try testing.expectEqualStrings("said\n", caps[0]);
+
+    // A pane showing nothing at all is empty, not one blank line.
+    const blank = (try parseCaptures(arena, "\n\n@@m@@\n", "@@m@@", 1)).?;
+    try testing.expectEqualStrings("", blank[0]);
 }
 
 test "two panes name the target; three decline to guess" {
