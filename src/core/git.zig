@@ -558,6 +558,92 @@ fn countMatching(gpa: Allocator, io: std.Io, base: []const []const u8, pats: []c
     return n;
 }
 
+/// The commit two refs diverged from.
+///
+/// What a pull request is shown against. GitHub renders a three-dot diff, so
+/// using the base branch's tip would show every commit that landed on it since
+/// the branch started as though the branch had made them.
+pub fn mergeBase(
+    gpa: Allocator,
+    arena: Allocator,
+    io: std.Io,
+    a: []const u8,
+    b: []const u8,
+) Error![]const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try proc.gitArgv(gpa, &argv, null);
+    try argv.appendSlice(gpa, &.{ "merge-base", a, b });
+
+    const out = proc.run(gpa, io, argv.items, 256) catch return error.GitFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+    const sha = std.mem.trim(u8, out.stdout, " \t\r\n");
+    if (sha.len == 0) return error.GitFailed;
+    return arena.dupe(u8, sha);
+}
+
+/// Whether a commit is in the object store already.
+pub fn hasCommit(gpa: Allocator, io: std.Io, ref: []const u8) bool {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    proc.gitArgv(gpa, &argv, null) catch return false;
+    const spec = std.fmt.allocPrint(gpa, "{s}^{{commit}}", .{ref}) catch return false;
+    defer gpa.free(spec);
+    argv.appendSlice(gpa, &.{ "rev-parse", "--verify", "--quiet", spec }) catch return false;
+
+    const out = proc.run(gpa, io, argv.items, 256) catch return false;
+    defer out.deinit(gpa);
+    return out.exit_code == 0;
+}
+
+/// The remote a pull request is fetched from: `origin` where it exists, and
+/// otherwise the first one there is. A repository with no remote has no pull
+/// requests to read.
+pub fn defaultRemote(gpa: Allocator, arena: Allocator, io: std.Io) Error![]const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try proc.gitArgv(gpa, &argv, null);
+    try argv.append(gpa, "remote");
+
+    const out = proc.run(gpa, io, argv.items, 4 << 10) catch return error.GitFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+    return arena.dupe(u8, pickRemote(out.stdout) orelse return error.GitFailed);
+}
+
+/// One name per line. Split out so the choice has a test that spawns nothing.
+pub fn pickRemote(text: []const u8) ?[]const u8 {
+    var first: ?[]const u8 = null;
+    var lines = std.mem.tokenizeScalar(u8, text, '\n');
+    while (lines.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " \t\r");
+        if (name.len == 0) continue;
+        if (std.mem.eql(u8, name, "origin")) return name;
+        if (first == null) first = name;
+    }
+    return first;
+}
+
+/// `git fetch <remote> pull/<n>/head`, which brings the objects and moves
+/// nothing.
+///
+/// Not `gh pr checkout`: reviewing a pull request must not touch the working
+/// tree the reader is standing in. The `pull/<n>/head` ref also covers a fork,
+/// which is why it beats adding the contributor's repository as a remote.
+pub fn fetchPull(gpa: Allocator, io: std.Io, remote: []const u8, number: u32) Error!void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try proc.gitArgv(gpa, &argv, null);
+    const ref = try std.fmt.allocPrint(gpa, "pull/{d}/head", .{number});
+    defer gpa.free(ref);
+    try argv.appendSlice(gpa, &.{ "fetch", "--no-tags", "--quiet", remote, ref });
+
+    const out = proc.run(gpa, io, argv.items, 64 << 10) catch return error.GitFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+}
+
 pub fn freePaths(gpa: Allocator, paths: [][]const u8) void {
     for (paths) |p| gpa.free(p);
     gpa.free(paths);

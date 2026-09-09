@@ -60,6 +60,9 @@ pub const Options = struct {
     /// Setting it makes the review static, and the three things that watch the
     /// working tree turn themselves off.
     target: ?[]const u8 = null,
+    /// What to call the review in the status row, when two shas would say
+    /// nothing. `#13 feat: syntax highlight for json` for a pull request.
+    label: []const u8 = "",
 };
 
 /// Runs the review UI until the user quits.
@@ -108,6 +111,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.review.ignore = opts.cfg.ignore;
     if (opts.base) |b| app.review.base = b;
     app.review.target = opts.target;
+    app.review.setLabel(opts.label);
     app.theme = opts.cfg.theme;
     app.theme_name = opts.cfg.theme_name;
     app.glyphs = switch (opts.cfg.ui.icons) {

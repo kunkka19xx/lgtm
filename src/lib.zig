@@ -10,6 +10,7 @@
 
 pub const fs = @import("io/fs.zig");
 pub const proc = @import("io/proc.zig");
+pub const gh = @import("core/gh.zig");
 pub const metrics = @import("io/metrics.zig");
 pub const watch = @import("io/watch.zig");
 

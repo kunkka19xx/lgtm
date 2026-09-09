@@ -13,6 +13,7 @@ pub const app = @import("ui/app.zig");
 pub const loop = @import("ui/loop.zig");
 pub const splash = @import("ui/splash.zig");
 const metrics = lib.metrics;
+const gh = lib.gh;
 
 const usage =
     \\lgtm - read what your agent wrote
@@ -23,6 +24,7 @@ const usage =
     \\  --target <ref>   review this ref instead of the working tree (static)
     \\  --config <path>  read this file instead of the usual two
     \\  --init           write a starter config and exit; --config picks where
+    \\  --pr [n]         review a pull request; bare, the current branch's
     \\  --pane <id>      send here: a tmux pane (%3), a herdr pane (w1:p1),
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
@@ -60,12 +62,24 @@ pub fn main(init: std.process.Init) !void {
     var pane: ?[]const u8 = null;
     var base: ?[]const u8 = null;
     var target: ?[]const u8 = null;
+    var want_pr = false;
+    var pr_number: ?u32 = null;
     var want_preview = false;
     var want_version = false;
     var want_init = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
-    while (args.next()) |arg| {
+    // `--pr` takes an optional value, so it has to be able to look at the next
+    // argument and leave it alone. The iterator does not rewind; one slot of
+    // pushback is the whole of what is needed.
+    var pushback: ?[]const u8 = null;
+    while (blk: {
+        if (pushback) |p| {
+            pushback = null;
+            break :blk p;
+        }
+        break :blk args.next();
+    }) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
             try w.writeAll(usage);
             try w.flush();
@@ -92,6 +106,21 @@ pub fn main(init: std.process.Init) !void {
                 try w.flush();
                 return;
             };
+        } else if (std.mem.eql(u8, arg, "--pr")) {
+            // The number is optional: bare `--pr` is the current branch's,
+            // which is the pull request an agent just pushed. So the next
+            // argument is only consumed when it is digits, and `--pr --once`
+            // is two flags rather than a parse error.
+            want_pr = true;
+            if (args.next()) |next| {
+                if (next.len > 0 and std.ascii.isDigit(next[0])) {
+                    pr_number = std.fmt.parseInt(u32, next, 10) catch {
+                        try w.print("lgtm: --pr takes a number, not '{s}'\n\n{s}", .{ next, usage });
+                        try w.flush();
+                        return;
+                    };
+                } else pushback = next;
+            }
         } else if (std.mem.eql(u8, arg, "--base")) {
             base = args.next() orelse {
                 try w.print("lgtm: --base needs a ref\n\n{s}", .{usage});
@@ -168,6 +197,26 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
+    // `--pr` is sugar for `--base` and `--target`: resolved here so that by
+    // the time the review starts, a pull request is the static two-tree mode
+    // that already existed and nothing below this line knows about GitHub.
+    var pr_arena: std.heap.ArenaAllocator = .init(gpa);
+    defer pr_arena.deinit();
+    var pr_label: []const u8 = "";
+    if (want_pr) {
+        const refs = gh.resolve(gpa, pr_arena.allocator(), io, pr_number) catch {
+            // No degrading into a local review: the reader asked for one
+            // specific diff, and showing them a different one is worse than
+            // saying nothing. `gh` has already said why on stderr.
+            try w.print("lgtm: could not open that pull request\n", .{});
+            try w.flush();
+            return;
+        };
+        base = refs.base;
+        target = refs.target;
+        pr_label = refs.label;
+    }
+
     try loop.run(gpa, io, init.environ_map, .{
         .once = want_once,
         .cfg = cfg.cfg,
@@ -175,6 +224,7 @@ pub fn main(init: std.process.Init) !void {
         .pane = pane,
         .base = base,
         .target = target,
+        .label = pr_label,
     });
 
     if (want_profile) try metrics.report(w);

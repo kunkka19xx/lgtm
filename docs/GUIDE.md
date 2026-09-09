@@ -431,6 +431,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `<Space>e` | open this line in `$EDITOR` |
 | `?` | every key, from your bindings |
 | `:` | run any command by name, `<Tab>` completes (see below) |
+| `:pr [n]` | review a pull request without restarting; bare, the current branch's. `:pr off` comes back to the working tree |
 | `:q` | quit |
 
 ### The command line
@@ -535,7 +536,7 @@ something other than a shell at the top of each group and a `*` beside them.
 Type `*` to see only those. An arrow in the column before it marks the pane
 sends go to now, and the cursor starts there.
 
-Beside the list — under it in a narrow pane — is **the selected pane's own
+Beside the list, or under it in a narrow pane, is **the selected pane's own
 screen**. That is the part worth knowing about: `%604` identifies a pane to
 tmux and to nobody else, so the picker shows you what the pane is showing, and
 you recognise your agent by what it is saying rather than by its number. The
@@ -550,7 +551,7 @@ the flag is still `--pane`, because it is one flag.
 
 Only tmux fills in the columns and the panel today; the others list ids, which
 is all they report. Ghostty has no per-pane id at all, so there is nothing to
-pick between — it sends to the focused split.
+pick between: it sends to the focused split.
 
 **kitty says `set allow_remote_control yes`.** kitty refuses to let any process
 type into your terminal until you allow it. Put `allow_remote_control yes` in
@@ -590,6 +591,7 @@ application "Ghostty" to get id of every terminal'` lists them.
 | `lgtm` | HEAD against the working tree: the default, and what the tool is about |
 | `lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
 | `lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
+| `lgtm --pr 123` | a pull request, the way GitHub shows one: the head against the commit it branched from, not against the tip of the base branch. Bare `--pr` takes the current branch's. **Static**, and it needs `gh` installed and logged in |
 
 The badge says which: `main` or `main..HEAD` in the accent instead of `NORMAL`,
 because a diff against a branch looks exactly like a diff against HEAD and

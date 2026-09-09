@@ -21,6 +21,7 @@ const diff = @import("../core/diff.zig");
 const expand = @import("../core/expand.zig");
 const event = @import("../core/event.zig");
 const fs_mod = @import("../io/fs.zig");
+const gh = @import("../core/gh.zig");
 const git = @import("../core/git.zig");
 const comments_mod = @import("../core/comments.zig");
 const review_file = @import("../core/review.zig");
@@ -328,6 +329,10 @@ pub const App = struct {
     /// keystroke, and the frame arena is reset between them - which made every
     /// label a slice of freed memory and every filter a miss.
     pick_arena: std.heap.ArenaAllocator = undefined,
+    /// The refs and label of the pull request on screen. Its own arena because
+    /// they outlive every re-diff and die only when another pull request is
+    /// opened or the review goes back to the working tree.
+    pr_arena: std.heap.ArenaAllocator = undefined,
     /// Every path in the project, from `git ls-files`, loaded the first time
     /// `@` asks and kept for the session. Not loaded at startup: most sessions
     /// never mention a file, and cold start has a 50 ms budget.
@@ -393,6 +398,7 @@ pub const App = struct {
             .comments = .init(gpa),
             .preview_arena = .init(gpa),
             .pick_arena = .init(gpa),
+            .pr_arena = .init(gpa),
             .frame_arena = .init(gpa),
         };
     }
@@ -402,6 +408,7 @@ pub const App = struct {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.pick_arena.deinit();
+        self.pr_arena.deinit();
         self.preview_arena.deinit();
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
@@ -810,6 +817,7 @@ pub const App = struct {
             // stays `NORMAL` for every ordinary session.
             .base = if (std.mem.eql(u8, self.review.base, "HEAD")) "" else self.review.base,
             .target = self.review.target orelse "",
+            .label = self.review.label(),
             .viewing = self.review.viewing,
             .tree_moved = self.review.moved,
             .risk = self.review.risk_total,
@@ -1414,32 +1422,43 @@ pub const App = struct {
     const preview_lines: usize = 20;
     const preview_bytes: usize = 1536;
 
-    /// The head of a file's section of the raw `git diff`, from its first
-    /// `@@`.
+    /// The head of a file's diff, as unified text for the panel.
     ///
-    /// A slice and a copy, not a render: `raw_lo`/`raw_hi` already bound the
-    /// text. Copied because `raw` lives in the review's arena, which every
-    /// re-diff resets, and this list outlives one. From the first `@@`
-    /// because the four header lines above it repeat the row.
-    pub fn diffHead(arena: Allocator, raw: []const u8, f: diff.FileDiff) []const u8 {
-        if (f.raw_hi <= f.raw_lo or f.raw_hi > raw.len) return "";
-        const sect = raw[f.raw_lo..f.raw_hi];
-        var at: usize = 0;
-        while (at < sect.len) {
-            const nl = std.mem.indexOfScalarPos(u8, sect, at, '\n') orelse sect.len;
-            if (std.mem.startsWith(u8, sect[at..], "@@")) break;
-            at = nl + 1;
-        }
-        if (at >= sect.len) at = 0; // no hunk header: a rename, a mode change
-
-        var end = at;
+    /// Built from the parsed hunks rather than sliced out of the raw `git
+    /// diff`. Slicing was cheaper and wrong for the files a reader most wants
+    /// to see: an untracked file's diff is synthesised, never parsed from
+    /// git's output, so it has no byte range and drew no panel at all. Walking
+    /// `lines` costs a `memcpy` either way and works for both.
+    ///
+    /// The `@@` header is rebuilt because it carries the enclosing symbol,
+    /// which is most of what orients a reader in a hunk they have not scrolled
+    /// to yet.
+    fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
+        var out: std.ArrayList(u8) = .empty;
         var lines: usize = 0;
-        while (end < sect.len and lines < preview_lines and end - at < preview_bytes) {
-            const nl = std.mem.indexOfScalarPos(u8, sect, end, '\n') orelse sect.len;
-            end = @min(nl + 1, sect.len);
+        for (f.hunks) |h| {
+            if (lines >= preview_lines or out.items.len >= preview_bytes) break;
+            out.print(arena, "@@ -{d},{d} +{d},{d} @@{s}{s}\n", .{
+                h.old_start,                        h.old_count,
+                h.new_start,                        h.new_count,
+                if (h.section.len > 0) " " else "", h.section,
+            }) catch return out.items;
             lines += 1;
+
+            for (h.lo..h.hi) |i| {
+                if (lines >= preview_lines or out.items.len >= preview_bytes) break;
+                const sign: u8 = switch (f.lines.kind[i]) {
+                    .add => '+',
+                    .del => '-',
+                    .context => ' ',
+                };
+                out.append(arena, sign) catch return out.items;
+                out.appendSlice(arena, f.lines.text[i]) catch return out.items;
+                out.append(arena, '\n') catch return out.items;
+                lines += 1;
+            }
         }
-        return arena.dupe(u8, sect[at..end]) catch "";
+        return out.items;
     }
 
     /// Whether a list may draw the panel beside it at all.
@@ -1629,7 +1648,7 @@ pub const App = struct {
                 .added = f.added,
                 .removed = f.removed,
                 .status = f.status,
-                .preview = if (self.previews()) diffHead(arena, self.review.raw(), f) else "",
+                .preview = if (self.previews()) diffHead(arena, f) else "",
                 .preview_kind = .diff,
             }) catch return;
         }
@@ -2016,7 +2035,10 @@ pub const App = struct {
 
         // Before the table, because a line with a value in it is not a name in
         // the table and never will be.
-        if (settingOf(typed)) |s| return self.setTheme(s.arg);
+        if (settingOf(typed)) |s| {
+            if (std.mem.eql(u8, s.setting.verb, "pr")) return self.openPr(s.arg);
+            return self.setTheme(s.arg);
+        }
 
         const cmd = aliasFor(typed) orelse
             std.meta.stringToEnum(keymap.Command, typed) orelse
@@ -2084,6 +2106,10 @@ pub const App = struct {
 
     const settings = [_]Setting{
         .{ .verb = "theme", .names = theme_mod.bundled_names },
+        // No completions: the numbers are GitHub's, and asking it for them on
+        // every `<Tab>` is a network call for a list the reader already has
+        // in the branch they are on.
+        .{ .verb = "pr", .names = &.{} },
         // vim's spelling, for the reader who arrives already knowing it.
         .{ .verb = "colorscheme", .names = theme_mod.bundled_names },
         .{ .verb = "colo", .names = theme_mod.bundled_names },
@@ -2127,6 +2153,63 @@ pub const App = struct {
         self.theme = found.theme;
         self.theme_name = found.name;
         self.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
+    }
+
+    /// `:pr [n]` points the review at a pull request, or back at the working
+    /// tree with `:pr off`.
+    ///
+    /// The same resolve `--pr` runs, so the two spellings cannot disagree
+    /// about what a pull request is. Everything after it is the static
+    /// two-tree mode that already existed.
+    fn openPr(self: *App, arg: []const u8) void {
+        if (std.mem.eql(u8, arg, "off")) return self.closePr();
+
+        var number: ?u32 = null;
+        if (arg.len > 0) {
+            number = std.fmt.parseInt(u32, arg, 10) catch {
+                self.notice.set("pr takes a number, not {s}", .{arg});
+                return;
+            };
+        }
+
+        _ = self.pr_arena.reset(.retain_capacity);
+        const refs = gh.resolve(self.gpa, self.pr_arena.allocator(), self.io, number) catch {
+            self.notice.set("could not open that pull request", .{});
+            return;
+        };
+
+        self.review.base = refs.base;
+        self.review.target = refs.target;
+        self.review.setLabel(refs.label);
+        self.reopen();
+        // Not the label: the badge is already showing it, and the same string
+        // twice reads as a fault. What a reader does not know yet is that the
+        // review has stopped following their working tree.
+        self.notice.set("static review of #{d} - :pr off to come back", .{refs.number});
+    }
+
+    /// Back to the working tree. The counterpart of `:pr`, because a reader
+    /// who can get into a pull request without restarting should be able to
+    /// get out of one the same way.
+    fn closePr(self: *App) void {
+        if (self.review.label().len == 0) {
+            self.notice.set("not reviewing a pull request", .{});
+            return;
+        }
+        self.review.base = "HEAD";
+        self.review.target = null;
+        self.review.setLabel("");
+        _ = self.pr_arena.reset(.retain_capacity);
+        self.reopen();
+        self.notice.set("back to the working tree", .{});
+    }
+
+    /// Re-diff against whatever the review now points at, and start again at
+    /// the top: the cursor's line number means nothing in a different diff.
+    fn reopen(self: *App) void {
+        self.file_index = 0;
+        self.vp.cursor = 0;
+        self.rediff() catch {};
     }
 
     /// Where a command that `:` refuses does live, for the message that says so.
@@ -2453,6 +2536,40 @@ pub const App = struct {
         try testing.expectEqual(@as(f32, @floatFromInt(gutter)), left.col);
     }
 
+    test "a pull request is opened by number and left by name" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Nothing to leave yet, and saying so beats silently re-diffing.
+        fx.app.closePr();
+        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not reviewing") != null);
+
+        // A word is not a number, and this is caught before `gh` is spawned.
+        fx.app.openPr("main");
+        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "takes a number") != null);
+        try testing.expectEqualStrings("", fx.app.review.label());
+
+        // The label is what the status row shows instead of two shas, and it
+        // is what `:pr off` tests to know there is something to leave.
+        fx.app.review.setLabel("#13 feat: syntax highlight for json");
+        try testing.expectEqualStrings("#13 feat: syntax highlight for json", fx.app.review.label());
+        fx.app.review.target = "c7143ba";
+        fx.app.closePr();
+        try testing.expectEqualStrings("", fx.app.review.label());
+        try testing.expect(fx.app.review.target == null);
+        try testing.expectEqualStrings("HEAD", fx.app.review.base);
+    }
+
+    test "a label longer than the row still fits the buffer that holds it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const long = "#1 " ++ ("a title that runs on and on " ** 12);
+        fx.app.review.setLabel(long);
+        try testing.expect(fx.app.review.label().len <= 160);
+        try testing.expect(std.mem.startsWith(u8, long, fx.app.review.label()));
+    }
+
     test "the pane picker lists what it was handed and connects to one" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
@@ -2609,51 +2726,94 @@ pub const App = struct {
         try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
     }
 
-    test "a file row previews the head of its diff, not the header above it" {
+    test "a file row previews the head of its diff, header and all" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
         const arena = fx.app.pick_arena.allocator();
 
-        const raw =
-            "diff --git a/a.zig b/a.zig\n" ++
-            "index 1111111..2222222 100644\n" ++
-            "--- a/a.zig\n" ++
-            "+++ b/a.zig\n" ++
-            "@@ -1,3 +1,3 @@\n" ++
-            " const std = @import(\"std\");\n" ++
-            "-const old = 1;\n" ++
-            "+const new = 2;\n";
+        var kinds = [_]hunk.LineKind{ .context, .del, .add };
+        var olds = [_]u32{ 1, 2, 0 };
+        var news = [_]u32{ 1, 0, 2 };
+        var texts = [_][]const u8{ "const std = @import(\"std\");", "const old = 1;", "const new = 2;" };
+        var hunks = [_]hunk.Hunk{.{
+            .old_start = 1,
+            .old_count = 2,
+            .new_start = 1,
+            .new_count = 2,
+            .section = "pub fn main()",
+            .lo = 0,
+            .hi = 3,
+        }};
         const f: diff.FileDiff = .{
             .old_path = "a.zig",
             .new_path = "a.zig",
             .status = .modified,
-            .raw_lo = 0,
-            .raw_hi = raw.len,
+            .hunks = &hunks,
+            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
         };
 
-        // From the first `@@`: the four lines above it say what the row said.
-        const head = App.diffHead(arena, raw, f);
-        try testing.expect(std.mem.startsWith(u8, head, "@@ -1,3 +1,3 @@"));
-        try testing.expect(std.mem.indexOf(u8, head, "diff --git") == null);
-        try testing.expect(std.mem.indexOf(u8, head, "+const new = 2;") != null);
+        const head = App.diffHead(arena, f);
+        // The header is rebuilt rather than sliced, because it carries the
+        // enclosing symbol and that is most of what orients a reader.
+        try testing.expect(std.mem.startsWith(u8, head, "@@ -1,2 +1,2 @@ pub fn main()\n"));
+        try testing.expect(std.mem.indexOf(u8, head, "\n-const old = 1;\n") != null);
+        try testing.expect(std.mem.indexOf(u8, head, "\n+const new = 2;\n") != null);
+        try testing.expect(std.mem.indexOf(u8, head, "\n const std") != null);
+    }
 
-        // A rename or a mode change has no hunk at all, and its own lines are
-        // then the only thing there is to show.
-        const bare = "diff --git a/a.zig b/b.zig\nsimilarity index 100%\n";
-        const none: diff.FileDiff = .{
-            .old_path = "a.zig",
-            .new_path = "b.zig",
-            .status = .renamed,
+    test "a file git never diffed still gets a preview" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const arena = fx.app.pick_arena.allocator();
+
+        // An untracked file's diff is synthesised rather than parsed, so it
+        // has no byte range in git's output. Slicing that range drew no panel
+        // at all for exactly the files a reader most wants to look at.
+        var kinds = [_]hunk.LineKind{ .add, .add };
+        var olds = [_]u32{ 0, 0 };
+        var news = [_]u32{ 1, 2 };
+        var texts = [_][]const u8{ "// SPDX-License-Identifier: Apache-2.0", "const std = @import(\"std\");" };
+        var hunks = [_]hunk.Hunk{.{
+            .old_start = 0,
+            .old_count = 0,
+            .new_start = 1,
+            .new_count = 2,
+            .lo = 0,
+            .hi = 2,
+        }};
+        const f: diff.FileDiff = .{
+            .old_path = "/dev/null",
+            .new_path = "src/core/gh.zig",
+            .status = .added,
+            .added = 2,
+            .hunks = &hunks,
+            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
+            // No raw section, which is the whole point of the case.
             .raw_lo = 0,
-            .raw_hi = bare.len,
+            .raw_hi = 0,
         };
-        try testing.expect(std.mem.startsWith(u8, App.diffHead(arena, bare, none), "diff --git"));
 
-        // A file the parser never gave a range is not guessed at.
-        try testing.expectEqualStrings("", App.diffHead(arena, raw, .{
-            .old_path = "a.zig",
-            .new_path = "a.zig",
+        const head = App.diffHead(arena, f);
+        try testing.expect(head.len > 0);
+        try testing.expect(std.mem.indexOf(u8, head, "+// SPDX-License-Identifier") != null);
+        // A hunk with no enclosing symbol closes its header rather than
+        // trailing a space.
+        try testing.expect(std.mem.startsWith(u8, head, "@@ -0,0 +1,2 @@\n"));
+    }
+
+    test "a file with nothing parsed previews nothing rather than a blank panel" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const arena = fx.app.pick_arena.allocator();
+
+        // A file past `large_file_lines` keeps its counts and no hunks until
+        // `zo` opens it. Empty is honest: there is nothing to show yet.
+        try testing.expectEqualStrings("", App.diffHead(arena, .{
+            .old_path = "big.json",
+            .new_path = "big.json",
             .status = .modified,
+            .summarised = true,
+            .added = 9000,
         }));
     }
 
