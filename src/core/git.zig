@@ -625,6 +625,19 @@ pub fn pickRemote(text: []const u8) ?[]const u8 {
     return first;
 }
 
+/// `git fetch <remote> <ref>`, for the base branch of a pull request when the
+/// commit it was opened against is not here yet.
+pub fn fetchRef(gpa: Allocator, io: std.Io, remote: []const u8, ref: []const u8) Error!void {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try proc.gitArgv(gpa, &argv, null);
+    try argv.appendSlice(gpa, &.{ "fetch", "--no-tags", "--quiet", remote, ref });
+
+    const out = proc.run(gpa, io, argv.items, 64 << 10) catch return error.GitFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GitFailed;
+}
+
 /// `git fetch <remote> pull/<n>/head`, which brings the objects and moves
 /// nothing.
 ///

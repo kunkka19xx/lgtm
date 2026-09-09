@@ -35,6 +35,9 @@ pub const Pr = struct {
     number: u32,
     /// `OPEN`, `MERGED` or `CLOSED`.
     state: []const u8,
+    /// The branch the pull request targets. Only for fetching: the commit
+    /// below is what the diff is taken against.
+    base_ref: []const u8,
     /// The base branch *as it was* when the pull request was last synced.
     ///
     /// A commit, not the branch name. Once a pull request is merged its head
@@ -48,8 +51,8 @@ pub const Pr = struct {
     title: []const u8,
 };
 
-const fields = "number,state,baseRefOid,headRefOid,title";
-const template = "{{.number}}\t{{.state}}\t{{.baseRefOid}}\t{{.headRefOid}}\t{{.title}}";
+const fields = "number,state,baseRefName,baseRefOid,headRefOid,title";
+const template = "{{.number}}\t{{.state}}\t{{.baseRefName}}\t{{.baseRefOid}}\t{{.headRefOid}}\t{{.title}}";
 
 /// `gh pr view [n] --json ... --template ...`
 ///
@@ -71,13 +74,15 @@ pub fn parseView(text: []const u8) ?Pr {
     var it = std.mem.splitScalar(u8, line, '\t');
     const number = std.fmt.parseInt(u32, it.next() orelse return null, 10) catch return null;
     const state = it.next() orelse return null;
+    const base_ref = it.next() orelse return null;
     const base_oid = it.next() orelse return null;
     const head_oid = it.next() orelse return null;
-    if (base_oid.len == 0 or head_oid.len == 0) return null;
+    if (base_ref.len == 0 or base_oid.len == 0 or head_oid.len == 0) return null;
     // The title takes the rest, tabs included: it is a person's sentence.
     return .{
         .number = number,
         .state = state,
+        .base_ref = base_ref,
         .base_oid = base_oid,
         .head_oid = head_oid,
         .title = it.rest(),
@@ -122,9 +127,24 @@ pub fn resolve(
 ) ResolveError!Refs {
     const pr = try view(gpa, arena, io, number);
 
-    if (!git.hasCommit(gpa, io, pr.head_oid)) {
+    // Both sides, not just the head. The base commit is a past tip of the
+    // base branch, and a repository whose `origin/main` is behind does not
+    // have it: the merge base then fails and a pull request that is perfectly
+    // readable reports that it cannot be opened.
+    //
+    // Fetched only when something is missing, and that is a complete check
+    // rather than a cheap one: these shas come from GitHub rather than from a
+    // local ref, so a pull request that has moved since the last look has a
+    // head this repository has never seen. There is nothing an unconditional
+    // fetch would catch that this does not.
+    const want_head = !git.hasCommit(gpa, io, pr.head_oid);
+    const want_base = !git.hasCommit(gpa, io, pr.base_oid);
+    if (want_head or want_base) {
         const remote = try git.defaultRemote(gpa, arena, io);
-        try git.fetchPull(gpa, io, remote, pr.number);
+        if (want_head) try git.fetchPull(gpa, io, remote, pr.number);
+        // The branch, not the commit: fetching a bare sha is something not
+        // every server allows, and the branch contains it.
+        if (want_base) try git.fetchRef(gpa, io, remote, pr.base_ref);
     }
 
     const base = try git.mergeBase(gpa, arena, io, pr.base_oid, pr.head_oid);
@@ -154,24 +174,35 @@ test "a resolve names the pull request or the current branch's" {
 }
 
 test "a view parses into two refs and a title" {
-    const pr = parseView("13\tMERGED\tbe94b77\tc7143ba\tfeat: syntax highlight for json\n").?;
+    const pr = parseView("13\tMERGED\tmain\tbe94b77\tc7143ba\tfeat: syntax highlight for json\n").?;
     try testing.expectEqual(@as(u32, 13), pr.number);
     try testing.expectEqualStrings("MERGED", pr.state);
+    try testing.expectEqualStrings("main", pr.base_ref);
     // A commit, not a branch name: see `Pr.base_oid`.
     try testing.expectEqualStrings("be94b77", pr.base_oid);
     try testing.expectEqualStrings("c7143ba", pr.head_oid);
     try testing.expectEqualStrings("feat: syntax highlight for json", pr.title);
 
     // A title is a person's sentence: a tab in it is theirs, not a field.
-    const tabbed = parseView("1\tOPEN\tdef\tabc\tfix:\tthe thing").?;
+    const tabbed = parseView("1\tOPEN\tmain\tdef\tabc\tfix:\tthe thing").?;
     try testing.expectEqualStrings("fix:\tthe thing", tabbed.title);
+}
+
+test "a pull request names a branch to fetch and a commit to diff against" {
+    // Two different things, and using one for the other is the bug each was
+    // added for: the branch moves, so it cannot be the base of the diff; the
+    // commit may be absent, so it cannot be what is fetched.
+    const pr = parseView("13\tOPEN\tmain\tbe94b77\tc7143ba\tfeat: json").?;
+    try testing.expectEqualStrings("main", pr.base_ref);
+    try testing.expectEqualStrings("be94b77", pr.base_oid);
+    try testing.expect(!std.mem.eql(u8, pr.base_ref, pr.base_oid));
 }
 
 test "a merged pull request still has a base that is not its own head" {
     // The failure this guards: `merge-base <branch> <head>` is the head once
     // the branch contains it, and the review comes back empty. `baseRefOid`
     // is the branch as it was, which does not move under a merged request.
-    const pr = parseView("12\tMERGED\tbe94b77\te721393\tfeat: v0.1.3").?;
+    const pr = parseView("12\tMERGED\tmain\tbe94b77\te721393\tfeat: v0.1.3").?;
     try testing.expect(!std.mem.eql(u8, pr.base_oid, pr.head_oid));
 }
 
@@ -182,5 +213,5 @@ test "anything that is not a pull request is not guessed at" {
     try testing.expect(parseView("") == null);
     try testing.expect(parseView("13\tOPEN\n") == null);
     // Present but empty is no answer either.
-    try testing.expect(parseView("13\tOPEN\t\t\ttitle") == null);
+    try testing.expect(parseView("13\tOPEN\tmain\t\t\ttitle") == null);
 }
