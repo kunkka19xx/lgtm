@@ -353,10 +353,21 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
 
     // Beside where the width allows, under where only the height does.
     // Beside first: the list keeps every row it had.
+    //
+    // The list has a floor and, until it shares the width with a panel, no
+    // ceiling: one deep path takes the room the panel was drawing in. Half is
+    // where a preview stops being one. A ceiling, so a list of short paths
+    // keeps its natural width and only a long one is elided, towards the file
+    // name that says which file it is.
+    const list_w = if (m.preview and cols == 1)
+        @min(one, @max(min_list_width, (max_content -| gap) / 2))
+    else
+        one;
+
     var beside: u16 = 0;
-    if (m.preview and cols == 1 and max_content >= one + gap + preview_min) {
-        beside = @min(preview_max, max_content - one - gap);
-        content = @min(max_content, one + gap + beside);
+    if (m.preview and cols == 1 and max_content >= list_w + gap + preview_min) {
+        beside = @min(preview_max, max_content - list_w - gap);
+        content = @min(max_content, list_w + gap + beside);
     }
 
     // Rows: two borders and the filter line are chrome; the rest is the list.
@@ -647,6 +658,38 @@ test "the preview goes beside the list, or under it, or not at all" {
     const plain = fit(m, 0, .{ .width = 120, .top = 2, .height = 24 }).?;
     try testing.expectEqual(@as(u16, 0), plain.preview_width);
     try testing.expectEqual(plain.content, plain.list_width);
+}
+
+test "a deep path does not take the room the panel draws in" {
+    // A monorepo path: `apps/linows/src-tauri/src/platform/windows/update.rs`
+    // plus the icon columns and the counts.
+    var m: Metrics = .{ .keys = 62, .desc = 8, .entries = 6, .title = 6, .footer = 40, .preview = true };
+    m.preview_lines = preview_rows_max;
+    m.min_content = min_list_width;
+
+    const shared = fit(m, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    // Half of the content, and the panel gets the other half rather than
+    // whatever the longest path left over.
+    try testing.expect(shared.list_width <= (shared.content -| gap) / 2 + 1);
+    try testing.expect(shared.preview_width >= shared.list_width -| 1);
+
+    // A ceiling, not a target: short paths keep their natural width, so a
+    // list of them is not padded out to half the box.
+    m.keys = 20;
+    const snug = fit(m, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(@as(u16, 20 + gap + 8), snug.list_width);
+
+    // And the floor still wins: halving a narrow pane must not put the list
+    // under the width a list of paths needs.
+    m.keys = 62;
+    const narrow = fit(m, 0, .{ .width = 80, .top = 0, .height = 30 }).?;
+    try testing.expect(narrow.list_width >= @min(min_list_width, narrow.content));
+
+    // With no panel asked for, the list is as wide as its widest row, which
+    // is what every other list does.
+    m.preview = false;
+    const alone = fit(m, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(@as(u16, 62 + gap + 8), alone.list_width);
 }
 
 test "a list of short names still gets a box worth opening" {

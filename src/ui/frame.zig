@@ -170,6 +170,9 @@ pub const View = struct {
     /// *state*, not an answer to a keystroke.
     base: []const u8 = "",
     target: []const u8 = "",
+    /// What to call this review instead of its two refs. A pair of shas is a
+    /// true answer to "what am I looking at" and a useless one.
+    label: []const u8 = "",
     /// The turn on screen, or null for the working tree. The mode row says so
     /// on every frame it is set, and not optionally: a turn's diff looks
     /// exactly like the working tree's, and reading old code as current is the

@@ -328,6 +328,10 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
             try std.fmt.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
     else if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
         "VISUAL LINE"
+    else if (v.label.len > 0)
+        // A name the refs cannot give. A pull request is two shas, which is a
+        // true answer and a useless one.
+        v.label
     else if (v.base.len > 0)
         // `main` for a live review against a branch, `main..HEAD` for a static
         // one - the arrow is what says the right-hand side is a tree rather
@@ -344,7 +348,7 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     var walk_key: [32]u8 = undefined;
     // The accent, the same as a turn's: both say the diff on screen is not the
     // one this tool is otherwise always showing.
-    const badge = if (v.viewing != null or v.base.len > 0) t.turn_badge else t.mode_badge;
+    const badge = if (v.viewing != null or v.base.len > 0 or v.label.len > 0) t.turn_badge else t.mode_badge;
     var col: u16 = try f.print(row, 0, badge, " {s} ", .{label});
 
     col += 2;

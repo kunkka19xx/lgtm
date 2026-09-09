@@ -89,6 +89,10 @@ pub const Review = struct {
     /// against something they cannot see.
     base: []const u8 = "HEAD",
     target: ?[]const u8 = null,
+    /// What the status row calls this review when the refs would not say.
+    /// Inline: it outlives every arena here and is one short line.
+    label_buf: [160]u8 = undefined,
+    label_len: u8 = 0,
     /// `[review] ignore` patterns, and whether they are being applied. Held
     /// here because a re-diff is where they take effect: toggling is a
     /// re-diff, not a filter over what is already parsed.
@@ -541,6 +545,15 @@ pub const Review = struct {
     }
 
     /// What the turn on screen is diffed against.
+    pub fn label(self: *const Review) []const u8 {
+        return self.label_buf[0..self.label_len];
+    }
+
+    pub fn setLabel(self: *Review, text: []const u8) void {
+        self.label_len = @intCast(@min(text.len, self.label_buf.len));
+        @memcpy(self.label_buf[0..self.label_len], text[0..self.label_len]);
+    }
+
     pub fn viewBase(self: *const Review) []const u8 {
         if (self.view_base_len == 0) return "HEAD";
         return self.view_base[0..self.view_base_len];
