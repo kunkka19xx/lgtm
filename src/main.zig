@@ -25,6 +25,7 @@ const usage =
     \\  --config <path>  read this file instead of the usual two
     \\  --init           write a starter config and exit; --config picks where
     \\  --pr [n]         review a pull request; bare, the current branch's
+    \\                   (not with --base or --target: it sets both)
     \\  --pane <id>      send here: a tmux pane (%3), a herdr pane (w1:p1),
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
@@ -107,10 +108,8 @@ pub fn main(init: std.process.Init) !void {
                 return;
             };
         } else if (std.mem.eql(u8, arg, "--pr")) {
-            // The number is optional: bare `--pr` is the current branch's,
-            // which is the pull request an agent just pushed. So the next
-            // argument is only consumed when it is digits, and `--pr --once`
-            // is two flags rather than a parse error.
+            // The number is optional, so the next argument is taken only when
+            // it is digits: `--pr --once` is two flags, not a parse error.
             want_pr = true;
             if (args.next()) |next| {
                 if (next.len > 0 and std.ascii.isDigit(next[0])) {
@@ -197,17 +196,22 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    // `--pr` is sugar for `--base` and `--target`: resolved here so that by
-    // the time the review starts, a pull request is the static two-tree mode
-    // that already existed and nothing below this line knows about GitHub.
+    // `--pr` is sugar for `--base` and `--target`, resolved before the review
+    // starts so that nothing below this line knows about GitHub.
     var pr_arena: std.heap.ArenaAllocator = .init(gpa);
     defer pr_arena.deinit();
     var pr_label: []const u8 = "";
     if (want_pr) {
+        if (base != null or target != null) {
+            // Winning quietly would review something the reader did not ask
+            // for and say nothing about it.
+            try w.print("lgtm: --pr sets --base and --target itself\n\n{s}", .{usage});
+            try w.flush();
+            return;
+        }
         const refs = gh.resolve(gpa, pr_arena.allocator(), io, pr_number) catch {
-            // No degrading into a local review: the reader asked for one
-            // specific diff, and showing them a different one is worse than
-            // saying nothing. `gh` has already said why on stderr.
+            // No degrading into a local review: one specific diff was asked
+            // for. `gh` has already said why on stderr.
             try w.print("lgtm: could not open that pull request\n", .{});
             try w.flush();
             return;

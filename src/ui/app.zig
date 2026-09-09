@@ -329,10 +329,14 @@ pub const App = struct {
     /// keystroke, and the frame arena is reset between them - which made every
     /// label a slice of freed memory and every filter a miss.
     pick_arena: std.heap.ArenaAllocator = undefined,
-    /// The refs and label of the pull request on screen. Its own arena because
-    /// they outlive every re-diff and die only when another pull request is
-    /// opened or the review goes back to the working tree.
-    pr_arena: std.heap.ArenaAllocator = undefined,
+    /// The two refs `review.base` and `review.target` point at in a pull
+    /// request. Inline rather than in an arena: the resolve allocates before
+    /// it can fail, so the arena had to be reset first and a failed `:pr` then
+    /// freed the refs the review was still using.
+    pr_base: [64]u8 = undefined,
+    pr_base_len: u8 = 0,
+    pr_target: [64]u8 = undefined,
+    pr_target_len: u8 = 0,
     /// Every path in the project, from `git ls-files`, loaded the first time
     /// `@` asks and kept for the session. Not loaded at startup: most sessions
     /// never mention a file, and cold start has a 50 ms budget.
@@ -398,7 +402,6 @@ pub const App = struct {
             .comments = .init(gpa),
             .preview_arena = .init(gpa),
             .pick_arena = .init(gpa),
-            .pr_arena = .init(gpa),
             .frame_arena = .init(gpa),
         };
     }
@@ -408,7 +411,6 @@ pub const App = struct {
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.pick_arena.deinit();
-        self.pr_arena.deinit();
         self.preview_arena.deinit();
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
@@ -1036,8 +1038,7 @@ pub const App = struct {
                 // from the keymap, so a remap moves them.
                 self.file_list.extra_keys = self.commentListKeys(self.pick_arena.allocator());
                 self.file_list.open(0);
-                // After `open`, which restores the default.
-                self.file_list.max_share = picker_share;
+                self.file_list.max_share = picker_share; // after `open` resets it
                 self.mode = .finder;
             },
             .comment_send => try self.commentSend(),
@@ -2155,12 +2156,8 @@ pub const App = struct {
         self.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
     }
 
-    /// `:pr [n]` points the review at a pull request, or back at the working
-    /// tree with `:pr off`.
-    ///
-    /// The same resolve `--pr` runs, so the two spellings cannot disagree
-    /// about what a pull request is. Everything after it is the static
-    /// two-tree mode that already existed.
+    /// `:pr [n]`, or `:pr off` for the working tree. The same resolve `--pr`
+    /// runs, so the two spellings cannot disagree about what a request is.
     fn openPr(self: *App, arg: []const u8) void {
         if (std.mem.eql(u8, arg, "off")) return self.closePr();
 
@@ -2172,25 +2169,35 @@ pub const App = struct {
             };
         }
 
-        _ = self.pr_arena.reset(.retain_capacity);
-        const refs = gh.resolve(self.gpa, self.pr_arena.allocator(), self.io, number) catch {
+        // Dies with the call; what the review keeps is copied out. Nothing
+        // is touched before the resolve can fail, so a failure leaves the
+        // review where it was.
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const refs = gh.resolve(self.gpa, scratch.allocator(), self.io, number) catch {
             self.notice.set("could not open that pull request", .{});
             return;
         };
 
-        self.review.base = refs.base;
-        self.review.target = refs.target;
+        self.review.base = self.keepRef(&self.pr_base, &self.pr_base_len, refs.base);
+        self.review.target = self.keepRef(&self.pr_target, &self.pr_target_len, refs.target);
         self.review.setLabel(refs.label);
         self.reopen();
-        // Not the label: the badge is already showing it, and the same string
-        // twice reads as a fault. What a reader does not know yet is that the
-        // review has stopped following their working tree.
+        // Not the label: the badge shows it already. What is new is that the
+        // review has stopped following the working tree.
         self.notice.set("static review of #{d} - :pr off to come back", .{refs.number});
     }
 
-    /// Back to the working tree. The counterpart of `:pr`, because a reader
-    /// who can get into a pull request without restarting should be able to
-    /// get out of one the same way.
+    /// Copies a ref somewhere the review can hold it. Truncates rather than
+    /// refuses: a ref that does not resolve is git's error to report.
+    fn keepRef(_: *App, buf: []u8, len: *u8, ref: []const u8) []const u8 {
+        len.* = @intCast(@min(ref.len, buf.len));
+        @memcpy(buf[0..len.*], ref[0..len.*]);
+        return buf[0..len.*];
+    }
+
+    /// A reader who can get into a pull request without restarting should be
+    /// able to get out the same way.
     fn closePr(self: *App) void {
         if (self.review.label().len == 0) {
             self.notice.set("not reviewing a pull request", .{});
@@ -2199,7 +2206,8 @@ pub const App = struct {
         self.review.base = "HEAD";
         self.review.target = null;
         self.review.setLabel("");
-        _ = self.pr_arena.reset(.retain_capacity);
+        self.pr_base_len = 0;
+        self.pr_target_len = 0;
         self.reopen();
         self.notice.set("back to the working tree", .{});
     }
@@ -2558,6 +2566,40 @@ pub const App = struct {
         try testing.expectEqualStrings("", fx.app.review.label());
         try testing.expect(fx.app.review.target == null);
         try testing.expectEqualStrings("HEAD", fx.app.review.base);
+    }
+
+    test "a failed pull request leaves the review pointing where it was" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Standing in one pull request, as if a resolve had succeeded.
+        fx.app.review.base = fx.app.keepRef(&fx.app.pr_base, &fx.app.pr_base_len, "be94b77de24e3c40f85f80bbcfc11b871335d065");
+        fx.app.review.target = fx.app.keepRef(&fx.app.pr_target, &fx.app.pr_target_len, "c7143ba8237180b84b378d651f0b020652160868");
+        fx.app.review.setLabel("#13 feat: syntax highlight for json");
+
+        // A resolve that cannot even start. The refs held an arena that was
+        // reset before the resolve ran, so a failure freed what the review was
+        // still pointing at and left it to diff against whatever landed there.
+        fx.app.openPr("not-a-number");
+        try testing.expectEqualStrings("be94b77de24e3c40f85f80bbcfc11b871335d065", fx.app.review.base);
+        try testing.expectEqualStrings("c7143ba8237180b84b378d651f0b020652160868", fx.app.review.target.?);
+        try testing.expectEqualStrings("#13 feat: syntax highlight for json", fx.app.review.label());
+
+        // And leaving puts back refs that are not owned by anything at all.
+        fx.app.closePr();
+        try testing.expectEqualStrings("HEAD", fx.app.review.base);
+        try testing.expect(fx.app.review.target == null);
+        try testing.expectEqual(@as(u8, 0), fx.app.pr_base_len);
+    }
+
+    test "a ref longer than the buffer is truncated rather than overrunning it" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        const long = "a" ** 200;
+        const kept = fx.app.keepRef(&fx.app.pr_base, &fx.app.pr_base_len, long);
+        try testing.expectEqual(fx.app.pr_base.len, kept.len);
+        try testing.expect(std.mem.startsWith(u8, long, kept));
     }
 
     test "a label longer than the row still fits the buffer that holds it" {

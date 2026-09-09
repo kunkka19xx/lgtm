@@ -89,9 +89,8 @@ pub const Review = struct {
     /// against something they cannot see.
     base: []const u8 = "HEAD",
     target: ?[]const u8 = null,
-    /// What the status row calls this review, when the refs would not say.
-    /// Held inline: it outlives every arena in the process and is one short
-    /// line.
+    /// What the status row calls this review when the refs would not say.
+    /// Inline: it outlives every arena here and is one short line.
     label_buf: [160]u8 = undefined,
     label_len: u8 = 0,
     /// `[review] ignore` patterns, and whether they are being applied. Held
