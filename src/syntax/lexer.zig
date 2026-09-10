@@ -36,8 +36,11 @@ pub const State = struct {
     /// Net brace depth since the start of the file. Signed, because a fragment
     /// can close more braces than it opens.
     depth: i32 = 0,
+    /// Indentation of the line that opened a block scalar. Its body is every
+    /// line indented past this one.
+    block_indent: u16 = 0,
 
-    pub const Mode = enum(u8) { normal, block_comment, string };
+    pub const Mode = enum(u8) { normal, block_comment, string, block_scalar };
 };
 
 pub const checkpoint_lines = 64;
@@ -233,6 +236,10 @@ const Scan = struct {
     line: u32 = 0,
     indent: u16 = 0,
     at_line_start: bool = true,
+    /// Nothing but whitespace and a sequence dash has been seen on this line.
+    /// What `key_words` means by the head of a line, and not part of `State`:
+    /// it never survives a newline, so a checkpoint has nothing to carry.
+    head: bool = true,
     /// Set by a `fn_decl` keyword; the next identifier is the function name.
     expect_fn: bool = false,
     /// Whether that keyword was a `fn_decl_body` one, so the span it opens
@@ -248,6 +255,7 @@ const Scan = struct {
             if (self.at_line_start) {
                 try self.lineStart();
                 self.at_line_start = false;
+                self.head = true;
             }
 
             const before = self.i;
@@ -255,6 +263,7 @@ const Scan = struct {
                 .normal => try self.inNormal(),
                 .block_comment => try self.inBlockComment(self.i),
                 .string => try self.inString(self.i),
+                .block_scalar => try self.inBlockScalar(),
             }
             // Every step consumes at least one byte and never runs past the
             // newline that ends a line, so this is the single place lines are
@@ -279,7 +288,7 @@ const Scan = struct {
         }
 
         // Indentation is only meaningful outside a multi-line literal.
-        if (self.st.mode != .normal) return;
+        if (self.st.mode == .block_comment or self.st.mode == .string) return;
 
         var j = self.i;
         var col: u16 = 0;
@@ -429,6 +438,11 @@ const Scan = struct {
             }
         }
 
+        // Whitespace above returned already, so this is a token: the head of
+        // the line ends here unless it is the dash that opens a sequence item.
+        const at_head = self.head;
+        self.head = self.head and c == '-';
+
         if (std.ascii.isDigit(c)) {
             const start = self.i;
             self.scanNumber();
@@ -472,6 +486,24 @@ const Scan = struct {
                 }
             }
 
+            // Position beats vocabulary: a word the language reads as a key is
+            // one whatever the word is.
+            const keyable = switch (self.def.key_words) {
+                .none => false,
+                .line_head => at_head,
+                .anywhere => true,
+            };
+            if (keyable) {
+                if (self.afterKey()) |j| {
+                    kind = .type_name;
+                    // Only a key whose value is a block names the lines under
+                    // it. A scalar's key names one line, which is the line the
+                    // reader is already looking at.
+                    const next = self.text[j];
+                    if (next == '\n' or next == '\r' or next == '#') try self.openFn(word, true);
+                }
+            }
+
             // A tag name is an ordinary identifier the markup put after `<`,
             // so it never collides with a keyword lookup.
             if (self.expect_tag) {
@@ -479,6 +511,32 @@ const Scan = struct {
                 self.expect_tag = false;
             }
             return self.emit(start, self.i, kind);
+        }
+
+        // The rest of the line is a marker; the body starts below it.
+        if (self.def.block_scalars and self.opensBlockScalar(self.i)) {
+            const start = self.i;
+            self.st.block_indent = self.indent;
+            self.st.mode = .block_scalar;
+            self.toLineEnd();
+            return self.emit(start, self.i, .punct);
+        }
+
+        // A table header is the whole bracketed name, and the only structure
+        // TOML has. It has a line to itself, which is what tells it from an
+        // array element that happens to start one: `[1, 2],` is a value.
+        if (self.def.bracket_tables and at_head and c == '[') {
+            const start = self.i;
+            while (self.i < self.end and self.text[self.i] != '\n' and self.text[self.i] != ']') self.i += 1;
+            // `[[products]]` closes with two, and both belong to the name.
+            const closed = self.i < self.end and self.text[self.i] == ']';
+            while (self.i < self.end and self.text[self.i] == ']') self.i += 1;
+            const name = std.mem.trim(u8, self.text[start..self.i], "[]");
+            if (closed and name.len > 0 and self.restOfLineBlank()) {
+                try self.openFn(name, true);
+                return self.emit(start, self.i, .type_name);
+            }
+            self.i = start;
         }
 
         // Punctuation, merged into one run. The merge stops at anything that
@@ -525,6 +583,38 @@ const Scan = struct {
 
     /// std's scalar search is vectorised, so this beats stepping a byte at a
     /// time - and comment-heavy source spends a lot of its time right here.
+    /// A YAML block scalar: every line indented past the `|` or `>` that
+    /// opened it, whatever it happens to contain.
+    ///
+    /// Emitted as one string run per line rather than lexed, because the body
+    /// is somebody else's language - a shell script in a `run:` step - and
+    /// reading `key: value` or a `#` in it as YAML is a guess that is usually
+    /// wrong. A blank line stays inside: it is a blank line of the script.
+    fn inBlockScalar(self: *Scan) Allocator.Error!void {
+        const start = self.i;
+        self.toLineEnd();
+        const line = std.mem.trimEnd(u8, self.text[start..self.i], "\r\n");
+        const blank = std.mem.trim(u8, line, " \t").len == 0;
+        if (!blank and self.indent <= self.st.block_indent) {
+            // Back out to the parent's level: the block ended before this
+            // line, which belongs to the mapping again.
+            self.i = start;
+            self.st.mode = .normal;
+            return self.inNormal();
+        }
+        return self.emit(start, self.i, .string);
+    }
+
+    /// `|`, `>` and their modifiers - `|-`, `>+`, `|2` - with nothing after
+    /// them but the newline.
+    fn opensBlockScalar(self: Scan, from: usize) bool {
+        if (self.text[from] != '|' and self.text[from] != '>') return false;
+        var j = from + 1;
+        while (j < self.end and (self.text[j] == '-' or self.text[j] == '+' or std.ascii.isDigit(self.text[j]))) j += 1;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t' or self.text[j] == '\r')) j += 1;
+        return j >= self.end or self.text[j] == '\n';
+    }
+
     fn toLineEnd(self: *Scan) void {
         const nl = std.mem.indexOfScalarPos(u8, self.text[0..self.end], self.i, '\n');
         self.i = if (nl) |n| n + 1 else self.end;
@@ -665,7 +755,7 @@ const Scan = struct {
         // a resumed segment has the opener on an earlier line, and an
         // unterminated one recovered at the newline rather than closing.
         if (closed and self.def.key_strings and start + spec.open.len < self.i) {
-            if (self.afterColon()) |j| {
+            if (self.afterKey()) |j| {
                 // Only a key whose value is a block can name the lines under
                 // it, and `confirmPending` reaches the block only on this
                 // line. Testing it here rather than opening a span per key is
@@ -681,13 +771,28 @@ const Scan = struct {
         try self.emit(start, self.i, .string);
     }
 
-    /// `key_strings`: the first byte past the ':' that follows the literal
-    /// which just closed, or null if the next thing on the line is not one.
-    fn afterColon(self: Scan) ?usize {
+    /// Nothing but spaces or a comment between here and the end of the line.
+    fn restOfLineBlank(self: Scan) bool {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t' or self.text[j] == '\r')) j += 1;
+        if (j >= self.end or self.text[j] == '\n') return true;
+        for (self.def.line_comment) |lc| {
+            if (std.mem.startsWith(u8, self.text[j..self.end], lc)) return true;
+        }
+        return false;
+    }
+
+    /// The first byte past the `key_sep` that follows the word or literal
+    /// which just ended, or null if the next thing on the line is not one.
+    fn afterKey(self: Scan) ?usize {
         var j = self.i;
         while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
-        if (j >= self.end or self.text[j] != ':') return null;
+        if (j >= self.end or self.text[j] != self.def.key_sep) return null;
         j += 1;
+        if (self.def.key_sep_spaced) {
+            const after = if (j < self.end) self.text[j] else '\n';
+            if (after != ' ' and after != '\t' and after != '\n' and after != '\r') return null;
+        }
         while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
         return if (j < self.end) j else null;
     }
@@ -907,7 +1012,9 @@ const Scan = struct {
         // bodyless declaration - `fn foo(&self);` in a trait - would stay open
         // and be reported as the enclosing function of everything after it.
         switch (self.def.blocks) {
-            .braces => self.closeBraceSpans(),
+            // Depth never moves under `none`, so this closes every sibling,
+            // which is the whole of what a flat language needs.
+            .braces, .none => self.closeBraceSpans(),
             .indent => self.closeIndentSpans(self.indent),
         }
 
@@ -984,6 +1091,9 @@ const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
 const html_lang = @import("lang/html.zig");
 const json_lang = @import("lang/json.zig");
+const yaml_lang = @import("lang/yaml.zig");
+const toml_lang = @import("lang/toml.zig");
+const dockerfile_lang = @import("lang/dockerfile.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
@@ -2367,4 +2477,242 @@ test "structure mode allocates nothing for runs" {
     defer st.deinit(gpa);
     try testing.expect(st.fns.len > 10);
     for (st.fns) |f| try testing.expect(f.end_line >= f.start_line);
+}
+
+test "a yaml key is the first word on its line and nothing else is" {
+    const src =
+        \\# a compose file
+        \\version: "3.9"
+        \\services:
+        \\  web:
+        \\    image: nginx:alpine
+        \\    ports:
+        \\      - "8080:80"
+        \\    environment:
+        \\      - KEY=value
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&yaml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "version").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "services").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "image").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"3.9\"").?);
+    // The colon in a value is punctuation. Reading it as a key is what would
+    // paint the tag of every image and the port of every mapping.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "nginx").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "# a compose file").?);
+    // Past the sequence dash, the item's own key still heads the line.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"8080:80\"").?);
+}
+
+test "a yaml key beats the word it is spelled with" {
+    // `on:` heads most workflow files. As a boolean it would be the wrong
+    // colour and would name none of the lines under it.
+    const src =
+        \\name: ci
+        \\on:
+        \\  push:
+        \\    branches: [main]
+        \\jobs:
+        \\  build:
+        \\    runs-on: ubuntu-latest
+        \\    steps:
+        \\      - run: zig build test
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&yaml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "on").?);
+    // One word, because a dash continues an identifier here.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "runs-on").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    // A key whose value is a block names the lines under it; a key with a
+    // scalar value names only its own line, which the reader can already see.
+    try testing.expectEqualStrings("push", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("build", st.enclosingFn(6).?.name);
+    try testing.expectEqualStrings("steps", st.enclosingFn(8).?.name);
+}
+
+test "a dockerfile names its stages" {
+    const src =
+        \\# build it
+        \\FROM golang:1.22 AS builder
+        \\WORKDIR /src
+        \\RUN go build -o app .
+        \\
+        \\FROM alpine:3.19 AS runtime
+        \\RUN mkdir -p ${TARGET}/bin && chmod 755 ${TARGET}
+        \\COPY --from=builder /src/app /app
+        \\ENTRYPOINT ["/app"]
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&dockerfile_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "FROM").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "ENTRYPOINT").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "# build it").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"/app\"").?);
+
+    // The only structure a Dockerfile has, and the one a hunk header wants:
+    // which stage a line belongs to. A stage ends where the next begins.
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("builder", st.enclosingFn(3).?.name);
+    // The brace of a shell expansion is not a scope: counted as one it closed
+    // the stage on the line below it.
+    try testing.expectEqualStrings("runtime", st.enclosingFn(8).?.name);
+}
+
+test "a yaml block scalar is not yaml" {
+    const src =
+        \\steps:
+        \\  - name: build
+        \\    run: |
+        \\      # not a comment, and this is not yaml
+        \\      key: not a key
+        \\
+        \\      echo done
+        \\  - shell: bash
+        \\    working-directory: src
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&yaml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // Everything indented past the marker is the script, whatever it says.
+    // A blank line stays inside it: it is a blank line of the script.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "# not a comment").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "key: not a key").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "echo done").?);
+    // Back at the mapping's level, and a key again.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "shell").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "working-directory").?);
+}
+
+test "a yaml key needs the space its grammar asks for" {
+    // `dbdata:/var` is a plain scalar, not a mapping. Without the space test
+    // every volume, every image tag and every URL heading a line was a key.
+    const src =
+        \\volumes:
+        \\  - dbdata:/var/lib/postgresql/data
+        \\  - name: cache
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&yaml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "dbdata").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "name").?);
+}
+
+test "a toml table names the lines under it" {
+    const src =
+        \\# a manifest
+        \\[package]
+        \\name = "lgtm"
+        \\version = "0.1.3"
+        \\edition = "2021"
+        \\
+        \\[dependencies]
+        \\serde = { version = "1.0", features = ["derive"] }
+        \\log = "0.4"
+        \\
+        \\[[bin]]
+        \\name = "lgtm"
+        \\path = 'src/main.rs'
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&toml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "[package]").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "[[bin]]").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "edition").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"lgtm\"").?);
+    // A literal string takes no escapes, so a path stays a path.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "'src/main.rs'").?);
+    // Every key of an inline table, not just the one that heads the line:
+    // an unquoted '=' in TOML is an assignment and nothing else.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "features").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "# a manifest").?);
+
+    // The only structure the format has, and a table ends where the next
+    // begins.
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("package", st.enclosingFn(3).?.name);
+    try testing.expectEqualStrings("dependencies", st.enclosingFn(8).?.name);
+    try testing.expectEqualStrings("bin", st.enclosingFn(12).?.name);
+}
+
+test "a toml value that spans lines is still one value" {
+    const src =
+        \\[tool]
+        \\banner = """
+        \\  = not a key
+        \\  [not a table]
+        \\"""
+        \\paths = [
+        \\  "a",
+        \\  "b",
+        \\]
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&toml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // Inside a multi-line literal nothing is a key and nothing is a table.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "not a key").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "[not a table]").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "paths").?);
+}
+
+test "a toml array element is not a table because it opens with a bracket" {
+    const src =
+        \\[matrix]
+        \\pairs = [
+        \\[1, 2],
+        \\[3, 4],
+        \\]
+        \\rows = 2
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&toml_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    // A table header has its line to itself. This one carries a value after
+    // the bracket, so it is a value.
+    try testing.expectEqual(Kind.punct, kindOf(runs, src, "[1,").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "[matrix]").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqual(@as(usize, 1), st.fns.len);
+    try testing.expectEqualStrings("matrix", st.enclosingFn(5).?.name);
 }
