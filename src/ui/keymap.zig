@@ -75,9 +75,11 @@ pub const Command = enum {
     comment_send,
     comment_send_one,
     comment_send_all,
+    comment_post_one,
     comment_drop,
     comment_view,
     comment_delete,
+    comment_suggest,
     next_comment,
     prev_comment,
     submit_review,
@@ -186,6 +188,7 @@ pub const Command = enum {
     compose_submit,
     compose_cancel,
     compose_send_now,
+    compose_post_now,
     compose_presets,
     compose_mention,
     compose_newline,
@@ -434,12 +437,18 @@ pub const leader: Chord = c(' ');
 pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down and up a line", .group = .move },
     .{ .chords = &.{c('k')}, .command = .line_up, .desc = "down and up a line", .group = .move },
+    // The arrows move the cursor in the diff too, not only in a list: bound
+    // there alone, `V` and the down arrow left the selection one row long.
+    .{ .chords = &.{c(event.code.down)}, .command = .line_down, .group = .move },
+    .{ .chords = &.{c(event.code.up)}, .command = .line_up, .group = .move },
     .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "half a page, down and up", .group = .move },
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "half a page, down and up", .group = .move },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first and last line", .group = .move },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "first and last line", .group = .move },
     .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left and right a character", .group = .move },
     .{ .chords = &.{c('l')}, .command = .char_right, .desc = "left and right a character", .group = .move },
+    .{ .chords = &.{c(event.code.left)}, .command = .char_left, .group = .move },
+    .{ .chords = &.{c(event.code.right)}, .command = .char_right, .group = .move },
     .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next, previous, end of word", .group = .move },
     .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "next, previous, end of word", .group = .move },
     .{ .chords = &.{c('e')}, .command = .word_end, .desc = "next, previous, end of word", .group = .move },
@@ -493,6 +502,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('['), c('c') }, .command = .prev_comment, .desc = "previous comment (wraps)", .group = .comment },
     .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_comment, .group = .comment },
     .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
+    .{ .chords = &.{ leader, c('g'), c('c') }, .command = .comment_suggest, .desc = "suggest a change to these lines, as a comment holding them", .group = .comment },
     .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
     .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
     .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
@@ -588,6 +598,7 @@ pub const default_bindings: []const Binding = &.{
     // A default nobody can press is not a default.
     .{ .chords = &.{ctrl('s')}, .command = .comment_send_one, .modes = Modes.finder_only },
     .{ .chords = &.{ctrl('x')}, .command = .comment_send_all, .modes = Modes.finder_only },
+    .{ .chords = &.{ctrl('p')}, .command = .comment_post_one, .modes = Modes.finder_only },
     .{ .chords = &.{ctrl('d')}, .command = .comment_drop, .modes = Modes.finder_only },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.
@@ -607,12 +618,25 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.enter)}, .command = .compose_submit, .modes = Modes.compose_only, .desc = "send what is in the box" },
     .{ .chords = &.{c(event.code.escape)}, .command = .compose_cancel, .modes = Modes.compose_only, .desc = "leave insert, then leave the box" },
     .{ .chords = &.{ctrl('s')}, .command = .compose_send_now, .modes = Modes.compose_only, .desc = "save a comment and send it now" },
+    .{ .chords = &.{ctrl('p')}, .command = .compose_post_now, .modes = Modes.compose_only, .desc = "save a comment and post it to the pull request" },
     .{ .chords = &.{ctrl('i')}, .command = .compose_presets, .modes = Modes.compose_only, .desc = "insert a [presets] question at the caret" },
     // Terminals send 0x09 for both Tab and Ctrl-i, so this is the same
     // keystroke arriving under its other name rather than a second binding.
     .{ .chords = &.{c(event.code.tab)}, .command = .compose_presets, .modes = Modes.compose_only },
     .{ .chords = &.{c('@')}, .command = .compose_mention, .modes = Modes.compose_only, .desc = "insert a file path at the caret" },
-    .{ .chords = &.{ctrl('j')}, .command = .compose_newline, .modes = Modes.compose_only, .desc = "a line break (Shift-Enter where the terminal sends it)" },
+    // `o` opens a line in the box's normal mode, so this is the same letter
+    // where the reader already is.
+    //
+    // Not `<C-j>` as the first choice, which is the terminal-native newline
+    // and the obvious pick: a vim-tmux-navigator setup binds `C-h/j/k/l` to
+    // move between panes, and tmux swallows it before lgtm is asked. It stays
+    // bound below for anyone whose tmux leaves it alone.
+    .{ .chords = &.{ctrl('o')}, .command = .compose_newline, .modes = Modes.compose_only, .desc = "a line break" },
+    .{ .chords = &.{ctrl('j')}, .command = .compose_newline, .modes = Modes.compose_only },
+    // What every chat box has taught people to press. Only a terminal
+    // reporting the kitty keyboard protocol tells it apart from `<CR>`; where
+    // one does not, this never fires and the two above are the answer.
+    .{ .chords = &.{shift(event.code.enter)}, .command = .compose_newline, .modes = Modes.compose_only },
 
     .{ .chords = &.{c(event.code.tab)}, .command = .list_down, .modes = Modes.lists },
     .{ .chords = &.{shift(event.code.tab)}, .command = .list_up, .modes = Modes.lists },
@@ -748,6 +772,13 @@ test "a single-key binding resolves immediately" {
     var km: Keymap = .{};
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
     try testing.expectEqual(@as(usize, 0), km.len);
+    // In the diff, not only in a list.
+    try testing.expectEqual(Command.line_down, km.feed(tap(event.code.down), .normal).command);
+    try testing.expectEqual(Command.line_up, km.feed(tap(event.code.up), .normal).command);
+    try testing.expectEqual(Command.line_down, km.feed(tap(event.code.down), .visual).command);
+    try testing.expectEqual(Command.char_right, km.feed(tap(event.code.right), .visual).command);
+    // And a list still gets its own meaning for them.
+    try testing.expectEqual(Command.list_down, km.feed(tap(event.code.down), .finder).command);
 }
 
 test "a two-key sequence waits for its second key" {

@@ -41,11 +41,25 @@ pub fn path(buf: []u8, n: u32) []const u8 {
 /// is still something the reader wrote and has not dismissed, so it goes in
 /// with a warning rather than being dropped on its way to the agent. Hard rule
 /// 7 does not stop at the screen.
-pub fn render(out: *std.ArrayList(u8), gpa: Allocator, store: *const comments.Store, n: u32) Allocator.Error!u32 {
+/// `scope` says what the line numbers below belong to, and is empty for the
+/// working tree. A pull request is somebody else's tree: without it the agent
+/// resolves `src/config.zig:8` against the checkout it stands in.
+pub fn render(
+    out: *std.ArrayList(u8),
+    gpa: Allocator,
+    store: *const comments.Store,
+    n: u32,
+    scope: []const u8,
+) Allocator.Error!u32 {
     var num: [24]u8 = undefined;
     try out.appendSlice(gpa, "# Review ");
     try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{n}) catch "");
     try out.appendSlice(gpa, "\n");
+    if (scope.len > 0) {
+        try out.appendSlice(gpa, "\n> ");
+        try out.appendSlice(gpa, scope);
+        try out.appendSlice(gpa, "\n");
+    }
 
     var written: u32 = 0;
     // Files in first-appearance order, without allocating a set: the comment
@@ -90,7 +104,11 @@ pub fn render(out: *std.ArrayList(u8), gpa: Allocator, store: *const comments.St
             first = false;
 
             try out.appendSlice(gpa, "\n- **line ");
-            try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{m.line}) catch "");
+            if (m.span > 1) {
+                try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}-{d}", .{ m.line, m.end() }) catch "");
+            } else {
+                try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{m.line}) catch "");
+            }
             try out.appendSlice(gpa, "**");
             // A stale comment says so in the file as well as on screen. The agent
             // should know the line moved out from under the remark rather than
@@ -118,6 +136,42 @@ fn indent(out: *std.ArrayList(u8), gpa: Allocator, body: []const u8) Allocator.E
     }
 }
 
+test "a remark on several lines says so" {
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addFull("a.zig", 44, "these three belong together", "", false, 3);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    _ = try render(&out, testing.allocator, &store, 1, "");
+    // The first line alone is a third of the problem.
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 44-46**") != null);
+}
+
+test "a review of somebody else's tree says whose" {
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.add("src/config.zig", 8, "this list should be sorted");
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    const scope = "Pull request #16, kunkka19xx/lgtm. Line numbers are that tree: `gh pr checkout 16`.";
+    _ = try render(&out, testing.allocator, &store, 1, scope);
+
+    // Without it the agent reads `src/config.zig:8` and looks at line 8 of the
+    // checkout it is standing in, which is different code.
+    try testing.expect(std.mem.indexOf(u8, out.items, scope) != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "gh pr checkout 16") != null);
+
+    // A working-tree review says nothing extra: the lines are the files.
+    // (`>` alone would not tell us, since every body is a blockquote.)
+    var plain: std.ArrayList(u8) = .empty;
+    defer plain.deinit(testing.allocator);
+    _ = try render(&plain, testing.allocator, &store, 1, "");
+    try testing.expect(std.mem.indexOf(u8, plain.items, "Pull request") == null);
+    try testing.expect(std.mem.startsWith(u8, plain.items, "# Review 1\n\n## "));
+}
+
 const testing = std.testing;
 
 test "the review groups by file and orders by line" {
@@ -130,7 +184,7 @@ test "the review groups by file and orders by line" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    const n = try render(&out, testing.allocator, &store, 3);
+    const n = try render(&out, testing.allocator, &store, 3, "");
     try testing.expectEqual(@as(u32, 3), n);
 
     const text = out.items;
@@ -153,7 +207,7 @@ test "sent comments stay out, so nothing is asked for twice" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    const n = try render(&out, testing.allocator, &store, 1);
+    const n = try render(&out, testing.allocator, &store, 1, "");
     try testing.expectEqual(@as(u32, 1), n);
     try testing.expect(std.mem.indexOf(u8, out.items, "already said this") == null);
     try testing.expect(std.mem.indexOf(u8, out.items, "this one is new") != null);
@@ -169,7 +223,7 @@ test "a stale comment says so in the file, not just on screen" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    _ = try render(&out, testing.allocator, &store, 1);
+    _ = try render(&out, testing.allocator, &store, 1, "");
     try testing.expect(std.mem.indexOf(u8, out.items, "stale") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "this branch is dead") != null);
 }
@@ -181,7 +235,7 @@ test "a multi-line note stays inside its bullet" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    _ = try render(&out, testing.allocator, &store, 1);
+    _ = try render(&out, testing.allocator, &store, 1, "");
     // Every line of the body is quoted, so a list inside a comment does not
     // become a sibling of the bullet it belongs to.
     try testing.expect(std.mem.indexOf(u8, out.items, "  > - because") != null);
@@ -194,7 +248,7 @@ test "an empty review says so rather than being a bare heading" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0), try render(&out, testing.allocator, &store, 7));
+    try testing.expectEqual(@as(u32, 0), try render(&out, testing.allocator, &store, 7, ""));
     try testing.expect(std.mem.indexOf(u8, out.items, "No open comments") != null);
 }
 

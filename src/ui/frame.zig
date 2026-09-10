@@ -390,6 +390,11 @@ pub const FileEntry = struct {
     /// worth having: it is the same argument the file list makes, that shape
     /// and hue together find the one you want without reading a name.
     icon_path: []const u8 = "",
+    /// What the filter matches, when that is not what the row draws. A comment
+    /// row shows `path:line` and matches its text too: the remark is worth
+    /// searching and not worth truncating into a column beside the panel that
+    /// shows it whole.
+    filter: []const u8 = "",
     /// One line of facts, drawn above `preview`. Where the pane picker keeps
     /// the id its rows no longer carry.
     detail: []const u8 = "",
@@ -397,6 +402,11 @@ pub const FileEntry = struct {
     /// a pane's own screen, a comment's text, the head of a file's diff.
     /// Empty draws no panel.
     preview: []const u8 = "",
+    /// Lines at the top of `preview` that are the row's own words rather than
+    /// what it is about. A comment's remark leads its panel, and drawn in the
+    /// same grey as the code it sits above it is the least visible thing in a
+    /// list whose whole subject is remarks.
+    preview_lead: u16 = 0,
     /// What `preview` holds: which end of it is shown, and whether its lines
     /// mean anything worth colouring. An enum rather than two flags, which
     /// would allow a fourth combination that means nothing.
@@ -476,6 +486,9 @@ pub const ComposeView = struct {
     /// delivery, which an edit forgot to set - so the box promised the wrong
     /// destination. This is the fact itself rather than a proxy for it.
     saves: bool = false,
+    /// A pull request is on screen, so a saved comment has somewhere to be
+    /// posted. Decides whether the footer offers the key at all.
+    posts: bool = false,
     /// The keymap, so the footer names the keys the reader actually has. The
     /// box's feature keys are `Modes.compose_only` bindings like everything
     /// else; only its motions are fixed.

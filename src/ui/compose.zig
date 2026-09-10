@@ -232,6 +232,44 @@ pub const Compose = struct {
         self.cursor = nextBoundary(self.buf[0..self.len], self.cursor);
     }
 
+    /// The previous line, at the same column or the end of it if that line is
+    /// shorter. The column is bytes rather than display columns, which is what
+    /// every other motion here counts.
+    pub fn lineUp(self: *Compose) void {
+        const here = self.lineStart();
+        if (here == 0) {
+            self.cursor = 0;
+            return;
+        }
+        const want = self.cursor - here;
+        // The line above runs from its own start to the newline before ours.
+        const prev_end = here - 1;
+        var prev_start = prev_end;
+        while (prev_start > 0 and self.buf[prev_start - 1] != '\n') prev_start -= 1;
+        self.cursor = @min(prev_start + want, prev_end);
+        self.snapBoundary();
+    }
+
+    pub fn lineDown(self: *Compose) void {
+        const end_at = self.lineEnd();
+        if (end_at >= self.len) {
+            self.cursor = self.len;
+            return;
+        }
+        const want = self.cursor - self.lineStart();
+        const next_start = end_at + 1;
+        var next_end = next_start;
+        while (next_end < self.len and self.buf[next_end] != '\n') next_end += 1;
+        self.cursor = @min(next_start + want, next_end);
+        self.snapBoundary();
+    }
+
+    /// A column measured on one line can land mid-codepoint on another.
+    fn snapBoundary(self: *Compose) void {
+        while (self.cursor > 0 and self.cursor < self.len and
+            self.buf[self.cursor] & 0xc0 == 0x80) self.cursor -= 1;
+    }
+
     pub fn home(self: *Compose) void {
         self.cursor = 0;
     }
@@ -328,8 +366,12 @@ pub const Compose = struct {
             // Entering insert, at the five places vim enters it.
             'i' => self.mode = .insert,
             'a' => {
-                self.cursor = motion.charRight(self.line(), self.col()) orelse self.col();
-                self.cursor += self.lineStart();
+                // The line start is read before the caret moves: adding
+                // `lineStart()` afterwards asked a position no longer on the
+                // line, and answered with the top of the box.
+                const at = self.lineStart();
+                const to = motion.charRight(self.line(), self.col()) orelse self.col();
+                self.cursor = at + to;
                 self.mode = .insert;
             },
             'I' => {
@@ -356,6 +398,9 @@ pub const Compose = struct {
                 self.mode = .insert;
             },
             'x' => {
+                // Never across the line's end: `deleteForward` steps over
+                // the newline, so `x` on an empty line joined two.
+                if (self.cursor >= self.lineEnd()) return .typing;
                 self.mark();
                 self.deleteForward();
             },
@@ -468,10 +513,12 @@ pub const Compose = struct {
             event.code.backspace => self.backspace(),
             event.code.left => self.left(),
             event.code.right => self.right(),
-            // Up and down are the ends of the text: the box wraps rather than
-            // holding lines, so there is no row above to go to.
-            event.code.up => self.home(),
-            event.code.down => self.end(),
+            // Line by line. They used to be the ends of the text, which was
+            // true when the box held one wrapped paragraph; it holds real
+            // lines now, and jumping to the top from the middle of one is not
+            // what any text box does.
+            event.code.up => self.lineUp(),
+            event.code.down => self.lineDown(),
             else => {
                 // Control bytes that are not bound are dropped rather than
                 // inserted: a stray 0x07 in a payload is invisible here and
@@ -555,6 +602,121 @@ fn tap(cp: u21) event.Key {
 
 fn ctrl(cp: u21) event.Key {
     return .{ .codepoint = cp, .mods = .{ .ctrl = true } };
+}
+
+test "the normal-mode keys all work on the line the caret is on" {
+    // Every one of these reads a position and then writes the caret, which is
+    // where `a` went wrong: the box held one line for long enough that mixing
+    // a column with an offset looked the same as not mixing them.
+    var c: Compose = .{};
+    c.start("alpha\nbeta\ngamma");
+    c.mode = .normal;
+
+    // `I` and `A`: the ends of *this* line.
+    c.cursor = 8; // inside "beta"
+    _ = c.feed(tap('I'));
+    try testing.expectEqual(@as(usize, 6), c.cursor);
+    c.mode = .normal;
+    c.cursor = 8;
+    _ = c.feed(tap('A'));
+    try testing.expectEqual(@as(usize, 10), c.cursor);
+
+    // `o` opens below and `O` above, both staying in the middle of the box.
+    c.mode = .normal;
+    c.cursor = 8;
+    _ = c.feed(tap('o'));
+    try testing.expectEqualStrings("alpha\nbeta\n\ngamma", c.buf[0..c.len]);
+
+    var d: Compose = .{};
+    d.start("alpha\nbeta\ngamma");
+    d.mode = .normal;
+    d.cursor = 8;
+    _ = d.feed(tap('O'));
+    try testing.expectEqualStrings("alpha\n\nbeta\ngamma", d.buf[0..d.len]);
+    try testing.expectEqual(@as(usize, 6), d.cursor);
+
+    // `dd` takes the line and its newline, leaving the caret in the box.
+    var e: Compose = .{};
+    e.start("alpha\nbeta\ngamma");
+    e.mode = .normal;
+    e.cursor = 8;
+    _ = e.feed(tap('d'));
+    _ = e.feed(tap('d'));
+    try testing.expectEqualStrings("alpha\ngamma", e.buf[0..e.len]);
+}
+
+test "x deletes a character and never the line break" {
+    var c: Compose = .{};
+    c.start("ab\n\ncd");
+    c.mode = .normal;
+
+    // On a character: that character goes.
+    c.cursor = 0;
+    _ = c.feed(tap('x'));
+    try testing.expectEqualStrings("b\n\ncd", c.buf[0..c.len]);
+
+    // On an empty line: nothing. Joining it to the next is what `deleteForward`
+    // would do, and what vim does not.
+    c.cursor = 2;
+    _ = c.feed(tap('x'));
+    try testing.expectEqualStrings("b\n\ncd", c.buf[0..c.len]);
+}
+
+test "append lands after the cursor on its own line, not at the top of the box" {
+    var c: Compose = .{};
+    c.start("first line\nsecond line\nthird");
+
+    // In the middle of the last line.
+    c.mode = .normal;
+    c.cursor = c.len - 2;
+    _ = c.feed(tap('a'));
+    try testing.expectEqualStrings("third", c.line());
+    try testing.expect(c.cursor > c.len - 3);
+
+    // At the end of a line, `a` appends there rather than jumping anywhere.
+    c.mode = .normal;
+    c.cursor = c.len;
+    _ = c.feed(tap('a'));
+    try testing.expectEqualStrings("third", c.line());
+    try testing.expectEqual(c.len, c.cursor);
+}
+
+test "the arrows move a line at a time, not to the ends of the box" {
+    var c: Compose = .{};
+    c.start("short\na much longer line\nmid");
+
+    // From the end of the last line, up keeps the column where it fits.
+    c.end();
+    try testing.expectEqual(c.len, c.cursor);
+    c.lineUp();
+    try testing.expectEqualStrings("a much longer line", c.line());
+    try testing.expectEqual(@as(u32, 3), c.col());
+
+    // And clamps to the end of a shorter line rather than overshooting it.
+    c.lineDown();
+    c.lineUp();
+    c.cursor = c.lineEnd();
+    c.lineUp();
+    try testing.expectEqualStrings("short", c.line());
+    try testing.expectEqual(@as(u32, 5), c.col());
+
+    // Past the first line, up is the very start; past the last, down is the
+    // very end. That is what the arrows used to do from anywhere.
+    c.lineUp();
+    try testing.expectEqual(@as(usize, 0), c.cursor);
+    c.lineDown();
+    c.lineDown();
+    c.lineDown();
+    try testing.expectEqual(c.len, c.cursor);
+}
+
+test "a column measured on one line does not land mid-codepoint on another" {
+    var c: Compose = .{};
+    // `é` is two bytes, so byte column 3 on the second line is inside it.
+    c.start("abcdef\naéb");
+    c.cursor = 3;
+    c.lineDown();
+    try testing.expect(c.buf[c.cursor] & 0xc0 != 0x80);
 }
 
 test "the box opens on the seed with the caret past it" {

@@ -130,7 +130,7 @@ pub const Files = struct {
     pub fn selected(self: *const Files, files: []const frame.FileEntry) ?u32 {
         var shown: usize = 0;
         for (files, 0..) |f, i| {
-            if (fuzzy.match(f.path, self.filter.text()) == null) continue;
+            if (fuzzy.match(matchText(f), self.filter.text()) == null) continue;
             if (shown == self.index) return @intCast(i);
             shown += 1;
         }
@@ -156,16 +156,38 @@ pub const Files = struct {
             .max_share = self.max_share,
             .query = filter,
             .index = self.index,
-            .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),
+            .keys = try navKeys(bindings, arena),
             .layout = &self.layout,
         };
     }
 };
 
+/// The list's own keys for the footer, without the ones that move the cursor.
+///
+/// `J K` and `H L` are the first thing a vim reader tries and the last thing
+/// they need told, and in a list with actions on it they were half the footer:
+/// `J K move  H L page  <C-s> send  <C-x> send all  <C-p> post  <C-d> del`
+/// does not fit a split pane, and the half worth keeping is the half nobody
+/// can guess. `?` still lists all of them.
+fn navKeys(bindings: []const keymap.Binding, arena: Allocator) Allocator.Error![]const keytext.HelpEntry {
+    const all = try keytext.helpEntries(bindings, .finder, null, "", arena);
+    var out: std.ArrayList(keytext.HelpEntry) = .empty;
+    for (all) |e| {
+        if (std.mem.eql(u8, e.desc, "move") or std.mem.eql(u8, e.desc, "page")) continue;
+        try out.append(arena, e);
+    }
+    return out.toOwnedSlice(arena);
+}
+
 /// The rows, in review order, narrowed by `query`. Order is the review's, not
 /// a ranking: a reader who knows the change knows roughly where a file sits in
 /// it, and re-sorting on every keystroke takes that away. The tiers still
 /// matter for *which* rows survive, not for where they land.
+/// What a row is matched against: its own text unless it named something else.
+fn matchText(f: frame.FileEntry) []const u8 {
+    return if (f.filter.len > 0) f.filter else f.path;
+}
+
 /// Whether a query is nothing but digits, and so is asking for a `key`.
 ///
 /// Only when some row has one: in the file list `2` should still fuzzy-match a
@@ -201,7 +223,7 @@ pub fn entries(
     const numeric = byNumber(files, query);
     var out: std.ArrayList(frame.FileEntry) = .empty;
     for (files, 0..) |f, i| {
-        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(matchText(f), query) != null;
         if (!keep) continue;
         var e = f;
         e.current = i == current;
@@ -216,7 +238,7 @@ pub fn count(files: []const frame.FileEntry, query: []const u8) usize {
     const numeric = byNumber(files, query);
     var n: usize = 0;
     for (files) |f| {
-        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(matchText(f), query) != null;
         if (keep) n += 1;
     }
     return n;

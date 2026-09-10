@@ -60,6 +60,11 @@ pub const Options = struct {
     /// Setting it makes the review static, and the three things that watch the
     /// working tree turn themselves off.
     target: ?[]const u8 = null,
+    /// The pull request being reviewed, or zero for the working tree. Decides
+    /// which comment store the review's remarks belong to.
+    pr: u32 = 0,
+    /// `owner/repo` for the pull request, so posting needs no second lookup.
+    repo: []const u8 = "",
     /// What to call the review in the status row, when two shas would say
     /// nothing. `#13 feat: syntax highlight for json` for a pull request.
     label: []const u8 = "",
@@ -197,6 +202,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     fs.ensureSelfIgnore(io);
     // Notes outlive the process: the whole point of `.lgtm/` is that killing
     // the pane costs scroll position and nothing else.
+    app.pr_number = opts.pr;
+    app.pr_repo_len = @intCast(@min(opts.repo.len, app.pr_repo.len));
+    @memcpy(app.pr_repo[0..app.pr_repo_len], opts.repo[0..app.pr_repo_len]);
     app.loadComments();
     // The store needs an environment to run git in, which only this layer has.
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
@@ -244,6 +252,19 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
         try drawFrame(&app, &vx, w, body);
         if (opts.once) break;
+
+        // After the frame, deliberately. The call blocks on the network for
+        // about a second, and a reader who pressed a key and saw nothing
+        // assumes the key missed. Armed by the command, performed here, so the
+        // notice saying it is happening is already on screen.
+        if (app.want_post) |req| {
+            app.want_post = null;
+            app.performPost(req);
+            // Straight back to the top rather than on to the wait: what the
+            // call decided has to reach the screen, and the loop blocks for
+            // input until something else happens.
+            continue;
+        }
 
         // Two ways to wait. Settled, the loop blocks - a review pane is idle
         // almost all of the time and should cost nothing while it is. With the
