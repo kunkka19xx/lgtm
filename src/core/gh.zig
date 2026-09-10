@@ -199,11 +199,14 @@ pub const Event = enum {
 /// is a 422. A remark that cannot be placed is not dropped, it goes into the
 /// review body with its file and line, which is hard rule 7 pointed at a
 /// second destination.
-pub fn inlineable(files: []const diff.FileDiff, path: []const u8, line: u32) bool {
+pub fn inlineable(files: []const diff.FileDiff, path: []const u8, line: u32, span: u32) bool {
+    const n = @max(span, 1);
     for (files) |f| {
         if (!std.mem.eql(u8, f.path(), path)) continue;
+        // Wholly inside one hunk, not merely touching one: a range across a
+        // gap covers lines the diff does not show, and that is a 422.
         for (f.hunks) |h| {
-            if (h.overlapsNew(line, 1) > 0) return true;
+            if (h.overlapsNew(line, n) == n) return true;
         }
         return false;
     }
@@ -236,15 +239,18 @@ pub fn reviewBody(
         if (n.posted) continue;
         try ids.append(gpa, n.id);
 
-        if (n.state != .stale and inlineable(files, n.path, n.line)) {
+        if (n.state != .stale and inlineable(files, n.path, n.line, n.span)) {
             if (inlines.items.len > 0) try inlines.append(gpa, ',');
             try inlines.appendSlice(gpa, "{\"path\":");
             try comments.quoteJson(&inlines, gpa, n.path);
+            // Both ends, which is what a multi-line `suggestion` replaces:
+            // three lines out needs three lines in.
+            if (n.span > 1) try inlines.print(gpa, ",\"start_line\":{d},\"start_side\":\"RIGHT\"", .{n.line});
             // Always the right-hand side. A comment on removed code hangs on
             // the nearest surviving line and no old line number is kept, so
             // `LEFT` has nothing to anchor to; the body below says what it was
             // about instead.
-            try inlines.print(gpa, ",\"line\":{d},\"side\":\"RIGHT\",\"body\":", .{n.line});
+            try inlines.print(gpa, ",\"line\":{d},\"side\":\"RIGHT\",\"body\":", .{n.end()});
             try comments.quoteJson(&inlines, gpa, n.body);
             try inlines.append(gpa, '}');
             continue;
@@ -252,7 +258,11 @@ pub fn reviewBody(
 
         // Not placeable: stale, or anchored outside every hunk.
         if (body.items.len > 0) try body.appendSlice(gpa, "\n\n");
-        try body.print(gpa, "**{s}:{d}**", .{ n.path, n.line });
+        if (n.span > 1) {
+            try body.print(gpa, "**{s}:{d}-{d}**", .{ n.path, n.line, n.end() });
+        } else {
+            try body.print(gpa, "**{s}:{d}**", .{ n.path, n.line });
+        }
         if (n.state == .stale) try body.appendSlice(gpa, " _(the line this was written against has gone)_");
         if (n.about_removed) try body.appendSlice(gpa, " _(about code removed here)_");
         try body.appendSlice(gpa, "\n\n");
@@ -371,6 +381,59 @@ test "a review carries what can be placed inline and says the rest in its body" 
     try testing.expect(std.mem.indexOf(u8, out.items, "two things") != null);
     // Every remark is accounted for, so the caller marks exactly what went.
     try testing.expectEqual(@as(usize, 3), ids.items.len);
+}
+
+test "a range is anchored at both ends, and only inside one hunk" {
+    const gpa = testing.allocator;
+    var store: comments.Store = .init(gpa);
+    defer store.deinit();
+
+    const three = try store.addFull("a.zig", 44, "```suggestion\nnew\n```", "", false, 3);
+    _ = three;
+    // Straddles the gap between two hunks, so no range can hold it.
+    _ = try store.addFull("a.zig", 48, "spans a gap", "", false, 10);
+
+    var hunks = [_]hunk.Hunk{
+        .{ .old_start = 44, .old_count = 6, .new_start = 44, .new_count = 6, .lo = 0, .hi = 0 },
+        .{ .old_start = 90, .old_count = 4, .new_start = 90, .new_count = 4, .lo = 0, .hi = 0 },
+    };
+    var files = [_]diff.FileDiff{oneFile("a.zig", &hunks)};
+
+    // Whole range inside one hunk, or not at all: a range over lines the diff
+    // does not show is a 422.
+    try testing.expect(inlineable(&files, "a.zig", 44, 3));
+    try testing.expect(!inlineable(&files, "a.zig", 48, 10));
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    try reviewBody(&out, gpa, &store, &files, .comment, "", &ids);
+
+    // Both ends, and `line` is the last of them: the suggestion replaces 44
+    // through 46.
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"start_line\":44,\"start_side\":\"RIGHT\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"line\":46,\"side\":\"RIGHT\"") != null);
+    // The one that cannot be placed says its whole range in the body.
+    try testing.expect(std.mem.indexOf(u8, out.items, "a.zig:48-57") != null);
+}
+
+test "a single-line remark still sends one anchor" {
+    const gpa = testing.allocator;
+    var store: comments.Store = .init(gpa);
+    defer store.deinit();
+    _ = try store.add("a.zig", 44, "just here");
+
+    var hunks = [_]hunk.Hunk{.{ .old_start = 44, .old_count = 6, .new_start = 44, .new_count = 6, .lo = 0, .hi = 0 }};
+    var files = [_]diff.FileDiff{oneFile("a.zig", &hunks)};
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    try reviewBody(&out, gpa, &store, &files, .comment, "", &ids);
+    try testing.expect(std.mem.indexOf(u8, out.items, "start_line") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"line\":44") != null);
 }
 
 test "a remark already posted is not posted twice" {

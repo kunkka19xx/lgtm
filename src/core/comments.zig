@@ -57,6 +57,9 @@ pub const Comment = struct {
     path: []const u8,
     /// 1-based line in the working tree. Carried forward on every re-diff.
     line: u32,
+    /// Lines the remark covers, one being just `line`. A count and not an end
+    /// line: re-anchoring moves one number and the span comes with it.
+    span: u32 = 1,
     /// What the reader wrote. Owned, and may contain newlines - it is written
     /// to a file, not sent through `send-keys` (hard rule 1 is about the
     /// bridge, and `review.zig` sends one line naming the file).
@@ -78,6 +81,10 @@ pub const Comment = struct {
     /// *agent* has seen it: a remark legitimately goes to both audiences, and
     /// one field for two would make either destination skip the other's work.
     posted: bool = false,
+
+    pub fn end(self: Comment) u32 {
+        return self.line + @max(self.span, 1) - 1;
+    }
 
     pub fn deinit(self: Comment, gpa: Allocator) void {
         gpa.free(self.path);
@@ -132,7 +139,7 @@ pub const Store = struct {
         body: []const u8,
         anchor_text: []const u8,
     ) Allocator.Error!u32 {
-        return self.addFull(path, line, body, anchor_text, false);
+        return self.addFull(path, line, body, anchor_text, false, 1);
     }
 
     pub fn addFull(
@@ -142,6 +149,7 @@ pub const Store = struct {
         body: []const u8,
         anchor_text: []const u8,
         about_removed: bool,
+        span: u32,
     ) Allocator.Error!u32 {
         const p = try self.gpa.dupe(u8, path);
         errdefer self.gpa.free(p);
@@ -151,7 +159,7 @@ pub const Store = struct {
         errdefer self.gpa.free(a);
 
         const id = self.next_id;
-        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .body = b, .anchor = a, .about_removed = about_removed });
+        try self.list.append(self.gpa, .{ .id = id, .path = p, .line = line, .span = @max(span, 1), .body = b, .anchor = a, .about_removed = about_removed });
         self.next_id += 1;
         self.dirty = true;
         return id;
@@ -312,6 +320,10 @@ pub fn write(out: *std.ArrayList(u8), gpa: Allocator, store: *const Store) Alloc
         try out.appendSlice(gpa, "\",\"path\":");
         try quoteJson(out, gpa, n.path);
         if (n.about_removed) try out.appendSlice(gpa, ",\"removed\":true");
+        if (n.span > 1) {
+            try out.appendSlice(gpa, ",\"span\":");
+            try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{n.span}) catch "1");
+        }
         if (n.posted) try out.appendSlice(gpa, ",\"posted\":true");
         try out.appendSlice(gpa, ",\"anchor\":");
         try quoteJson(out, gpa, n.anchor);
@@ -341,12 +353,13 @@ pub fn read(store: *Store, text: []const u8) Allocator.Error!void {
         const a = if (string(line, "\"anchor\":")) |raw| unquote(&buf_anchor, raw) else "";
 
         const removed = std.mem.indexOf(u8, line, "\"removed\":true") != null;
-        const new_id = try store.addFull(p, @intCast(ln), b, a, removed);
+        const new_id = try store.addFull(p, @intCast(ln), b, a, removed, 1);
         const n = store.find(new_id).?;
         n.id = @intCast(id);
         if (std.mem.indexOf(u8, line, "\"state\":\"sent\"") != null) n.state = .sent;
         if (std.mem.indexOf(u8, line, "\"state\":\"stale\"") != null) n.state = .stale;
         n.posted = std.mem.indexOf(u8, line, "\"posted\":true") != null;
+        if (field(line, "\"span\":")) |sp| n.span = @max(1, @as(u32, @intCast(sp)));
         if (store.next_id <= n.id) store.next_id = n.id + 1;
     }
     store.dirty = false;

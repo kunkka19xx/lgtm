@@ -201,6 +201,10 @@ pub const App = struct {
     /// What the compose box will do with what is typed: send it, or attach it
     /// to a line as a note. The box itself does not know or care.
     compose_comment: ?u32 = null,
+    /// Where the comment being written belongs, captured when the box opened.
+    /// Opening it clears the selection, so asking again at save time would
+    /// give a range of one line.
+    compose_spot: ?Spot2 = null,
     compose_is_comment: bool = false,
     /// How many reviews have been submitted this session, for the file name.
     review_n: u32 = 0,
@@ -892,13 +896,15 @@ pub const App = struct {
         // repeats its own line number would say it twice in `review-N.md`.
         var what: []const u8 = "compose";
         if (self.compose_is_comment) {
-            what = if (self.commentLine()) |at|
-                (if (at.deleted)
-                    std.fmt.allocPrint(arena, "comment {s}:{d} - removed code", .{ at.path, at.line })
+            // The spot the box opened on: the selection is gone by this
+            // frame, and the title would say one line for a range of three.
+            what = if (self.compose_spot orelse self.commentLine()) |at| blk: {
+                const tail: []const u8 = if (at.deleted) " - removed code" else "";
+                break :blk (if (at.span > 1)
+                    std.fmt.allocPrint(arena, "comment {s}:{d}-{d}{s}", .{ at.path, at.line, at.line + at.span - 1, tail })
                 else
-                    std.fmt.allocPrint(arena, "comment {s}:{d}", .{ at.path, at.line })) catch "comment"
-            else
-                "comment";
+                    std.fmt.allocPrint(arena, "comment {s}:{d}{s}", .{ at.path, at.line, tail })) catch "comment";
+            } else "comment";
         }
         return .{
             .what = what,
@@ -1039,6 +1045,7 @@ pub const App = struct {
                 if (self.readOnly()) return;
                 try self.commentAdd();
             },
+            .comment_suggest => try self.commentSuggest(),
             .comment_view => try self.commentView(body),
             .comment_list => {
                 if (self.mode == .finder) return self.closeFiles();
@@ -2267,7 +2274,7 @@ pub const App = struct {
         var store = &self.comments;
         if (req.one) |id| {
             const n = self.comments.find(id) orelse return;
-            _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed) catch return;
+            _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed, n.span) catch return;
             one.list.items[0].state = n.state;
             store = &one;
         }
@@ -3158,6 +3165,19 @@ pub const App = struct {
         try testing.expectEqual(@as(u16, 2), App.lineCount("a\nb\n"));
     }
 
+    test "a charwise selection across lines still covers those lines" {
+        // `v` is what a reader reaches for as often as `V`, and a comment
+        // anchors to whole lines either way: there is no half a line to
+        // suggest a replacement for. Refusing charwise here fell back to the
+        // cursor's line, which is the *last* of the selection, so choosing
+        // three lines quietly commented on one.
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        try testing.expect(App.Range.covers(.{ .lo = 5, .hi = 7, .rows = 3, .skipped = 0 }) == 3);
+        try testing.expect(App.Range.covers(.{ .lo = 5, .hi = 5, .rows = 1, .skipped = 0 }) == 1);
+    }
+
     test "a comment row is its address; the remark is in the panel and the filter" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
@@ -3672,7 +3692,54 @@ pub const App = struct {
     /// The line the cursor points at, as the note store counts them: the new
     /// file's line, which is what survives a re-diff and what a reference
     /// names. Null on a row that is chrome, or a line that exists only in HEAD.
-    const Spot2 = struct { path: []const u8, line: u32, deleted: bool = false };
+    const Spot2 = struct { path: []const u8, line: u32, deleted: bool = false, span: u32 = 1, rows: u32 = 1, skipped: u32 = 0 };
+
+    /// The new-file lines a selection covers, or null when it touches none.
+    /// A remark cannot span code the new file does not have.
+    const Range = struct {
+        lo: u32,
+        hi: u32,
+        rows: u32,
+        skipped: u32,
+
+        /// Lines the remark covers, which is what the store calls its span.
+        pub fn covers(self: Range) u32 {
+            return self.hi - self.lo + 1;
+        }
+    };
+
+    fn selectedRange(self: *App) ?Range {
+        const sel = self.selection() orelse return null;
+        // Both kinds: a comment anchors to whole lines, so the rows a
+        // selection touches matter and where in them it starts does not.
+        // Refusing charwise fell back to the caret's line, the last of them.
+        const f = self.current() orelse return null;
+
+        var lo: u32 = 0;
+        var hi: u32 = 0;
+        var rows: u32 = 0;
+        var skipped: u32 = 0;
+        var row = sel.lo;
+        while (row <= sel.hi) : (row += 1) {
+            rows += 1;
+            const li = self.lineAt(row) orelse {
+                skipped += 1;
+                continue;
+            };
+            if (li >= f.lines.len()) {
+                skipped += 1;
+                continue;
+            }
+            const no = f.lines.new_no[li];
+            if (no == 0) {
+                skipped += 1;
+                continue;
+            }
+            if (lo == 0 or no < lo) lo = no;
+            if (no > hi) hi = no;
+        }
+        return if (lo == 0) null else .{ .lo = lo, .hi = hi, .rows = rows, .skipped = skipped };
+    }
 
     /// The text of a new-file line, for the anchor a comment carries across a
     /// restart. It has to be the line the comment *attached* to, not the one
@@ -3701,7 +3768,18 @@ pub const App = struct {
         const li = self.lineAt(self.vp.cursor) orelse return null;
         if (li >= f.lines.len()) return null;
         const no = f.lines.new_no[li];
-        if (no != 0) return .{ .path = f.path(), .line = no };
+        if (no != 0) {
+            // Anchored at the selection's *first* new-file line: the caret
+            // is at its bottom, and measuring from there covers one line.
+            if (self.selectedRange()) |r| return .{
+                .path = f.path(),
+                .line = r.lo,
+                .span = r.covers(),
+                .rows = r.rows,
+                .skipped = r.skipped,
+            };
+            return .{ .path = f.path(), .line = no };
+        }
 
         // On a deletion: the first surviving line of the hunk it sits in.
         const hi = self.rows.hunkAt(self.vp.cursor) orelse return null;
@@ -3726,14 +3804,55 @@ pub const App = struct {
             self.notice.set("nothing here to comment on", .{});
             return;
         };
-        _ = at;
         self.compose_is_comment = true;
         self.compose_comment = null;
+        self.compose_spot = at;
         self.compose_to = .copy;
         self.outgoing.clearRetainingCapacity();
         self.compose.start("");
         self.preset_index = null;
         self.mode = .note_input;
+    }
+
+    /// `<Space>gc`: a comment box holding the selected lines in a
+    /// ```suggestion fence, so the remark is the edit rather than a
+    /// description of one. The block replaces the lines it is attached to.
+    fn commentSuggest(self: *App) Allocator.Error!void {
+        if (self.readOnly()) return;
+        const at = self.commentLine() orelse {
+            self.notice.set("nothing here to suggest a change to", .{});
+            return;
+        };
+
+        var seed: std.ArrayList(u8) = .empty;
+        defer seed.deinit(self.gpa);
+        try seed.appendSlice(self.gpa, "```suggestion\n");
+        var no = at.line;
+        while (no < at.line + @max(at.span, 1)) : (no += 1) {
+            try seed.appendSlice(self.gpa, self.textOfNewLine(no));
+            try seed.append(self.gpa, '\n');
+        }
+        try seed.appendSlice(self.gpa, "```");
+
+        self.compose_is_comment = true;
+        self.compose_comment = null;
+        self.compose_spot = at;
+        self.compose_to = .copy;
+        self.outgoing.clearRetainingCapacity();
+        self.compose.start(seed.items);
+        // Inside the fence: the reader came to change that, not to write
+        // around it.
+        self.compose.cursor = "```suggestion\n".len;
+        self.preset_index = null;
+        self.mode = .note_input;
+
+        // A selection can shrink for a good reason - a removed line has
+        // nothing to replace - but shrinking silently looks broken.
+        if (at.skipped > 0) {
+            self.notice.set("suggesting {d} of {d} selected rows: {d} are not lines in the new file", .{
+                at.span, at.rows, at.skipped,
+            });
+        }
     }
 
     /// The same box, seeded with what the comment already says.
@@ -4171,6 +4290,7 @@ pub const App = struct {
     fn closeCompose(self: *App) void {
         self.compose.close();
         self.preset_index = null;
+        self.compose_spot = null;
         self.mode = .normal;
     }
 
@@ -4275,9 +4395,10 @@ pub const App = struct {
             return null;
         }
         const editing = self.compose_comment;
-        const at = self.commentLine();
+        const at = self.compose_spot orelse self.commentLine();
         self.compose_is_comment = false;
         self.compose_comment = null;
+        self.compose_spot = null;
         self.closeCompose();
 
         var id: u32 = 0;
@@ -4285,7 +4406,7 @@ pub const App = struct {
             try self.comments.edit(eid, raw);
             id = eid;
         } else if (at) |spot| {
-            id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted);
+            id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted, spot.span);
         }
         self.saveComments();
         self.rebuildRows(.line) catch {};
@@ -4312,10 +4433,15 @@ pub const App = struct {
         var buf: [compose_mod.max_bytes]u8 = undefined;
         var flat: [compose_mod.max_bytes]u8 = undefined;
         const one = compose_mod.flatten(&flat, n.body);
-        const line = if (self.pr_number == 0)
-            std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one
+        var where: [64]u8 = undefined;
+        const at = if (n.span > 1)
+            std.fmt.bufPrint(&where, "{s}:{d}-{d}", .{ n.path, n.line, n.end() }) catch n.path
         else
-            std.fmt.bufPrint(&buf, "PR #{d} {s}:{d} - {s}", .{ self.pr_number, n.path, n.line, one }) catch one;
+            std.fmt.bufPrint(&where, "{s}:{d}", .{ n.path, n.line }) catch n.path;
+        const line = if (self.pr_number == 0)
+            std.fmt.bufPrint(&buf, "{s} - {s}", .{ at, one }) catch one
+        else
+            std.fmt.bufPrint(&buf, "PR #{d} {s} - {s}", .{ self.pr_number, at, one }) catch one;
         self.outgoing.clearRetainingCapacity();
         try self.outgoing.appendSlice(self.gpa, line);
         self.want_send = .send;
@@ -4355,6 +4481,8 @@ pub const App = struct {
                 @memcpy(raw_buf[0..typed.len], typed);
                 const raw = raw_buf[0..typed.len];
                 const how = self.compose_to;
+                // Before the close, which clears it.
+                const spot = self.compose_spot;
                 self.closeCompose();
                 if (line.len == 0) {
                     self.notice.set("nothing to send", .{});
@@ -4365,10 +4493,10 @@ pub const App = struct {
                     if (self.compose_comment) |id| {
                         try self.comments.edit(id, raw);
                         self.notice.set("comment updated", .{});
-                    } else if (self.commentLine()) |at| {
+                    } else if (spot orelse self.commentLine()) |at| {
                         // The line's text goes with the note, so a restart can
                         // find it again when the file moved underneath.
-                        _ = try self.comments.addFull(at.path, at.line, raw, self.textOfNewLine(at.line), at.deleted);
+                        _ = try self.comments.addFull(at.path, at.line, raw, self.textOfNewLine(at.line), at.deleted, at.span);
                         {
                             var kb: [32]u8 = undefined;
                             self.notice.set("comment added - {s} submits the review", .{

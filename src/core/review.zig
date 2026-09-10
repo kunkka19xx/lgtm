@@ -42,11 +42,8 @@ pub fn path(buf: []u8, n: u32) []const u8 {
 /// with a warning rather than being dropped on its way to the agent. Hard rule
 /// 7 does not stop at the screen.
 /// `scope` says what the line numbers below belong to, and is empty for the
-/// working tree, where they belong to the files on disk.
-///
-/// A review of a pull request is a review of somebody else's tree. Without
-/// this the agent reads `src/config.zig:8` and looks at line 8 of the checkout
-/// it is standing in, which is different code, and nothing says so.
+/// working tree. A pull request is somebody else's tree: without it the agent
+/// resolves `src/config.zig:8` against the checkout it stands in.
 pub fn render(
     out: *std.ArrayList(u8),
     gpa: Allocator,
@@ -107,7 +104,11 @@ pub fn render(
             first = false;
 
             try out.appendSlice(gpa, "\n- **line ");
-            try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{m.line}) catch "");
+            if (m.span > 1) {
+                try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}-{d}", .{ m.line, m.end() }) catch "");
+            } else {
+                try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{m.line}) catch "");
+            }
             try out.appendSlice(gpa, "**");
             // A stale comment says so in the file as well as on screen. The agent
             // should know the line moved out from under the remark rather than
@@ -133,6 +134,18 @@ fn indent(out: *std.ArrayList(u8), gpa: Allocator, body: []const u8) Allocator.E
         try out.appendSlice(gpa, line);
         try out.appendSlice(gpa, "\n");
     }
+}
+
+test "a remark on several lines says so" {
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addFull("a.zig", 44, "these three belong together", "", false, 3);
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    _ = try render(&out, testing.allocator, &store, 1, "");
+    // The first line alone is a third of the problem.
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 44-46**") != null);
 }
 
 test "a review of somebody else's tree says whose" {

@@ -313,7 +313,7 @@ way to check a spelling before committing it to a config file.
 `copy_ref_lines` `submit_review`
 
 **Comments** `comment_add` `comment_view` `comment_list` `comment_send`
-`comment_delete` `comment_send_one` `comment_send_all` `comment_drop`
+`comment_delete` `comment_suggest` `comment_send_one` `comment_send_all` `comment_drop`
 `comment_post_one` `compose_post_now`
 
 **Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`

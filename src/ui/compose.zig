@@ -366,8 +366,12 @@ pub const Compose = struct {
             // Entering insert, at the five places vim enters it.
             'i' => self.mode = .insert,
             'a' => {
-                self.cursor = motion.charRight(self.line(), self.col()) orelse self.col();
-                self.cursor += self.lineStart();
+                // The line start is read before the caret moves: adding
+                // `lineStart()` afterwards asked a position no longer on the
+                // line, and answered with the top of the box.
+                const at = self.lineStart();
+                const to = motion.charRight(self.line(), self.col()) orelse self.col();
+                self.cursor = at + to;
                 self.mode = .insert;
             },
             'I' => {
@@ -394,6 +398,9 @@ pub const Compose = struct {
                 self.mode = .insert;
             },
             'x' => {
+                // Never across the line's end: `deleteForward` steps over
+                // the newline, so `x` on an empty line joined two.
+                if (self.cursor >= self.lineEnd()) return .typing;
                 self.mark();
                 self.deleteForward();
             },
@@ -595,6 +602,83 @@ fn tap(cp: u21) event.Key {
 
 fn ctrl(cp: u21) event.Key {
     return .{ .codepoint = cp, .mods = .{ .ctrl = true } };
+}
+
+test "the normal-mode keys all work on the line the caret is on" {
+    // Every one of these reads a position and then writes the caret, which is
+    // where `a` went wrong: the box held one line for long enough that mixing
+    // a column with an offset looked the same as not mixing them.
+    var c: Compose = .{};
+    c.start("alpha\nbeta\ngamma");
+    c.mode = .normal;
+
+    // `I` and `A`: the ends of *this* line.
+    c.cursor = 8; // inside "beta"
+    _ = c.feed(tap('I'));
+    try testing.expectEqual(@as(usize, 6), c.cursor);
+    c.mode = .normal;
+    c.cursor = 8;
+    _ = c.feed(tap('A'));
+    try testing.expectEqual(@as(usize, 10), c.cursor);
+
+    // `o` opens below and `O` above, both staying in the middle of the box.
+    c.mode = .normal;
+    c.cursor = 8;
+    _ = c.feed(tap('o'));
+    try testing.expectEqualStrings("alpha\nbeta\n\ngamma", c.buf[0..c.len]);
+
+    var d: Compose = .{};
+    d.start("alpha\nbeta\ngamma");
+    d.mode = .normal;
+    d.cursor = 8;
+    _ = d.feed(tap('O'));
+    try testing.expectEqualStrings("alpha\n\nbeta\ngamma", d.buf[0..d.len]);
+    try testing.expectEqual(@as(usize, 6), d.cursor);
+
+    // `dd` takes the line and its newline, leaving the caret in the box.
+    var e: Compose = .{};
+    e.start("alpha\nbeta\ngamma");
+    e.mode = .normal;
+    e.cursor = 8;
+    _ = e.feed(tap('d'));
+    _ = e.feed(tap('d'));
+    try testing.expectEqualStrings("alpha\ngamma", e.buf[0..e.len]);
+}
+
+test "x deletes a character and never the line break" {
+    var c: Compose = .{};
+    c.start("ab\n\ncd");
+    c.mode = .normal;
+
+    // On a character: that character goes.
+    c.cursor = 0;
+    _ = c.feed(tap('x'));
+    try testing.expectEqualStrings("b\n\ncd", c.buf[0..c.len]);
+
+    // On an empty line: nothing. Joining it to the next is what `deleteForward`
+    // would do, and what vim does not.
+    c.cursor = 2;
+    _ = c.feed(tap('x'));
+    try testing.expectEqualStrings("b\n\ncd", c.buf[0..c.len]);
+}
+
+test "append lands after the cursor on its own line, not at the top of the box" {
+    var c: Compose = .{};
+    c.start("first line\nsecond line\nthird");
+
+    // In the middle of the last line.
+    c.mode = .normal;
+    c.cursor = c.len - 2;
+    _ = c.feed(tap('a'));
+    try testing.expectEqualStrings("third", c.line());
+    try testing.expect(c.cursor > c.len - 3);
+
+    // At the end of a line, `a` appends there rather than jumping anywhere.
+    c.mode = .normal;
+    c.cursor = c.len;
+    _ = c.feed(tap('a'));
+    try testing.expectEqualStrings("third", c.line());
+    try testing.expectEqual(c.len, c.cursor);
 }
 
 test "the arrows move a line at a time, not to the ends of the box" {

@@ -79,6 +79,7 @@ pub const Command = enum {
     comment_drop,
     comment_view,
     comment_delete,
+    comment_suggest,
     next_comment,
     prev_comment,
     submit_review,
@@ -436,12 +437,18 @@ pub const leader: Chord = c(' ');
 pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('j')}, .command = .line_down, .desc = "down and up a line", .group = .move },
     .{ .chords = &.{c('k')}, .command = .line_up, .desc = "down and up a line", .group = .move },
+    // The arrows move the cursor in the diff too, not only in a list: bound
+    // there alone, `V` and the down arrow left the selection one row long.
+    .{ .chords = &.{c(event.code.down)}, .command = .line_down, .group = .move },
+    .{ .chords = &.{c(event.code.up)}, .command = .line_up, .group = .move },
     .{ .chords = &.{ctrl('d')}, .command = .page_down, .desc = "half a page, down and up", .group = .move },
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .desc = "half a page, down and up", .group = .move },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .desc = "first and last line", .group = .move },
     .{ .chords = &.{c('G')}, .command = .bottom, .desc = "first and last line", .group = .move },
     .{ .chords = &.{c('h')}, .command = .char_left, .desc = "left and right a character", .group = .move },
     .{ .chords = &.{c('l')}, .command = .char_right, .desc = "left and right a character", .group = .move },
+    .{ .chords = &.{c(event.code.left)}, .command = .char_left, .group = .move },
+    .{ .chords = &.{c(event.code.right)}, .command = .char_right, .group = .move },
     .{ .chords = &.{c('w')}, .command = .word_next, .desc = "next, previous, end of word", .group = .move },
     .{ .chords = &.{c('b')}, .command = .word_prev, .desc = "next, previous, end of word", .group = .move },
     .{ .chords = &.{c('e')}, .command = .word_end, .desc = "next, previous, end of word", .group = .move },
@@ -495,6 +502,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ c('['), c('c') }, .command = .prev_comment, .desc = "previous comment (wraps)", .group = .comment },
     .{ .chords = &.{ leader, c('n'), c('c') }, .command = .next_comment, .group = .comment },
     .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
+    .{ .chords = &.{ leader, c('g'), c('c') }, .command = .comment_suggest, .desc = "suggest a change to these lines, as a comment holding them", .group = .comment },
     .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
     .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
     .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
@@ -764,6 +772,13 @@ test "a single-key binding resolves immediately" {
     var km: Keymap = .{};
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .normal).command);
     try testing.expectEqual(@as(usize, 0), km.len);
+    // In the diff, not only in a list.
+    try testing.expectEqual(Command.line_down, km.feed(tap(event.code.down), .normal).command);
+    try testing.expectEqual(Command.line_up, km.feed(tap(event.code.up), .normal).command);
+    try testing.expectEqual(Command.line_down, km.feed(tap(event.code.down), .visual).command);
+    try testing.expectEqual(Command.char_right, km.feed(tap(event.code.right), .visual).command);
+    // And a list still gets its own meaning for them.
+    try testing.expectEqual(Command.list_down, km.feed(tap(event.code.down), .finder).command);
 }
 
 test "a two-key sequence waits for its second key" {

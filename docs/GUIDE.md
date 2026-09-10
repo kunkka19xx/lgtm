@@ -205,7 +205,9 @@ A dozen remarks is a dozen interruptions, or it is one file.
 
 | | |
 |---|---|
-| `<Space>c` | write a comment on this line, on removed code too |
+| `<Space>c` | write a comment on this line, on removed code too. With `v` or `V` selecting more than one, the comment covers all of them |
+| `<Space>gc` | suggest a change: a comment already holding the selected lines in a ```suggestion block |
+| | the box's title says what the comment covers: `a.txt:5` for one line, `a.txt:5-6` for a range |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
 | `<Space>lc` | list every comment; the panel beside the list shows the one you are on and the code it is about. The filter still reaches the text, even though the rows only show where each remark is |
@@ -226,6 +228,19 @@ hands the collected ones to the request as one review; `:approve` and
 you type after the command becomes the review's opening sentence. In the list,
 `<C-p>` posts just the highlighted one, which is GitHub's "add single comment"
 beside its "submit review".
+
+A selection can only cover lines the new file still has, so selecting a
+removed line together with the one that replaced it gives a remark on the
+replacement alone. Nothing can be suggested for a line that is gone. The box's
+title is where you see what you actually got.
+
+A comment made over a selection covers every line it touches, `v` or `V`
+alike: a remark anchors to whole lines, so where in them the selection starts
+makes no difference. And `<Space>gc`
+opens one already holding those lines inside a ```suggestion fence, so you edit
+the code rather than describe the edit. Posted to a pull request it becomes a
+real suggestion the author applies with one click, and GitHub needs the range
+for that: a three-line replacement has to be anchored to three lines.
 
 The rows are addresses, `path:line`, and the panel carries the remark itself
 followed by the hunk it sits in. A remark squeezed into a column is a remark
@@ -389,8 +404,8 @@ documents itself. What follows is the defaults.
 
 | Key | |
 |---|---|
-| `j` `k` | down and up a line |
-| `h` `l` | left and right a character |
+| `j` `k` | down and up a line, and so do the arrows |
+| `h` `l` | left and right a character, and so do the arrows |
 | `w` `b` `e` | next, previous, end of word |
 | `W` `B` `E` | the same over WORDs, where only blanks separate |
 | `0` `^` `$` | first, first non-blank, last column |
@@ -535,7 +550,9 @@ filters. `<Tab>` and `<S-Tab>`, the arrow keys, and `<C-n>`/`<C-p>` all move too
 
 `<Esc>` leaves insert then leaves the box, `<CR>` sends, `<C-i>` inserts a
 preset, `@` inserts a file path, `<C-o>` is a line break, `<C-s>` saves a
-comment and sends it at once. In normal mode: the review's motions plus
+comment and sends it at once, and on a pull request `<C-p>` saves and posts it.
+The arrows move a line at a time; `<C-a>` `<C-e>` `<C-b>` `<C-f>` `<C-u>`
+`<C-w>` `<C-d>` are readline's. In normal mode: the review's motions plus
 `i a I A o O x D C dd cc d{motion} c{motion} u`.
 
 ---
