@@ -36,6 +36,14 @@ pub const Table = struct {
     ref_file_range: []const u8 = "{path}:{start}-{end}",
     ref_file_span: []const u8 = "{path}:{line} `{span}`",
 
+    /// Put in front of every reference while a pull request is on screen.
+    ///
+    /// `src/config.zig:423` is a line of somebody else's tree, and an agent
+    /// standing in the working tree resolves it against different code without
+    /// anything saying so. Empty in a working-tree review, where the reference
+    /// already means what it says.
+    ref_prefix: []const u8 = "PR #{pr} ",
+
     /// Handing over a whole review: the file that was written, and how many
     /// remarks are in it.
     ///
@@ -108,6 +116,19 @@ fn expand(tmpl: []const u8, vars: []const Var) ![]u8 {
     errdefer out.deinit(testing.allocator);
     try render(testing.allocator, &out, tmpl, vars);
     return out.toOwnedSlice(testing.allocator);
+}
+
+test "a reference to a pull request says which one" {
+    const got = try expand(default.ref_prefix ++ default.ref_single, &.{
+        .{ .name = "pr", .value = "16" },
+        .{ .name = "change_id", .value = "3" },
+        .{ .name = "path", .value = "src/config.zig" },
+        .{ .name = "line", .value = "423" },
+    });
+    defer testing.allocator.free(got);
+    // Without it the agent reads a line number against the tree it is
+    // standing in, which is different code.
+    try testing.expectEqualStrings("PR #16 #3 src/config.zig:423", got);
 }
 
 test "the review handover is a template like everything else" {

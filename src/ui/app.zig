@@ -345,6 +345,10 @@ pub const App = struct {
     /// `owner/repo`, so posting does not have to ask again.
     pr_repo: [128]u8 = undefined,
     pr_repo_len: u8 = 0,
+    /// The sentence a posted review opens with, held across the frame between
+    /// arming the post and making it.
+    note_buf: [256]u8 = undefined,
+    note_len: u16 = 0,
     /// Every path in the project, from `git ls-files`, loaded the first time
     /// `@` asks and kept for the session. Not loaded at startup: most sessions
     /// never mention a file, and cold start has a 50 ms budget.
@@ -389,6 +393,11 @@ pub const App = struct {
     /// Set by `e`. The run loop owns the terminal, so it - not `run(cmd)` -
     /// is what can hand it to a child process.
     want_editor: bool = false,
+    /// A review the loop should hand to the forge. Armed rather than done on
+    /// the spot: the call takes a second on the network, and the loop draws at
+    /// the top of its iteration, so going through here is what puts a
+    /// `posting...` frame on screen before the freeze rather than after it.
+    want_post: ?Post = null,
     /// Every outgoing string is a template. Config-owned in
     /// v0.2; the defaults are the internal table until then.
     templates: template.Table = .{},
@@ -902,6 +911,7 @@ pub const App = struct {
             .to_agent = self.compose_to == .send,
             .at = self.compose_at,
             .saves = self.compose_is_comment,
+            .posts = self.pr_number != 0,
             .normal = self.compose.mode == .normal,
         };
     }
@@ -1192,6 +1202,7 @@ pub const App = struct {
             .compose_submit,
             .compose_cancel,
             .compose_send_now,
+            .compose_post_now,
             .compose_presets,
             .compose_mention,
             .compose_newline,
@@ -1386,6 +1397,13 @@ pub const App = struct {
     /// fills these from whatever its bridge knows: `ui/app.zig` never sees a
     /// multiplexer. The fields are the parts, not a finished line - ordering
     /// and column widths are decisions about a list.
+    /// A review the loop is to hand to the forge.
+    pub const Post = struct {
+        event: gh.Event,
+        /// One comment by id, or null for every unposted one.
+        one: ?u32 = null,
+    };
+
     pub const PaneRow = struct {
         id: []const u8,
         /// Where the pane is, in whatever the multiplexer calls places.
@@ -1691,31 +1709,29 @@ pub const App = struct {
                     .sent => "[sent] ",
                     .stale => "[stale] ",
                 };
+                // The row is the remark's address, not the remark. It used to
+                // carry the body too, flattened and cut at whatever the column
+                // left, which is unreadable beside a panel showing the whole
+                // thing. The filter still reaches the text; see `filter`.
                 const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
-                    n.path, n.line, mark, body,
+                    n.path, n.line, mark, if (n.posted) "[posted] " else "",
                 }) catch continue;
-                // The row keeps the flattened body: the filter reaches only
-                // what the label holds. The panel gets the remark as written -
-                // `flatten` and the buffer above it cut a paragraph to a
-                // first sentence.
-                const detail = std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{
-                    n.path, n.line, mark,
-                }) catch continue;
+                const searchable = std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{
+                    n.path, n.line, body,
+                }) catch label;
                 self.pick_list.append(self.gpa, .{
-                    .path = label,
+                    .path = std.mem.trimEnd(u8, label, " "),
+                    .filter = searchable,
                     .added = 0,
                     .removed = 0,
                     .in_review = false,
-                    // The label is composed: the icon comes from the file
-                    // rather than from it, and the row is clipped rather than
-                    // elided towards a name it does not end with.
                     .icon_path = n.path,
-                    .detail = if (self.previews()) std.mem.trimEnd(u8, detail, " ") else "",
-                    // The code, not the remark. The row already carries the
-                    // remark, and a panel repeating it beside its own row is a
-                    // panel saying nothing. What is missing is what it is
-                    // about; `<Space>vc` is still how a long one is read whole.
-                    .preview = if (self.previews()) self.commentCode(arena, n.path, n.line) else "",
+                    .detail = if (self.previews()) std.mem.trimEnd(u8, label, " ") else "",
+                    // The remark first, then the code it is about. Neither is
+                    // in the row any more, and both are what a reader opened
+                    // the list to see.
+                    .preview = if (self.previews()) self.commentPanel(arena, n) else "",
+                    .preview_lead = lineCount(n.body),
                     .preview_kind = .diff,
                 }) catch return;
             }
@@ -2211,22 +2227,11 @@ pub const App = struct {
     /// approval needs nothing to say; the other two do, or there is no reason
     /// to have notified anybody.
     fn postReview(self: *App, want: gh.Event, note: []const u8) void {
-        const repo = self.postRepo() orelse {
+        if (self.postRepo() == null) {
             self.notice.set("not reviewing a pull request", .{});
             return;
-        };
-
-        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-
-        var out: std.ArrayList(u8) = .empty;
-        var ids: std.ArrayList(u32) = .empty;
-        gh.reviewBody(&out, arena, &self.comments, self.review.files(), want, note, &ids) catch {
-            self.notice.set("could not build the review", .{});
-            return;
-        };
-        if (ids.items.len == 0 and want != .approve and note.len == 0) {
+        }
+        if (self.unposted() == 0 and want != .approve and note.len == 0) {
             if (self.comments.len() == 0) {
                 self.notice.set("no comments to post", .{});
             } else {
@@ -2234,19 +2239,65 @@ pub const App = struct {
             }
             return;
         }
+        self.note_len = @intCast(@min(note.len, self.note_buf.len));
+        @memcpy(self.note_buf[0..self.note_len], note[0..self.note_len]);
+        self.want_post = .{ .event = want };
+        self.notice.set("posting to #{d}...", .{self.pr_number});
+    }
 
-        gh.post(self.gpa, arena, self.io, repo, self.pr_number, out.items) catch {
-            self.notice.set("could not post the review", .{});
+    fn unposted(self: *const App) usize {
+        var n: usize = 0;
+        for (self.comments.items()) |c| {
+            if (!c.posted) n += 1;
+        }
+        return n;
+    }
+
+    /// The call itself, from the loop, one frame after the notice that says it
+    /// is happening.
+    pub fn performPost(self: *App, req: Post) void {
+        const repo = self.postRepo() orelse return;
+
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const arena = scratch.allocator();
+
+        var one: comments_mod.Store = .init(self.gpa);
+        defer one.deinit();
+        var store = &self.comments;
+        if (req.one) |id| {
+            const n = self.comments.find(id) orelse return;
+            _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed) catch return;
+            one.list.items[0].state = n.state;
+            store = &one;
+        }
+
+        var out: std.ArrayList(u8) = .empty;
+        var ids: std.ArrayList(u32) = .empty;
+        const note = self.note_buf[0..self.note_len];
+        gh.reviewBody(&out, arena, store, self.review.files(), req.event, note, &ids) catch {
+            self.notice.set("could not build the review", .{});
             return;
         };
-        self.comments.markPosted(ids.items);
+
+        gh.post(self.gpa, arena, self.io, repo, self.pr_number, out.items) catch {
+            self.notice.set("could not post to #{d}", .{self.pr_number});
+            return;
+        };
+
+        if (req.one) |id| {
+            self.comments.markPosted(&.{id});
+            self.notice.set("posted 1 to #{d}", .{self.pr_number});
+        } else {
+            self.comments.markPosted(ids.items);
+            self.closeFiles();
+            self.notice.set("posted {d} to #{d} as {s}", .{ ids.items.len, self.pr_number, req.event.wire() });
+        }
         self.saveComments();
-        self.closeFiles();
-        self.notice.set("posted {d} to #{d} as {s}", .{ ids.items.len, self.pr_number, want.wire() });
     }
 
     /// `<C-p>` in the comment list: the one under the cursor, on its own.
-    /// GitHub's "add single comment" beside "submit review", which is the
+    /// GitHub's "add single comment" beside its "submit review", which is the
     /// split every reader already knows from the web.
     fn postOne(self: *App) void {
         const n = self.listSelected() orelse return;
@@ -2258,26 +2309,9 @@ pub const App = struct {
             self.notice.set("already posted", .{});
             return;
         }
-        const id = n.id;
-        var one: comments_mod.Store = .init(self.gpa);
-        defer one.deinit();
-        _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed) catch return;
-        one.list.items[0].state = n.state;
-
-        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-        var out: std.ArrayList(u8) = .empty;
-        var ids: std.ArrayList(u32) = .empty;
-        gh.reviewBody(&out, arena, &one, self.review.files(), .comment, "", &ids) catch return;
-
-        gh.post(self.gpa, arena, self.io, self.postRepo().?, self.pr_number, out.items) catch {
-            self.notice.set("could not post that comment", .{});
-            return;
-        };
-        self.comments.markPosted(&.{id});
-        self.saveComments();
-        self.notice.set("posted {s}:{d}", .{ n.path, n.line });
+        self.note_len = 0;
+        self.want_post = .{ .event = .comment, .one = n.id };
+        self.notice.set("posting {s}:{d}...", .{ n.path, n.line });
     }
 
     /// `:pr [n]`, or `:pr off` for the working tree. The same resolve `--pr`
@@ -3039,7 +3073,37 @@ pub const App = struct {
         try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
         try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
         // The row itself is untouched: the label is what the filter reads.
-        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].path, "a remark") != null);
+        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "a remark") != null);
+    }
+
+    test "posting is armed, not done, so the frame saying so is drawn first" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // Outside a pull request there is nothing to arm and the answer is
+        // immediate: a `posting...` that resolved to an error would flash.
+        fx.app.postReview(.comment, "");
+        try testing.expect(fx.app.want_post == null);
+        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not reviewing") != null);
+
+        fx.app.pr_number = 16;
+        fx.app.pr_repo_len = @intCast("o/r".len);
+        @memcpy(fx.app.pr_repo[0..3], "o/r");
+
+        // Nothing to say is also answered on the spot.
+        fx.app.postReview(.comment, "");
+        try testing.expect(fx.app.want_post == null);
+
+        // With something to post the call is left for the loop, which draws
+        // before it performs.
+        _ = try fx.app.comments.add("a.zig", 1, "a remark");
+        fx.app.postReview(.request_changes, "have a look");
+        const req = fx.app.want_post.?;
+        try testing.expectEqual(gh.Event.request_changes, req.event);
+        try testing.expect(req.one == null);
+        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "posting") != null);
+        // The note outlives the prompt buffer it was typed into.
+        try testing.expectEqualStrings("have a look", fx.app.note_buf[0..fx.app.note_len]);
     }
 
     test "a comment's panel starts at the hunk it sits in" {
@@ -3078,7 +3142,23 @@ pub const App = struct {
         try testing.expectEqualStrings("", App.diffText(arena, f, 5000));
     }
 
-    test "a comment's panel shows the code, not the comment again" {
+    test "the remark leads its panel and is coloured as one" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        _ = try fx.app.comments.add("a.zig", 1, "one line\ntwo lines\nthree");
+        fx.app.files_purpose = .comments;
+        fx.app.buildPickList();
+
+        // The lead is the remark's own lines, so the renderer knows how much
+        // of the panel is the reader's words and how much is the code.
+        try testing.expectEqual(@as(u16, 3), fx.app.pick_list.items[0].preview_lead);
+        try testing.expectEqual(@as(u16, 1), App.lineCount("just one"));
+        // A trailing newline does not invent a line.
+        try testing.expectEqual(@as(u16, 2), App.lineCount("a\nb\n"));
+    }
+
+    test "a comment row is its address; the remark is in the panel and the filter" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
@@ -3088,15 +3168,13 @@ pub const App = struct {
         fx.app.buildPickList();
 
         const row = fx.app.pick_list.items[0];
-        // The row carries the remark, flattened, because that is what the
-        // filter reads.
-        try testing.expect(std.mem.indexOf(u8, row.path, "src/net.zig:47") != null);
-        try testing.expect(std.mem.indexOfScalar(u8, row.path, '\n') == null);
-        try testing.expectEqualStrings("src/net.zig:47", row.detail);
-        // And the panel does not repeat it: a panel saying what its own row
-        // says is a panel saying nothing. The fixture has no diff for the
-        // file, so there is nothing to show and nothing is invented.
-        try testing.expect(std.mem.indexOf(u8, row.preview, "retry loop") == null);
+        // Drawn: where it is. The remark used to be here too, flattened and
+        // cut at whatever the column left, beside a panel showing it whole.
+        try testing.expectEqualStrings("src/net.zig:47", row.path);
+        // Matched: the remark as well, so typing part of one still finds it.
+        try testing.expect(std.mem.indexOf(u8, row.filter, "retry loop") != null);
+        // Shown: the remark as written, unflattened.
+        try testing.expect(std.mem.indexOf(u8, row.preview, "the retry loop here\nnever backs off") != null);
     }
 
     test "a backend that reports only ids still gets a list worth reading" {
@@ -3435,14 +3513,21 @@ pub const App = struct {
         else
             self.templates.ref_single;
 
-        try template.render(self.gpa, out, tmpl, &.{
+        var pr_buf: [12]u8 = undefined;
+        const pr = std.fmt.bufPrint(&pr_buf, "{d}", .{self.pr_number}) catch "";
+        const vars = [_]template.Var{
+            .{ .name = "pr", .value = pr },
             .{ .name = "change_id", .value = id },
             .{ .name = "path", .value = r.path },
             .{ .name = "line", .value = line },
             .{ .name = "start", .value = line },
             .{ .name = "end", .value = end },
             .{ .name = "span", .value = r.span },
-        });
+        };
+        // Every reference, not just the ones a comment carries: `<CR>` sends
+        // one straight from the diff and it lands in the same agent.
+        if (self.pr_number != 0) try template.render(self.gpa, out, self.templates.ref_prefix, &vars);
+        try template.render(self.gpa, out, tmpl, &vars);
     }
 
     /// The lines themselves, under the reference, markers kept. `Y` exists to
@@ -4008,6 +4093,21 @@ pub const App = struct {
         self.want_send = .send;
     }
 
+    pub fn lineCount(text: []const u8) u16 {
+        var n: u16 = 1;
+        for (std.mem.trimEnd(u8, text, "\n")) |c| {
+            if (c == '\n') n += 1;
+        }
+        return n;
+    }
+
+    /// A comment's panel: the remark as written, then the hunk it sits in.
+    fn commentPanel(self: *const App, arena: Allocator, n: comments_mod.Comment) []const u8 {
+        const code = self.commentCode(arena, n.path, n.line);
+        if (code.len == 0) return arena.dupe(u8, n.body) catch "";
+        return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ n.body, code }) catch code;
+    }
+
     /// The hunk a comment sits in, as diff text for its panel.
     fn commentCode(self: *const App, arena: Allocator, path: []const u8, line: u32) []const u8 {
         for (self.review.files()) |f| {
@@ -4148,6 +4248,7 @@ pub const App = struct {
                 self.mode = .finder;
             },
             .compose_send_now => try self.composeSendNow(body),
+            .compose_post_now => try self.composePostNow(body),
             .compose_submit => try self.composeSubmit(body),
             else => {},
         }
@@ -4157,51 +4258,83 @@ pub const App = struct {
     /// that cannot wait for the batch does not have to be typed, saved,
     /// found again and sent. It is the same key that submits the whole
     /// review from normal mode, which reads as "hand this over" either way.
-    fn composeSendNow(self: *App, body: u16) !void {
-        if (self.compose_is_comment) {
-            var raw_buf: [compose_mod.max_bytes]u8 = undefined;
-            const typed = self.compose.text();
-            @memcpy(raw_buf[0..typed.len], typed);
-            const raw = raw_buf[0..typed.len];
-            if (raw.len == 0) {
-                self.notice.set("nothing to save", .{});
-                return;
-            }
-            const editing = self.compose_comment;
-            const at = self.commentLine();
-            self.compose_is_comment = false;
-            self.compose_comment = null;
-            self.closeCompose();
+    /// What the box holds, saved as a comment. Null when there was nothing to
+    /// save, or when the box is not holding one.
+    ///
+    /// Shared by the two keys that save and then do something with it, which
+    /// otherwise differ only in where the result goes.
+    fn saveComposedComment(self: *App, body: u16) !?u32 {
+        if (!self.compose_is_comment) return null;
 
-            var id: u32 = 0;
-            if (editing) |eid| {
-                try self.comments.edit(eid, raw);
-                id = eid;
-            } else if (at) |spot| {
-                id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted);
-            }
-            self.saveComments();
-            self.rebuildRows(.line) catch {};
-            if (self.comments.find(id)) |n| {
-                // Handed over, so it is sent: it drops out of the next
-                // `review-N.md` rather than asking twice, and editing it
-                // reopens it the way editing any sent comment does.
-                n.state = .sent;
-                self.comments.dirty = true;
-                self.saveComments();
-                var buf: [compose_mod.max_bytes]u8 = undefined;
-                var flat: [compose_mod.max_bytes]u8 = undefined;
-                const one = compose_mod.flatten(&flat, n.body);
-                const line = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one;
-                self.outgoing.clearRetainingCapacity();
-                try self.outgoing.appendSlice(self.gpa, line);
-                self.want_send = .send;
-            }
-            self.clampScroll(body);
+        var raw_buf: [compose_mod.max_bytes]u8 = undefined;
+        const typed = self.compose.text();
+        @memcpy(raw_buf[0..typed.len], typed);
+        const raw = raw_buf[0..typed.len];
+        if (raw.len == 0) {
+            self.notice.set("nothing to save", .{});
+            return null;
+        }
+        const editing = self.compose_comment;
+        const at = self.commentLine();
+        self.compose_is_comment = false;
+        self.compose_comment = null;
+        self.closeCompose();
+
+        var id: u32 = 0;
+        if (editing) |eid| {
+            try self.comments.edit(eid, raw);
+            id = eid;
+        } else if (at) |spot| {
+            id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted);
+        }
+        self.saveComments();
+        self.rebuildRows(.line) catch {};
+        self.clampScroll(body);
+        return if (id == 0) null else id;
+    }
+
+    fn composeSendNow(self: *App, body: u16) !void {
+        if (!self.compose_is_comment) {
+            // Not a comment: the key means the same thing the plain send does.
+            try self.composeSubmit(body);
             return;
         }
-        // Not a comment: the key means the same thing the plain send does.
-        try self.composeSubmit(body);
+        const id = try self.saveComposedComment(body) orelse return;
+        const n = self.comments.find(id) orelse return;
+
+        // Handed over, so it is sent: it drops out of the next `review-N.md`
+        // rather than asking twice, and editing it reopens it the way editing
+        // any sent comment does.
+        n.state = .sent;
+        self.comments.dirty = true;
+        self.saveComments();
+
+        var buf: [compose_mod.max_bytes]u8 = undefined;
+        var flat: [compose_mod.max_bytes]u8 = undefined;
+        const one = compose_mod.flatten(&flat, n.body);
+        const line = if (self.pr_number == 0)
+            std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one
+        else
+            std.fmt.bufPrint(&buf, "PR #{d} {s}:{d} - {s}", .{ self.pr_number, n.path, n.line, one }) catch one;
+        self.outgoing.clearRetainingCapacity();
+        try self.outgoing.appendSlice(self.gpa, line);
+        self.want_send = .send;
+    }
+
+    /// `<C-p>` in the box: save and post, without the detour through the list.
+    /// The same arm-then-perform the list's key uses, so the notice saying it
+    /// is happening reaches the screen before the call blocks.
+    fn composePostNow(self: *App, body: u16) !void {
+        if (!self.compose_is_comment) return;
+        if (self.postRepo() == null) {
+            self.notice.set("not reviewing a pull request", .{});
+            return;
+        }
+        const id = try self.saveComposedComment(body) orelse return;
+        const n = self.comments.find(id) orelse return;
+        self.note_len = 0;
+        self.want_post = .{ .event = .comment, .one = id };
+        self.notice.set("posting {s}:{d}...", .{ n.path, n.line });
     }
 
     fn composeSubmit(self: *App, body: u16) !void {

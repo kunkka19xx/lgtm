@@ -182,7 +182,9 @@ input box, never submitted, so you decide when to press return.
 - `y` yanks the selected *text*, the way `y` does in vim.
 
 **In the box:** `<Esc>` leaves insert for normal mode, where the same vim
-motions work and `o` opens a line; a second `<Esc>` leaves the box. `<C-i>`
+motions work and `o` opens a line; a second `<Esc>` leaves the box. Writing a
+comment, `<C-s>` saves it and sends it to your agent, and on a pull request
+`<C-p>` saves it and posts it, neither needing a trip through the list. `<C-i>`
 inserts a preset at the caret, `@` inserts a file path, `<C-j>` is a line break.
 Nothing you type is deleted by either.
 
@@ -195,7 +197,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>c` | write a comment on this line, on removed code too |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
-| `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the code the one you are on is about |
+| `<Space>lc` | list every comment; the panel beside the list shows the one you are on and the code it is about. The filter still reaches the text, even though the rows only show where each remark is |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
@@ -214,9 +216,9 @@ you type after the command becomes the review's opening sentence. In the list,
 `<C-p>` posts just the highlighted one, which is GitHub's "add single comment"
 beside its "submit review".
 
-The panel beside the list shows the hunk each remark sits in, not the remark
-itself: the row already carries that, and `<Space>vc` opens a long one to read
-whole.
+The rows are addresses, `path:line`, and the panel carries the remark itself
+followed by the hunk it sits in. A remark squeezed into a column is a remark
+you cannot read, so it is not in the column; typing part of one still finds it.
 
 Posting and sending are separate facts, so a remark can go to your agent *and*
 to the author, and neither hides it from the other. Posting a second time sends

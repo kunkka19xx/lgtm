@@ -142,8 +142,14 @@ ask_test      = "{ref}: a table test, not a unit test"
 | `ref_hunk` | `#{change_id} {path}:{line} (deleted lines in this hunk)` | the cursor on a removed line, which the new file has no number for |
 | `ref_file` | `{path}` | a file too large to render inline, so there is no hunk to point at |
 | `ref_file_line` / `_range` / `_span` | `{path}:{line}` … | a file with no hunks at all, opened and read rather than reviewed, so no `#id` |
+| `ref_prefix` | `PR #{pr} ` | put before every reference while a pull request is on screen, and nothing at all otherwise |
 | `submit_review` | `review ready: {path} ({count} comment{s})` | `path` `count` `s` |
 | `ask_why` `ask_revert` `ask_test` `ask_explain` | `{ref} - why this approach?` … | `ref`, whichever of the above the cursor produced |
+
+`ref_prefix` exists because a pull request is somebody else's tree.
+`src/config.zig:423` handed to an agent standing in your checkout points at
+different code, and nothing in the reference says so. Every `{var}` above is
+available to it, plus `{pr}`.
 
 `{s}` on `submit_review` is the plural: empty for one comment, `s` otherwise.
 It is a variable rather than a branch, because a template language with an `if`
@@ -308,7 +314,7 @@ way to check a spelling before committing it to a config file.
 
 **Comments** `comment_add` `comment_view` `comment_list` `comment_send`
 `comment_delete` `comment_send_one` `comment_send_all` `comment_drop`
-`comment_post_one`
+`comment_post_one` `compose_post_now`
 
 **Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`
 `next_turn` `prev_turn` `turn_list` `restore_file` `undo_restore`

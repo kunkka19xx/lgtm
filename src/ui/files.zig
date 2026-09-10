@@ -130,7 +130,7 @@ pub const Files = struct {
     pub fn selected(self: *const Files, files: []const frame.FileEntry) ?u32 {
         var shown: usize = 0;
         for (files, 0..) |f, i| {
-            if (fuzzy.match(f.path, self.filter.text()) == null) continue;
+            if (fuzzy.match(matchText(f), self.filter.text()) == null) continue;
             if (shown == self.index) return @intCast(i);
             shown += 1;
         }
@@ -183,6 +183,11 @@ fn navKeys(bindings: []const keymap.Binding, arena: Allocator) Allocator.Error![
 /// a ranking: a reader who knows the change knows roughly where a file sits in
 /// it, and re-sorting on every keystroke takes that away. The tiers still
 /// matter for *which* rows survive, not for where they land.
+/// What a row is matched against: its own text unless it named something else.
+fn matchText(f: frame.FileEntry) []const u8 {
+    return if (f.filter.len > 0) f.filter else f.path;
+}
+
 /// Whether a query is nothing but digits, and so is asking for a `key`.
 ///
 /// Only when some row has one: in the file list `2` should still fuzzy-match a
@@ -218,7 +223,7 @@ pub fn entries(
     const numeric = byNumber(files, query);
     var out: std.ArrayList(frame.FileEntry) = .empty;
     for (files, 0..) |f, i| {
-        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(matchText(f), query) != null;
         if (!keep) continue;
         var e = f;
         e.current = i == current;
@@ -233,7 +238,7 @@ pub fn count(files: []const frame.FileEntry, query: []const u8) usize {
     const numeric = byNumber(files, query);
     var n: usize = 0;
     for (files) |f| {
-        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(f.path, query) != null;
+        const keep = if (numeric) keyMatches(f, query) else fuzzy.match(matchText(f), query) != null;
         if (keep) n += 1;
     }
     return n;

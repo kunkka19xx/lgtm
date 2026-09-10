@@ -325,6 +325,12 @@ pub const gap: u16 = 2;
 /// a share: a list of short names has no use for a wider one.
 pub const min_list_width: u16 = 48;
 
+/// And the ceiling on the whole box. A list plus a panel grows with both, and
+/// on a wide screen that reached the edges: a modal covering everything is a
+/// mode, not an overlay. Beyond this the extra columns buy a longer path and
+/// nothing else.
+pub const max_box_width: u16 = 120;
+
 /// The whole geometry, as a pure function of the measurements. Null when there
 /// is no honest box to draw - below four rows there is no room for a border, a
 /// filter line, one row and a border.
@@ -337,7 +343,7 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     if (area.height < 4 or area.width < 24) return null;
 
     const one = @max(m.keys + gap + m.desc, 12);
-    const max_content = area.width -| 4;
+    const max_content = @min(area.width -| 4, @max(max_box_width, m.min_content));
 
     var cols: u16 = if (m.max_cols > 1 and one * 2 + gap <= max_content and m.entries > 6) 2 else 1;
     var content = @min(max_content, @max(
@@ -705,6 +711,28 @@ test "a deep path does not take the room the panel draws in" {
     try testing.expectEqual(@as(u16, 62 + gap + 8), alone.list_width);
 }
 
+test "a box does not grow to the edges of a wide screen" {
+    var m: Metrics = .{ .keys = 90, .desc = 8, .entries = 20, .title = 6, .footer = 40, .preview = true };
+    m.preview_lines = preview_rows_max;
+    m.min_content = min_list_width;
+
+    // A list and a panel both grow, and together they reached the edges. A
+    // modal covering everything is a mode, not an overlay.
+    const wide = fit(m, 0, .{ .width = 300, .top = 0, .height = 40 }).?;
+    try testing.expect(wide.width <= max_box_width + 4);
+
+    // The pane still wins when it is the smaller of the two.
+    const narrow = fit(m, 0, .{ .width = 70, .top = 0, .height = 40 }).?;
+    try testing.expect(narrow.width <= 70);
+
+    // And the floor outranks the ceiling, or a list of short names in a wide
+    // pane would be capped below the width a list of paths needs.
+    var floor = m;
+    floor.min_content = 200;
+    const tall_floor = fit(floor, 0, .{ .width = 300, .top = 0, .height = 40 }).?;
+    try testing.expect(tall_floor.content >= max_box_width);
+}
+
 test "a list of short names still gets a box worth opening" {
     // Two short paths: the widest row is a dozen columns, and without a floor
     // the box was that wide and resized on every keystroke of the filter.
@@ -1031,12 +1059,24 @@ fn drawPreview(f: Frame, box: Box, e: frame_mod.FileEntry) Allocator.Error!void 
         }
     }
 
+    var at: u16 = 0;
     var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, e.preview[start..], "\n"), '\n');
-    while (it.next()) |raw| {
+    while (it.next()) |raw| : (at += 1) {
         if (row >= last) break;
-        const line = try path_mod.clip(f.arena, raw, box.preview_width, f.glyphs.ellipsis, f.method());
-        f.put(row, box.preview_col, line, previewStyle(f, e, raw));
-        row += 1;
+        // Wrapped, not clipped. A panel exists to be read, and a remark cut at
+        // the column is the thing the row was already failing to show. Code
+        // wraps too, the way the diff body does.
+        var rest = raw;
+        const style = if (at < e.preview_lead) f.theme.comment_open else previewStyle(f, e, raw);
+        while (row < last) {
+            const take = wrap_mod.fitFront(rest, box.preview_width, f.method());
+            f.put(row, box.preview_col, rest[0..take], style);
+            row += 1;
+            rest = rest[take..];
+            if (rest.len == 0) break;
+            // A width that fits nothing would spin here.
+            if (take == 0) break;
+        }
     }
 }
 
@@ -1287,6 +1327,7 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
     try add(f, v, &out, .compose_submit, commit);
     try add(f, v, &out, .compose_cancel, "cancel");
     if (v.saves) try add(f, v, &out, .compose_send_now, "save + send");
+    if (v.saves and v.posts) try add(f, v, &out, .compose_post_now, "save + post");
     if (!v.normal) {
         try add(f, v, &out, .compose_presets, "preset");
         if (!v.saves) try add(f, v, &out, .compose_mention, "file");

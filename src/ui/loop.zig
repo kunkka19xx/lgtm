@@ -253,6 +253,19 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         try drawFrame(&app, &vx, w, body);
         if (opts.once) break;
 
+        // After the frame, deliberately. The call blocks on the network for
+        // about a second, and a reader who pressed a key and saw nothing
+        // assumes the key missed. Armed by the command, performed here, so the
+        // notice saying it is happening is already on screen.
+        if (app.want_post) |req| {
+            app.want_post = null;
+            app.performPost(req);
+            // Straight back to the top rather than on to the wait: what the
+            // call decided has to reach the screen, and the loop blocks for
+            // input until something else happens.
+            continue;
+        }
+
         // Two ways to wait. Settled, the loop blocks - a review pane is idle
         // almost all of the time and should cost nothing while it is. With the
         // viewport still catching up it paces itself instead, and goes back to

@@ -187,6 +187,7 @@ pub const Command = enum {
     compose_submit,
     compose_cancel,
     compose_send_now,
+    compose_post_now,
     compose_presets,
     compose_mention,
     compose_newline,
@@ -609,6 +610,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c(event.code.enter)}, .command = .compose_submit, .modes = Modes.compose_only, .desc = "send what is in the box" },
     .{ .chords = &.{c(event.code.escape)}, .command = .compose_cancel, .modes = Modes.compose_only, .desc = "leave insert, then leave the box" },
     .{ .chords = &.{ctrl('s')}, .command = .compose_send_now, .modes = Modes.compose_only, .desc = "save a comment and send it now" },
+    .{ .chords = &.{ctrl('p')}, .command = .compose_post_now, .modes = Modes.compose_only, .desc = "save a comment and post it to the pull request" },
     .{ .chords = &.{ctrl('i')}, .command = .compose_presets, .modes = Modes.compose_only, .desc = "insert a [presets] question at the caret" },
     // Terminals send 0x09 for both Tab and Ctrl-i, so this is the same
     // keystroke arriving under its other name rather than a second binding.
