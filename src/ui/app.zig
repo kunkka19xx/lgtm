@@ -337,6 +337,14 @@ pub const App = struct {
     pr_base_len: u8 = 0,
     pr_target: [64]u8 = undefined,
     pr_target_len: u8 = 0,
+    /// Which pull request the comment store belongs to, or zero for the
+    /// working tree. Remarks written against somebody else's branch are not
+    /// remarks about the tree on disk, and one file for both re-anchored them
+    /// onto whatever line they landed near.
+    pr_number: u32 = 0,
+    /// `owner/repo`, so posting does not have to ask again.
+    pr_repo: [128]u8 = undefined,
+    pr_repo_len: u8 = 0,
     /// Every path in the project, from `git ls-files`, loaded the first time
     /// `@` asks and kept for the session. Not loaded at startup: most sessions
     /// never mention a file, and cold start has a 50 ms budget.
@@ -1043,6 +1051,7 @@ pub const App = struct {
             },
             .comment_send => try self.commentSend(),
             .comment_send_one => try self.listSendOne(),
+            .comment_post_one => self.postOne(),
             .comment_send_all => {
                 self.closeFiles();
                 try self.submitReview();
@@ -1435,9 +1444,21 @@ pub const App = struct {
     /// which is most of what orients a reader in a hunk they have not scrolled
     /// to yet.
     fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
+        return diffText(arena, f, null);
+    }
+
+    /// As `diffHead`, from the hunk that contains `at` rather than the first.
+    /// What a comment is *about*, which is the one thing its row does not
+    /// already say.
+    pub fn diffText(arena: Allocator, f: diff.FileDiff, at: ?u32) []const u8 {
         var out: std.ArrayList(u8) = .empty;
         var lines: usize = 0;
+        var started = at == null;
         for (f.hunks) |h| {
+            if (!started) {
+                if (h.overlapsNew(at.?, 1) == 0) continue;
+                started = true;
+            }
             if (lines >= preview_lines or out.items.len >= preview_bytes) break;
             out.print(arena, "@@ -{d},{d} +{d},{d} @@{s}{s}\n", .{
                 h.old_start,                        h.old_count,
@@ -1690,9 +1711,12 @@ pub const App = struct {
                     // elided towards a name it does not end with.
                     .icon_path = n.path,
                     .detail = if (self.previews()) std.mem.trimEnd(u8, detail, " ") else "",
-                    // Copied for the reason the label is: the store is edited
-                    // and deleted from while the list is open.
-                    .preview = if (self.previews()) arena.dupe(u8, n.body) catch "" else "",
+                    // The code, not the remark. The row already carries the
+                    // remark, and a panel repeating it beside its own row is a
+                    // panel saying nothing. What is missing is what it is
+                    // about; `<Space>vc` is still how a long one is read whole.
+                    .preview = if (self.previews()) self.commentCode(arena, n.path, n.line) else "",
+                    .preview_kind = .diff,
                 }) catch return;
             }
             return;
@@ -2038,6 +2062,9 @@ pub const App = struct {
         // the table and never will be.
         if (settingOf(typed)) |s| {
             if (std.mem.eql(u8, s.setting.verb, "pr")) return self.openPr(s.arg);
+            if (std.mem.eql(u8, s.setting.verb, "post")) return self.postReview(.comment, s.arg);
+            if (std.mem.eql(u8, s.setting.verb, "approve")) return self.postReview(.approve, s.arg);
+            if (std.mem.eql(u8, s.setting.verb, "request-changes")) return self.postReview(.request_changes, s.arg);
             return self.setTheme(s.arg);
         }
 
@@ -2111,6 +2138,9 @@ pub const App = struct {
         // every `<Tab>` is a network call for a list the reader already has
         // in the branch they are on.
         .{ .verb = "pr", .names = &.{} },
+        .{ .verb = "post", .names = &.{} },
+        .{ .verb = "approve", .names = &.{} },
+        .{ .verb = "request-changes", .names = &.{} },
         // vim's spelling, for the reader who arrives already knowing it.
         .{ .verb = "colorscheme", .names = theme_mod.bundled_names },
         .{ .verb = "colo", .names = theme_mod.bundled_names },
@@ -2156,6 +2186,100 @@ pub const App = struct {
         self.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
     }
 
+    /// What the line numbers in a review file belong to. Empty for the working
+    /// tree, where they belong to the files on disk.
+    fn reviewScope(self: *const App, buf: []u8) []const u8 {
+        if (self.pr_number == 0) return "";
+        return std.fmt.bufPrint(
+            buf,
+            "Pull request #{d}, {s}. Line numbers are that tree, not the working one: `gh pr checkout {d}`.",
+            .{ self.pr_number, self.postRepo() orelse "", self.pr_number },
+        ) catch "";
+    }
+
+    /// The repository a pull request review is posted to, remembered from the
+    /// resolve so posting costs no second question.
+    fn postRepo(self: *const App) ?[]const u8 {
+        if (self.pr_number == 0 or self.pr_repo_len == 0) return null;
+        return self.pr_repo[0..self.pr_repo_len];
+    }
+
+    /// `:post`, `:approve`, `:request-changes`. One review, one request, so a
+    /// partial failure cannot happen.
+    ///
+    /// The argument, if any, is the covering note the review opens with. An
+    /// approval needs nothing to say; the other two do, or there is no reason
+    /// to have notified anybody.
+    fn postReview(self: *App, want: gh.Event, note: []const u8) void {
+        const repo = self.postRepo() orelse {
+            self.notice.set("not reviewing a pull request", .{});
+            return;
+        };
+
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const arena = scratch.allocator();
+
+        var out: std.ArrayList(u8) = .empty;
+        var ids: std.ArrayList(u32) = .empty;
+        gh.reviewBody(&out, arena, &self.comments, self.review.files(), want, note, &ids) catch {
+            self.notice.set("could not build the review", .{});
+            return;
+        };
+        if (ids.items.len == 0 and want != .approve and note.len == 0) {
+            if (self.comments.len() == 0) {
+                self.notice.set("no comments to post", .{});
+            } else {
+                self.notice.set("everything here is posted already", .{});
+            }
+            return;
+        }
+
+        gh.post(self.gpa, arena, self.io, repo, self.pr_number, out.items) catch {
+            self.notice.set("could not post the review", .{});
+            return;
+        };
+        self.comments.markPosted(ids.items);
+        self.saveComments();
+        self.closeFiles();
+        self.notice.set("posted {d} to #{d} as {s}", .{ ids.items.len, self.pr_number, want.wire() });
+    }
+
+    /// `<C-p>` in the comment list: the one under the cursor, on its own.
+    /// GitHub's "add single comment" beside "submit review", which is the
+    /// split every reader already knows from the web.
+    fn postOne(self: *App) void {
+        const n = self.listSelected() orelse return;
+        if (self.postRepo() == null) {
+            self.notice.set("not reviewing a pull request", .{});
+            return;
+        }
+        if (n.posted) {
+            self.notice.set("already posted", .{});
+            return;
+        }
+        const id = n.id;
+        var one: comments_mod.Store = .init(self.gpa);
+        defer one.deinit();
+        _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed) catch return;
+        one.list.items[0].state = n.state;
+
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const arena = scratch.allocator();
+        var out: std.ArrayList(u8) = .empty;
+        var ids: std.ArrayList(u32) = .empty;
+        gh.reviewBody(&out, arena, &one, self.review.files(), .comment, "", &ids) catch return;
+
+        gh.post(self.gpa, arena, self.io, self.postRepo().?, self.pr_number, out.items) catch {
+            self.notice.set("could not post that comment", .{});
+            return;
+        };
+        self.comments.markPosted(&.{id});
+        self.saveComments();
+        self.notice.set("posted {s}:{d}", .{ n.path, n.line });
+    }
+
     /// `:pr [n]`, or `:pr off` for the working tree. The same resolve `--pr`
     /// runs, so the two spellings cannot disagree about what a request is.
     fn openPr(self: *App, arg: []const u8) void {
@@ -2182,6 +2306,9 @@ pub const App = struct {
         self.review.base = self.keepRef(&self.pr_base, &self.pr_base_len, refs.base);
         self.review.target = self.keepRef(&self.pr_target, &self.pr_target_len, refs.target);
         self.review.setLabel(refs.label);
+        self.pr_repo_len = @intCast(@min(refs.repo.len, self.pr_repo.len));
+        @memcpy(self.pr_repo[0..self.pr_repo_len], refs.repo[0..self.pr_repo_len]);
+        self.swapComments(refs.number);
         self.reopen();
         // Not the label: the badge shows it already. What is new is that the
         // review has stopped following the working tree.
@@ -2208,6 +2335,8 @@ pub const App = struct {
         self.review.setLabel("");
         self.pr_base_len = 0;
         self.pr_target_len = 0;
+        self.pr_repo_len = 0;
+        self.swapComments(0);
         self.reopen();
         self.notice.set("back to the working tree", .{});
     }
@@ -2568,6 +2697,42 @@ pub const App = struct {
         try testing.expectEqualStrings("HEAD", fx.app.review.base);
     }
 
+    test "remarks on a pull request do not follow you to the working tree" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // One file per scope, so nothing has to filter and a working-tree
+        // review never re-anchors somebody else's branch onto the tree here.
+        var buf: [64]u8 = undefined;
+        try testing.expectEqualStrings(".lgtm/comments.jsonl", fx.app.commentsPath(&buf));
+        fx.app.pr_number = 13;
+        try testing.expectEqualStrings(".lgtm/pr-13.jsonl", fx.app.commentsPath(&buf));
+    }
+
+    test "swapping scope empties the store and reloads the new one" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        _ = try fx.app.comments.add("a.zig", 1, "about the working tree");
+        try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
+        // Nothing here may write to the repository the tests run in.
+        fx.app.comments.dirty = false;
+
+        // A scope with no file: the store comes back empty rather than
+        // carrying the previous one's remarks across, and rather than picking
+        // up `notes.jsonl`, which belongs to the working tree alone.
+        fx.app.swapComments(999_999);
+        try testing.expectEqual(@as(usize, 0), fx.app.comments.len());
+        try testing.expectEqual(@as(u32, 999_999), fx.app.pr_number);
+
+        // Asking for the scope already open is not a reload: it would drop
+        // unsaved remarks on the way out and back.
+        _ = try fx.app.comments.add("b.zig", 2, "about the request");
+        fx.app.comments.dirty = false;
+        fx.app.swapComments(999_999);
+        try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
+    }
+
     test "a failed pull request leaves the review pointing where it was" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
@@ -2877,25 +3042,61 @@ pub const App = struct {
         try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].path, "a remark") != null);
     }
 
-    test "a comment keeps its whole remark for the panel beside the list" {
+    test "a comment's panel starts at the hunk it sits in" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const arena = fx.app.pick_arena.allocator();
+
+        var kinds = [_]hunk.LineKind{ .context, .add, .context, .add };
+        var olds = [_]u32{ 1, 0, 90, 0 };
+        var news = [_]u32{ 1, 2, 90, 91 };
+        var texts = [_][]const u8{ "top of file", "first change", "further down", "second change" };
+        var hunks = [_]hunk.Hunk{
+            .{ .old_start = 1, .old_count = 1, .new_start = 1, .new_count = 2, .lo = 0, .hi = 2 },
+            .{ .old_start = 90, .old_count = 1, .new_start = 90, .new_count = 2, .lo = 2, .hi = 4 },
+        };
+        const f: diff.FileDiff = .{
+            .old_path = "a.zig",
+            .new_path = "a.zig",
+            .status = .modified,
+            .hunks = &hunks,
+            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
+        };
+
+        // A remark on line 91 is about the second hunk, and showing the first
+        // would be showing the wrong code with total confidence.
+        const at = App.diffText(arena, f, 91);
+        try testing.expect(std.mem.startsWith(u8, at, "@@ -90,1 +90,2 @@"));
+        try testing.expect(std.mem.indexOf(u8, at, "second change") != null);
+        try testing.expect(std.mem.indexOf(u8, at, "first change") == null);
+
+        // The file list wants the head instead, which is the same walk from
+        // the first hunk.
+        try testing.expect(std.mem.startsWith(u8, App.diffText(arena, f, null), "@@ -1,1 +1,2 @@"));
+
+        // A line in no hunk at all shows nothing rather than the nearest thing.
+        try testing.expectEqualStrings("", App.diffText(arena, f, 5000));
+    }
+
+    test "a comment's panel shows the code, not the comment again" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        const body = "the retry loop here\nnever backs off, so a flapping\nhost gets hammered";
+        const body = "the retry loop here\nnever backs off";
         _ = try fx.app.comments.add("src/net.zig", 47, body);
         fx.app.files_purpose = .comments;
         fx.app.buildPickList();
 
         const row = fx.app.pick_list.items[0];
-        // The row keeps the flattened body, because the filter reaches only
-        // what the label holds.
+        // The row carries the remark, flattened, because that is what the
+        // filter reads.
         try testing.expect(std.mem.indexOf(u8, row.path, "src/net.zig:47") != null);
         try testing.expect(std.mem.indexOfScalar(u8, row.path, '\n') == null);
-        // The panel gets it as it was written. `flatten` and its 256-byte
-        // buffer turned a paragraph into a first sentence with no way to read
-        // the rest.
-        try testing.expectEqualStrings(body, row.preview);
         try testing.expectEqualStrings("src/net.zig:47", row.detail);
+        // And the panel does not repeat it: a panel saying what its own row
+        // says is a panel saying nothing. The fixture has no diff for the
+        // file, so there is nothing to show and nothing is invented.
+        try testing.expect(std.mem.indexOf(u8, row.preview, "retry loop") == null);
     }
 
     test "a backend that reports only ids still gets a list worth reading" {
@@ -3536,7 +3737,13 @@ pub const App = struct {
         var buf: [compose_mod.max_bytes]u8 = undefined;
         var flat: [compose_mod.max_bytes]u8 = undefined;
         const one = compose_mod.flatten(&flat, n.body);
-        const line = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one;
+        // The pull request comes first for the same reason the review file
+        // names it: `path:line` on somebody else's tree is a different line
+        // here.
+        const line = if (self.pr_number == 0)
+            std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one
+        else
+            std.fmt.bufPrint(&buf, "PR #{d} {s}:{d} - {s}", .{ self.pr_number, n.path, n.line, one }) catch one;
         n.state = .sent;
         self.comments.dirty = true;
 
@@ -3763,7 +3970,8 @@ pub const App = struct {
 
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
-        const written = try review_file.render(&out, self.gpa, &self.comments, self.review_n);
+        var scope_buf: [256]u8 = undefined;
+        const written = try review_file.render(&out, self.gpa, &self.comments, self.review_n, self.reviewScope(&scope_buf));
 
         var buf: [64]u8 = undefined;
         const rel = review_file.path(&buf, self.review_n);
@@ -3800,24 +4008,61 @@ pub const App = struct {
         self.want_send = .send;
     }
 
+    /// The hunk a comment sits in, as diff text for its panel.
+    fn commentCode(self: *const App, arena: Allocator, path: []const u8, line: u32) []const u8 {
+        for (self.review.files()) |f| {
+            if (!std.mem.eql(u8, f.path(), path)) continue;
+            return diffText(arena, f, line);
+        }
+        return "";
+    }
+
+    /// Where this review's remarks live. One file per scope rather than a
+    /// field on each comment: nothing has to filter, and "my remarks on this
+    /// pull request" is a file read.
+    fn commentsPath(self: *const App, buf: []u8) []const u8 {
+        if (self.pr_number == 0) return ".lgtm/comments.jsonl";
+        return std.fmt.bufPrint(buf, ".lgtm/pr-{d}.jsonl", .{self.pr_number}) catch
+            ".lgtm/comments.jsonl";
+    }
+
     pub fn saveComments(self: *App) void {
         if (!self.comments.dirty) return;
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
         comments_mod.write(&out, self.gpa, &self.comments) catch return;
-        fs_mod.writeStateFile(self.io, ".lgtm/comments.jsonl", out.items) catch return;
+        var buf: [64]u8 = undefined;
+        fs_mod.writeStateFile(self.io, self.commentsPath(&buf), out.items) catch return;
         self.comments.dirty = false;
+    }
+
+    /// Puts the current scope's remarks away and brings the new scope's out.
+    fn swapComments(self: *App, number: u32) void {
+        if (self.pr_number == number) return;
+        self.saveComments();
+        self.comments.deinit();
+        self.comments = .init(self.gpa);
+        self.pr_number = number;
+        self.loadComments();
     }
 
     pub fn loadComments(self: *App) void {
         // `.lgtm/notes.jsonl` is the name this file had before the feature was
         // called comments. Read once and it is written back under the new
         // name: renaming a concept should not lose a reader's remarks.
-        const text = fs_mod.readFile(self.io, self.gpa, ".lgtm/comments.jsonl", 1 << 20) catch
-            fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return;
+        var buf: [64]u8 = undefined;
+        const path = self.commentsPath(&buf);
+        // The rename predates the scopes, so only the working tree ever wore
+        // the old name. Offering it to every scope handed one file's remarks
+        // to whichever pull request was opened first.
+        const text = fs_mod.readFile(self.io, self.gpa, path, 1 << 20) catch
+            if (self.pr_number == 0)
+                fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return
+            else
+                return;
         defer self.gpa.free(text);
         comments_mod.read(&self.comments, text) catch {};
-        if (self.comments.len() > 0 and !fs_mod.fileExists(self.io, ".lgtm/comments.jsonl")) {
+        if (self.comments.len() > 0 and !fs_mod.fileExists(self.io, path)) {
             self.comments.dirty = true;
             self.saveComments();
         }
@@ -4647,12 +4892,16 @@ pub const App = struct {
     /// moves the footer with the binding.
     fn commentListKeys(self: *App, arena: Allocator) []const keytext.HelpEntry {
         var out: std.ArrayList(keytext.HelpEntry) = .empty;
-        const want = [_]struct { cmd: keymap.Command, desc: []const u8 }{
+        // A footer naming a key that does nothing is worse than a shorter one,
+        // and posting needs a pull request to post to.
+        const want = [_]struct { cmd: keymap.Command, desc: []const u8, pr_only: bool = false }{
             .{ .cmd = .comment_send_one, .desc = "send" },
             .{ .cmd = .comment_send_all, .desc = "send all" },
+            .{ .cmd = .comment_post_one, .desc = "post", .pr_only = true },
             .{ .cmd = .comment_drop, .desc = "del" },
         };
         for (want) |w| {
+            if (w.pr_only and self.pr_number == 0) continue;
             var buf: [32]u8 = undefined;
             const keys = keytext.firstKeyFor(self.km.bindings, w.cmd, .finder, &buf);
             if (keys.len == 0) continue;

@@ -75,6 +75,7 @@ pub const Command = enum {
     comment_send,
     comment_send_one,
     comment_send_all,
+    comment_post_one,
     comment_drop,
     comment_view,
     comment_delete,
@@ -588,6 +589,7 @@ pub const default_bindings: []const Binding = &.{
     // A default nobody can press is not a default.
     .{ .chords = &.{ctrl('s')}, .command = .comment_send_one, .modes = Modes.finder_only },
     .{ .chords = &.{ctrl('x')}, .command = .comment_send_all, .modes = Modes.finder_only },
+    .{ .chords = &.{ctrl('p')}, .command = .comment_post_one, .modes = Modes.finder_only },
     .{ .chords = &.{ctrl('d')}, .command = .comment_drop, .modes = Modes.finder_only },
     // Unadvertised aliases: arrows for hands that reach for them, `<C-n>`/
     // `<C-p>` for hands that learned other finders.

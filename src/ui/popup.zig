@@ -404,7 +404,12 @@ pub fn fit(m: Metrics, selected: usize, area: Area) ?Box {
     var list_rows: u16 = @intCast(@max(per + @intFromBool(hidden > 0), 1));
     // A panel beside the list is as tall as the list, so a short list makes a
     // short panel rather than a box with a hole in it.
-    if (beside > 0) list_rows = @max(list_rows, @min(m.preview_lines, room -| 3));
+    // The same floor the stacked panel gets: one row is a sliver that reads as
+    // a rendering fault rather than as a small answer.
+    if (beside > 0) list_rows = @max(list_rows, @min(
+        @max(m.preview_lines, preview_rows_min),
+        room -| 3,
+    ));
     const width = content + 4;
     const height = list_rows + 3 + (if (under > 0) under + 1 else 0);
     const col = (area.width -| width) / 2;
@@ -606,10 +611,18 @@ test "the preview goes beside the list, or under it, or not at all" {
     try testing.expectEqual(@as(usize, 8), grown.shown);
 
     // A ceiling, not a floor: two lines do not open a twenty-row box to draw
-    // two lines in it.
+    // two lines in it. The list still sets the height here, being taller.
     few.preview_lines = 2;
     const snug = fit(few, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
     try testing.expectEqual(@as(u16, 8), snug.preview_rows);
+
+    // But a short list and a short panel still clear the floor, or the panel
+    // is a sliver.
+    var tiny_both = few;
+    tiny_both.entries = 1;
+    tiny_both.preview_lines = 1;
+    const floored = fit(tiny_both, 0, .{ .width = 120, .top = 0, .height = 30 }).?;
+    try testing.expectEqual(preview_rows_min, floored.preview_rows);
 
     // And the pane still wins over the ceiling.
     few.preview_lines = preview_rows_beside;

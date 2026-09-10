@@ -201,6 +201,8 @@ pub fn main(init: std.process.Init) !void {
     var pr_arena: std.heap.ArenaAllocator = .init(gpa);
     defer pr_arena.deinit();
     var pr_label: []const u8 = "";
+    var pr_scope: u32 = 0;
+    var pr_repo: []const u8 = "";
     if (want_pr) {
         if (base != null or target != null) {
             // Winning quietly would review something the reader did not ask
@@ -219,6 +221,8 @@ pub fn main(init: std.process.Init) !void {
         base = refs.base;
         target = refs.target;
         pr_label = refs.label;
+        pr_scope = refs.number;
+        pr_repo = refs.repo;
     }
 
     try loop.run(gpa, io, init.environ_map, .{
@@ -229,6 +233,8 @@ pub fn main(init: std.process.Init) !void {
         .base = base,
         .target = target,
         .label = pr_label,
+        .pr = pr_scope,
+        .repo = pr_repo,
     });
 
     if (want_profile) try metrics.report(w);

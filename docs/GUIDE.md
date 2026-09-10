@@ -195,7 +195,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>c` | write a comment on this line, on removed code too |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
-| `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the one you are on as you wrote it |
+| `<Space>lc` | list every comment; the filter reaches the file, the line and the text, and the panel beside the list shows the code the one you are on is about |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
@@ -204,7 +204,40 @@ Comments follow the code when the agent rewrites it, survive a restart, and say
 so when they can no longer be placed. A comment is never silently dropped.
 
 In the comment list, `<C-s>` sends the highlighted one, `<C-x>` sends every open
-one as the review file, `<C-d>` deletes one.
+one as the review file, `<C-d>` deletes one. `J K` move and `H L` page, as in
+every list; the footer names only the keys you could not guess.
+
+**Reviewing a pull request, the same comments have a second home.** `:post`
+hands the collected ones to the request as one review; `:approve` and
+`:request-changes` are the same batch with a different verdict, and anything
+you type after the command becomes the review's opening sentence. In the list,
+`<C-p>` posts just the highlighted one, which is GitHub's "add single comment"
+beside its "submit review".
+
+The panel beside the list shows the hunk each remark sits in, not the remark
+itself: the row already carries that, and `<Space>vc` opens a long one to read
+whole.
+
+Posting and sending are separate facts, so a remark can go to your agent *and*
+to the author, and neither hides it from the other. Posting a second time sends
+only what is new. A remark GitHub cannot attach to a line, one that went stale
+or that sits outside the diff, travels in the review's body with its file and
+line rather than being dropped.
+
+Comments are kept per review: those written on `--pr 16` live in
+`.lgtm/pr-16.jsonl` and appear only while you are reviewing #16. Your working
+tree keeps its own in `.lgtm/comments.jsonl`.
+
+What the agent is told changes too. A pull request is somebody else's tree, so
+`src/config.zig:8` means nothing in your checkout; the review file opens by
+naming the request and how to get it:
+
+```markdown
+# Review 1
+
+> Pull request #16, kunkka19xx/lgtm. Line numbers are that tree, not the
+> working one: `gh pr checkout 16`.
+```
 
 ### 4. Come back to what's new
 
@@ -432,6 +465,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `?` | every key, from your bindings |
 | `:` | run any command by name, `<Tab>` completes (see below) |
 | `:pr [n]` | review a pull request without restarting; bare, the current branch's. `:pr off` comes back to the working tree |
+| `:post` `:approve` `:request-changes` | hand the collected comments to the pull request, as one review |
 | `:q` | quit |
 
 ### The command line
@@ -500,7 +534,8 @@ review with its own `.gitignore`:
 
 | | |
 |---|---|
-| `.lgtm/comments.jsonl` | your comments |
+| `.lgtm/comments.jsonl` | your comments on the working tree |
+| `.lgtm/pr-N.jsonl` | your comments on pull request N |
 | `.lgtm/review-N.md` | what `<C-s>` wrote |
 | `.lgtm/state.json` | the session, the turn count, where you read to |
 | `.lgtm/config.toml` | this repository's settings, if you commit one |

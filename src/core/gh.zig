@@ -16,6 +16,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
+const comments = @import("comments.zig");
+const diff = @import("diff.zig");
+const hunk = @import("hunk.zig");
 const git = @import("git.zig");
 const proc = @import("../io/proc.zig");
 
@@ -97,6 +100,8 @@ pub fn view(gpa: Allocator, arena: Allocator, io: std.Io, number: ?u32) Error!Pr
 /// A pull request as two refs. The whole of what GitHub is asked for.
 pub const Refs = struct {
     number: u32,
+    /// `owner/repo`, kept so posting a review needs no second question.
+    repo: []const u8,
     /// The merge base, which is what a three-dot diff is taken against.
     base: []const u8,
     /// The head commit.
@@ -166,10 +171,121 @@ pub fn resolve(
 
     return .{
         .number = pr.number,
+        .repo = ownerRepo(pr.url) orelse "",
         .base = base,
         .target = try arena.dupe(u8, pr.head_oid),
         .label = try std.fmt.allocPrint(arena, "#{d} {s}", .{ pr.number, pr.title }),
     };
+}
+
+/// What a review says when it is submitted.
+pub const Event = enum {
+    comment,
+    approve,
+    request_changes,
+
+    pub fn wire(self: Event) []const u8 {
+        return switch (self) {
+            .comment => "COMMENT",
+            .approve => "APPROVE",
+            .request_changes => "REQUEST_CHANGES",
+        };
+    }
+};
+
+/// Whether a comment can be attached to a line of the diff.
+///
+/// GitHub takes an inline comment only on a line inside a hunk; anything else
+/// is a 422. A remark that cannot be placed is not dropped, it goes into the
+/// review body with its file and line, which is hard rule 7 pointed at a
+/// second destination.
+pub fn inlineable(files: []const diff.FileDiff, path: []const u8, line: u32) bool {
+    for (files) |f| {
+        if (!std.mem.eql(u8, f.path(), path)) continue;
+        for (f.hunks) |h| {
+            if (h.overlapsNew(line, 1) > 0) return true;
+        }
+        return false;
+    }
+    return false;
+}
+
+/// The review body and its inline comments, as the API wants them.
+///
+/// One request, so a partial failure cannot happen: either the whole review
+/// lands or none of it does.
+pub fn reviewBody(
+    out: *std.ArrayList(u8),
+    gpa: Allocator,
+    store: *const comments.Store,
+    files: []const diff.FileDiff,
+    event: Event,
+    note: []const u8,
+    /// Filled with the ids that went inline or into the body, so the caller
+    /// can mark exactly what was handed over.
+    ids: *std.ArrayList(u32),
+) Allocator.Error!void {
+    var body: std.ArrayList(u8) = .empty;
+    defer body.deinit(gpa);
+    if (note.len > 0) try body.appendSlice(gpa, note);
+
+    var inlines: std.ArrayList(u8) = .empty;
+    defer inlines.deinit(gpa);
+
+    for (store.items()) |n| {
+        if (n.posted) continue;
+        try ids.append(gpa, n.id);
+
+        if (n.state != .stale and inlineable(files, n.path, n.line)) {
+            if (inlines.items.len > 0) try inlines.append(gpa, ',');
+            try inlines.appendSlice(gpa, "{\"path\":");
+            try comments.quoteJson(&inlines, gpa, n.path);
+            // Always the right-hand side. A comment on removed code hangs on
+            // the nearest surviving line and no old line number is kept, so
+            // `LEFT` has nothing to anchor to; the body below says what it was
+            // about instead.
+            try inlines.print(gpa, ",\"line\":{d},\"side\":\"RIGHT\",\"body\":", .{n.line});
+            try comments.quoteJson(&inlines, gpa, n.body);
+            try inlines.append(gpa, '}');
+            continue;
+        }
+
+        // Not placeable: stale, or anchored outside every hunk.
+        if (body.items.len > 0) try body.appendSlice(gpa, "\n\n");
+        try body.print(gpa, "**{s}:{d}**", .{ n.path, n.line });
+        if (n.state == .stale) try body.appendSlice(gpa, " _(the line this was written against has gone)_");
+        if (n.about_removed) try body.appendSlice(gpa, " _(about code removed here)_");
+        try body.appendSlice(gpa, "\n\n");
+        try body.appendSlice(gpa, n.body);
+    }
+
+    try out.appendSlice(gpa, "{\"event\":\"");
+    try out.appendSlice(gpa, event.wire());
+    try out.appendSlice(gpa, "\",\"body\":");
+    try comments.quoteJson(out, gpa, body.items);
+    try out.appendSlice(gpa, ",\"comments\":[");
+    try out.appendSlice(gpa, inlines.items);
+    try out.appendSlice(gpa, "]}");
+}
+
+/// `gh api repos/{owner}/{repo}/pulls/{n}/reviews --input -`
+pub fn postArgv(arena: Allocator, repo: []const u8, number: u32) Allocator.Error![]const []const u8 {
+    const path = try std.fmt.allocPrint(arena, "repos/{s}/pulls/{d}/reviews", .{ repo, number });
+    return arena.dupe([]const u8, &.{ "gh", "api", "--method", "POST", path, "--input", "-" });
+}
+
+pub fn post(
+    gpa: Allocator,
+    arena: Allocator,
+    io: std.Io,
+    repo: []const u8,
+    number: u32,
+    payload: []const u8,
+) Error!void {
+    const argv = try postArgv(arena, repo, number);
+    const out = proc.runWithInput(gpa, io, argv, payload, view_output_max) catch return error.GhFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
 }
 
 const testing = std.testing;
@@ -218,6 +334,75 @@ test "the owning repository is read out of the address, not asked for again" {
     // answer is a repository because nothing has to - it is matched against
     // the remotes, and one that matches none falls back to `origin`.
     try testing.expectEqualStrings("github.com/lgtm", ownerRepo("https://github.com/lgtm/pull/13").?);
+}
+
+fn oneFile(path: []const u8, hunks: []hunk.Hunk) diff.FileDiff {
+    return .{ .old_path = path, .new_path = path, .status = .modified, .hunks = hunks };
+}
+
+test "a review carries what can be placed inline and says the rest in its body" {
+    const gpa = testing.allocator;
+    var store: comments.Store = .init(gpa);
+    defer store.deinit();
+
+    _ = try store.add("a.zig", 47, "the retry loop never backs off");
+    _ = try store.add("a.zig", 900, "nowhere near a hunk");
+    const gone = try store.add("a.zig", 12, "this line is gone");
+    store.find(gone).?.state = .stale;
+
+    var hunks = [_]hunk.Hunk{.{ .old_start = 40, .old_count = 10, .new_start = 40, .new_count = 10, .lo = 0, .hi = 0 }};
+    var files = [_]diff.FileDiff{oneFile("a.zig", &hunks)};
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    try reviewBody(&out, gpa, &store, &files, .request_changes, "two things", &ids);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"event\":\"REQUEST_CHANGES\"") != null);
+    // Inside a hunk: an inline comment on the right-hand side.
+    try testing.expect(std.mem.indexOf(u8, out.items, "\"line\":47,\"side\":\"RIGHT\"") != null);
+    // Outside every hunk, and stale: both in the body with their line, never
+    // dropped. GitHub would reject them inline with a 422.
+    try testing.expect(std.mem.indexOf(u8, out.items, "a.zig:900") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "a.zig:12") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "has gone") != null);
+    // The covering note leads.
+    try testing.expect(std.mem.indexOf(u8, out.items, "two things") != null);
+    // Every remark is accounted for, so the caller marks exactly what went.
+    try testing.expectEqual(@as(usize, 3), ids.items.len);
+}
+
+test "a remark already posted is not posted twice" {
+    const gpa = testing.allocator;
+    var store: comments.Store = .init(gpa);
+    defer store.deinit();
+
+    const id = try store.add("a.zig", 47, "said once");
+    var hunks = [_]hunk.Hunk{.{ .old_start = 40, .old_count = 10, .new_start = 40, .new_count = 10, .lo = 0, .hi = 0 }};
+    var files = [_]diff.FileDiff{oneFile("a.zig", &hunks)};
+
+    store.markPosted(&.{id});
+    // `posted` is its own fact: handing a remark to the agent must not stop it
+    // reaching the author, or the reverse.
+    store.find(id).?.state = .sent;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    var ids: std.ArrayList(u32) = .empty;
+    defer ids.deinit(gpa);
+    try reviewBody(&out, gpa, &store, &files, .comment, "", &ids);
+    try testing.expectEqual(@as(usize, 0), ids.items.len);
+    try testing.expect(std.mem.indexOf(u8, out.items, "said once") == null);
+}
+
+test "posting goes to the repository the request is on" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const argv = try postArgv(a.allocator(), "kunkka19xx/lgtm", 13);
+    try testing.expectEqualStrings("repos/kunkka19xx/lgtm/pulls/13/reviews", argv[4]);
+    try testing.expectEqualStrings("--input", argv[5]);
+    try testing.expectEqualStrings("-", argv[6]);
 }
 
 test "a head is fetched from the ref the forge puts it at" {

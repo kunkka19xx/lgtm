@@ -74,6 +74,10 @@ pub const Comment = struct {
     /// the nearest surviving line of its hunk, and this is what stops that
     /// from reading as a remark about the code it landed next to.
     about_removed: bool = false,
+    /// Handed to the forge. Separate from `state`, which says whether the
+    /// *agent* has seen it: a remark legitimately goes to both audiences, and
+    /// one field for two would make either destination skip the other's work.
+    posted: bool = false,
 
     pub fn deinit(self: Comment, gpa: Allocator) void {
         gpa.free(self.path);
@@ -191,6 +195,17 @@ pub const Store = struct {
 
     /// Marks every open comment as sent. Called after a review file is written,
     /// because that is the moment the agent has them.
+    /// Marks every comment `ids` names as handed to the forge.
+    pub fn markPosted(self: *Store, ids: []const u32) void {
+        for (self.list.items) |*n| {
+            for (ids) |id| {
+                if (n.id != id) continue;
+                if (!n.posted) self.dirty = true;
+                n.posted = true;
+            }
+        }
+    }
+
     pub fn markSent(self: *Store) void {
         for (self.list.items) |*n| {
             if (n.state == .open) n.state = .sent;
@@ -295,12 +310,13 @@ pub fn write(out: *std.ArrayList(u8), gpa: Allocator, store: *const Store) Alloc
         try out.appendSlice(gpa, ",\"state\":\"");
         try out.appendSlice(gpa, n.state.name());
         try out.appendSlice(gpa, "\",\"path\":");
-        try quote(out, gpa, n.path);
+        try quoteJson(out, gpa, n.path);
         if (n.about_removed) try out.appendSlice(gpa, ",\"removed\":true");
+        if (n.posted) try out.appendSlice(gpa, ",\"posted\":true");
         try out.appendSlice(gpa, ",\"anchor\":");
-        try quote(out, gpa, n.anchor);
+        try quoteJson(out, gpa, n.anchor);
         try out.appendSlice(gpa, ",\"body\":");
-        try quote(out, gpa, n.body);
+        try quoteJson(out, gpa, n.body);
         try out.appendSlice(gpa, "}\n");
     }
 }
@@ -330,12 +346,15 @@ pub fn read(store: *Store, text: []const u8) Allocator.Error!void {
         n.id = @intCast(id);
         if (std.mem.indexOf(u8, line, "\"state\":\"sent\"") != null) n.state = .sent;
         if (std.mem.indexOf(u8, line, "\"state\":\"stale\"") != null) n.state = .stale;
+        n.posted = std.mem.indexOf(u8, line, "\"posted\":true") != null;
         if (store.next_id <= n.id) store.next_id = n.id + 1;
     }
     store.dirty = false;
 }
 
-fn quote(out: *std.ArrayList(u8), gpa: Allocator, text: []const u8) Allocator.Error!void {
+/// A JSON string literal. Shared with `core/gh.zig`, which builds a review
+/// out of the same bytes this stores.
+pub fn quoteJson(out: *std.ArrayList(u8), gpa: Allocator, text: []const u8) Allocator.Error!void {
     try out.append(gpa, '"');
     for (text) |ch| switch (ch) {
         '"' => try out.appendSlice(gpa, "\\\""),

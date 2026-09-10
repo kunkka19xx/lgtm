@@ -308,6 +308,7 @@ way to check a spelling before committing it to a config file.
 
 **Comments** `comment_add` `comment_view` `comment_list` `comment_send`
 `comment_delete` `comment_send_one` `comment_send_all` `comment_drop`
+`comment_post_one`
 
 **Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`
 `next_turn` `prev_turn` `turn_list` `restore_file` `undo_restore`

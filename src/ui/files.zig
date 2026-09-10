@@ -156,11 +156,28 @@ pub const Files = struct {
             .max_share = self.max_share,
             .query = filter,
             .index = self.index,
-            .keys = try keytext.helpEntries(bindings, .finder, null, "", arena),
+            .keys = try navKeys(bindings, arena),
             .layout = &self.layout,
         };
     }
 };
+
+/// The list's own keys for the footer, without the ones that move the cursor.
+///
+/// `J K` and `H L` are the first thing a vim reader tries and the last thing
+/// they need told, and in a list with actions on it they were half the footer:
+/// `J K move  H L page  <C-s> send  <C-x> send all  <C-p> post  <C-d> del`
+/// does not fit a split pane, and the half worth keeping is the half nobody
+/// can guess. `?` still lists all of them.
+fn navKeys(bindings: []const keymap.Binding, arena: Allocator) Allocator.Error![]const keytext.HelpEntry {
+    const all = try keytext.helpEntries(bindings, .finder, null, "", arena);
+    var out: std.ArrayList(keytext.HelpEntry) = .empty;
+    for (all) |e| {
+        if (std.mem.eql(u8, e.desc, "move") or std.mem.eql(u8, e.desc, "page")) continue;
+        try out.append(arena, e);
+    }
+    return out.toOwnedSlice(arena);
+}
 
 /// The rows, in review order, narrowed by `query`. Order is the review's, not
 /// a ranking: a reader who knows the change knows roughly where a file sits in
