@@ -37,6 +37,9 @@ const typescript_lang = @import("lang/typescript.zig");
 const css_lang = @import("lang/css.zig");
 const html_lang = @import("lang/html.zig");
 const json_lang = @import("lang/json.zig");
+const yaml_lang = @import("lang/yaml.zig");
+const toml_lang = @import("lang/toml.zig");
+const dockerfile_lang = @import("lang/dockerfile.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -54,26 +57,57 @@ pub const languages = [_]*const LangDef{
     &css_lang.def,
     &html_lang.def,
     &json_lang.def,
+    &yaml_lang.def,
+    &toml_lang.def,
+    &dockerfile_lang.def,
 };
 
-/// Extension match, lower-cased. Everything unrecognised renders plain.
+/// The language a path is in, by extension or by name, lower-cased.
+/// Everything unrecognised renders plain.
 ///
 /// The basename is found by hand rather than with std.fs.path: std.fs is
 /// quarantined to io/fs.zig, and this is one `lastIndexOfScalar`.
-pub fn byExtension(path: []const u8) ?*const LangDef {
+pub fn forPath(path: []const u8) ?*const LangDef {
     const slash = std.mem.lastIndexOfScalar(u8, path, '/');
     const base = if (slash) |n| path[n + 1 ..] else path;
+
+    var lower: [max_name]u8 = undefined;
+    if (byName_(base, &lower)) |def| return def;
+
     const dot = std.mem.lastIndexOfScalar(u8, base, '.') orelse return null;
     const ext = base[dot + 1 ..];
-    if (ext.len == 0 or ext.len > 8) return null;
-
-    var lower: [8]u8 = undefined;
-    for (ext, 0..) |c, i| lower[i] = std.ascii.toLower(c);
-    const want = lower[0..ext.len];
+    if (ext.len == 0 or ext.len > max_name) return null;
+    const want = lowered(ext, &lower);
 
     for (languages) |def| {
         for (def.extensions) |e| {
             if (std.mem.eql(u8, e, want)) return def;
+        }
+    }
+    return null;
+}
+
+/// Long enough for `webmanifest` and `Dockerfile`. A name past it is not one
+/// this table knows, so the comparison is skipped rather than truncated.
+const max_name = 16;
+
+fn lowered(text: []const u8, buf: *[max_name]u8) []const u8 {
+    for (text, 0..) |c, i| buf[i] = std.ascii.toLower(c);
+    return buf[0..text.len];
+}
+
+/// `Dockerfile`, and `Dockerfile.dev` with it: a name match takes the basename
+/// whole or up to its first dot, because the suffix there says which build it
+/// is for and never which language it is in.
+fn byName_(base: []const u8, buf: *[max_name]u8) ?*const LangDef {
+    const dot = std.mem.indexOfScalar(u8, base, '.');
+    const stem = if (dot) |n| base[0..n] else base;
+    if (stem.len == 0 or stem.len > max_name) return null;
+    const want = lowered(stem, buf);
+
+    for (languages) |def| {
+        for (def.filenames) |f| {
+            if (std.mem.eql(u8, f, want)) return def;
         }
     }
     return null;
@@ -100,7 +134,7 @@ pub const Highlighter = union(enum) {
     /// second pass over the file for nothing.
     pub fn choose(path: []const u8, byte_len: usize, lines: u32) Highlighter {
         if (byte_len > max_bytes or lines > max_lines) return .plain;
-        const def = byExtension(path) orelse return .plain;
+        const def = forPath(path) orelse return .plain;
         return .{ .lexer = .init(def) };
     }
 
@@ -335,26 +369,48 @@ pub const Cache = struct {
 const testing = std.testing;
 
 test "extensions map to languages, case-insensitively" {
-    try testing.expectEqualStrings("zig", byExtension("src/core/diff.zig").?.name);
-    try testing.expectEqualStrings("rust", byExtension("src/main.RS").?.name);
-    try testing.expectEqualStrings("go", byExtension("cmd/serve.go").?.name);
-    try testing.expectEqualStrings("c", byExtension("src/main.c").?.name);
-    try testing.expectEqualStrings("c", byExtension("include/lgtm.h").?.name);
-    try testing.expectEqualStrings("cpp", byExtension("src/App.cpp").?.name);
-    try testing.expectEqualStrings("cpp", byExtension("src/App.hpp").?.name);
-    try testing.expectEqualStrings("csharp", byExtension("Api/Program.cs").?.name);
-    try testing.expectEqualStrings("python", byExtension("tools/run.py").?.name);
-    try testing.expectEqualStrings("swift", byExtension("Views/Launchpad.swift").?.name);
-    try testing.expectEqualStrings("lua", byExtension("plugin/init.lua").?.name);
-    try testing.expectEqualStrings("java", byExtension("src/main/App.java").?.name);
-    try testing.expectEqualStrings("javascript", byExtension("web/app.jsx").?.name);
-    try testing.expectEqualStrings("typescript", byExtension("web/App.tsx").?.name);
-    try testing.expectEqualStrings("css", byExtension("web/main.scss").?.name);
-    try testing.expectEqualStrings("html", byExtension("web/index.html").?.name);
-    try testing.expect(byExtension("Makefile") == null);
-    try testing.expect(byExtension("notes.txt") == null);
+    try testing.expectEqualStrings("zig", forPath("src/core/diff.zig").?.name);
+    try testing.expectEqualStrings("rust", forPath("src/main.RS").?.name);
+    try testing.expectEqualStrings("go", forPath("cmd/serve.go").?.name);
+    try testing.expectEqualStrings("c", forPath("src/main.c").?.name);
+    try testing.expectEqualStrings("c", forPath("include/lgtm.h").?.name);
+    try testing.expectEqualStrings("cpp", forPath("src/App.cpp").?.name);
+    try testing.expectEqualStrings("cpp", forPath("src/App.hpp").?.name);
+    try testing.expectEqualStrings("csharp", forPath("Api/Program.cs").?.name);
+    try testing.expectEqualStrings("python", forPath("tools/run.py").?.name);
+    try testing.expectEqualStrings("swift", forPath("Views/Launchpad.swift").?.name);
+    try testing.expectEqualStrings("lua", forPath("plugin/init.lua").?.name);
+    try testing.expectEqualStrings("java", forPath("src/main/App.java").?.name);
+    try testing.expectEqualStrings("javascript", forPath("web/app.jsx").?.name);
+    try testing.expectEqualStrings("typescript", forPath("web/App.tsx").?.name);
+    try testing.expectEqualStrings("css", forPath("web/main.scss").?.name);
+    try testing.expectEqualStrings("html", forPath("web/index.html").?.name);
+    try testing.expectEqualStrings("yaml", forPath(".github/workflows/ci.yml").?.name);
+    try testing.expectEqualStrings("yaml", forPath("docker-compose.yaml").?.name);
+    try testing.expectEqualStrings("toml", forPath("Cargo.toml").?.name);
+    // Eleven characters, and the limit used to be eight: every `.webmanifest`
+    // rendered plain because the extension did not fit the buffer.
+    try testing.expectEqualStrings("json", forPath("web/site.webmanifest").?.name);
+
+    try testing.expect(forPath("Makefile") == null);
+    try testing.expect(forPath("notes.txt") == null);
     // A dot in a directory name is not an extension.
-    try testing.expect(byExtension("a.b/Makefile") == null);
+    try testing.expect(forPath("a.b/Makefile") == null);
+}
+
+test "a file known by name rather than by extension" {
+    // The three spellings in the wild, and the suffix says which build it is
+    // for rather than which language it is in.
+    try testing.expectEqualStrings("dockerfile", forPath("Dockerfile").?.name);
+    try testing.expectEqualStrings("dockerfile", forPath("docker/Dockerfile.dev").?.name);
+    try testing.expectEqualStrings("dockerfile", forPath("build/prod.Dockerfile").?.name);
+    try testing.expectEqualStrings("dockerfile", forPath("Containerfile").?.name);
+
+    // A name match takes the basename, so a directory called `dockerfile`
+    // says nothing about the file inside it.
+    try testing.expect(forPath("dockerfile/notes.txt") == null);
+    try testing.expect(forPath("Dockerfiles") == null);
+    try testing.expect(forPath(".dockerignore") == null);
 }
 
 test "guard rails fall back to plain rather than failing" {

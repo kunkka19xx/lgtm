@@ -42,14 +42,26 @@ pub const StringSpec = struct {
     max_bytes: ?u16 = null,
 };
 
+/// Where a bare word may be a key. See `LangDef.key_words`.
+pub const KeyWords = enum { none, line_head, anywhere };
+
 /// How the language delimits a function body. Determines both brace-depth
 /// tracking and how the enclosing-function scan closes a span.
-pub const Blocks = enum { braces, indent };
+///
+/// `none` is for a language whose spans are flat: a TOML table, a Dockerfile
+/// stage. A brace there belongs to a value or a shell command, and counting
+/// it closed the span the line was still inside - `${VAR}` in a `RUN` line
+/// ended the stage it was part of.
+pub const Blocks = enum { braces, indent, none };
 
 pub const LangDef = struct {
     name: []const u8,
     /// Lower-case, without the leading dot.
     extensions: []const []const u8 = &.{},
+    /// Files known by name instead: `Dockerfile`, `Containerfile`. Lower-case,
+    /// and matched against the basename whole or up to its first '.', so
+    /// `Dockerfile.dev` is one too.
+    filenames: []const []const u8 = &.{},
     line_comment: []const []const u8 = &.{},
     block_comment: ?BlockComment = null,
     /// Zig's `\\`: a string literal that runs to the end of the line.
@@ -125,6 +137,43 @@ pub const LangDef = struct {
     /// `"deps": {` names the lines under it and `"name": "lgtm"` names
     /// nothing. That is the only enclosing name JSON has.
     key_strings: bool = false,
+    /// The byte that turns the word before it into a key. YAML's ':', TOML's
+    /// '='. Read by `key_strings` and `key_words` alike, so a language spells
+    /// it once.
+    key_sep: u8 = ':',
+    /// The separator must be followed by whitespace or the end of the line.
+    /// YAML's grammar says so, and it is what tells the key in `dbdata: /var`
+    /// from the plain scalar `dbdata:/var/lib`. TOML's does not: `a=1` is an
+    /// assignment.
+    key_sep_spaced: bool = false,
+    /// A bare word with `key_sep` after it is a key, not a value. Typed
+    /// `.type_name` like a quoted one, and it names the lines under it when
+    /// the value is a block rather than a scalar.
+    ///
+    /// Where to look is the language's answer, not a shared one. YAML says
+    /// `.line_head`, because a colon is ordinary punctuation in a value and a
+    /// rule that looked anywhere would make a key of `nginx` in
+    /// `image: nginx:alpine`, and of every URL and every clock time. TOML says
+    /// `.anywhere`, because an unquoted '=' is an assignment and nothing else
+    /// there - which is what keeps `serde = { version = "1", features = [] }`
+    /// from colouring only the first of its three keys.
+    ///
+    /// Either way it overrides the keyword lookup rather than deferring to it.
+    /// `on:` heads most workflow files and is a key there and a boolean
+    /// nowhere.
+    key_words: KeyWords = .none,
+    /// YAML: `|` and `>` at the end of a line open a block scalar, and every
+    /// line indented past it is its body. Emitted as text rather than lexed,
+    /// because the body is somebody else's language - a shell script in a
+    /// `run:` step - and reading a `#` or a `key:` in it as YAML is a guess
+    /// that is usually wrong.
+    block_scalars: bool = false,
+    /// TOML: a '[' at the head of a line opens a table, and everything to the
+    /// closing bracket is its name - `[[products]]` included. It is the only
+    /// structure TOML has, so it is what a hunk header says, and a table ends
+    /// where the next one begins, which is what `openFn` already does to a
+    /// sibling at the same depth.
+    bracket_tables: bool = false,
     /// JSON: '[' and ']' count toward block depth as braces do. Only safe in a
     /// language with no indexing, which is why it is a flag: `a[0]` would
     /// otherwise open a block that never closes on the line it opened.
@@ -205,6 +254,9 @@ pub const LangDef = struct {
 /// hash is a tier-one item and waits for profile evidence.
 pub fn define(comptime d: LangDef) LangDef {
     comptime {
+        // The 256-entry identifier tables below are three loops of it, and the
+        // default quota is under one language's worth.
+        @setEvalBranchQuota(4000);
         var out = d;
 
         var words: [d.keywords.len + d.types.len]struct { []const u8, Kind } = undefined;

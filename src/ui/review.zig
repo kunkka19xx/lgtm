@@ -408,7 +408,7 @@ pub const Review = struct {
         const rows = try arena.alloc([]bool, fs.len);
         var total: testrisk.Risk = .{};
         for (fs, 0..) |*f, i| {
-            const lang = highlight.byExtension(f.path());
+            const lang = highlight.forPath(f.path());
             if (lang) |def| {
                 out[i] = testrisk.scan(f, def);
                 rows[i] = try testrisk.markRows(arena, f, def);
