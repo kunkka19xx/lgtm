@@ -181,10 +181,21 @@ input box, never submitted, so you decide when to press return.
 - `<Space>y` copies the reference to the clipboard instead of sending it.
 - `y` yanks the selected *text*, the way `y` does in vim.
 
-**In the box:** `<Esc>` leaves insert for normal mode, where the same vim
+**In the box:** `<C-o>` is a line break, mirroring the `o` that opens one in
+normal mode. `<C-j>` and `Shift-Enter` do the same where your terminal lets
+them through: a vim-tmux-navigator config binds `C-j` to move between panes, so
+tmux takes it before lgtm is asked. `<Esc>` leaves insert for normal mode, where the same vim
 motions work and `o` opens a line; a second `<Esc>` leaves the box. Writing a
 comment, `<C-s>` saves it and sends it to your agent, and on a pull request
-`<C-p>` saves it and posts it, neither needing a trip through the list. `<C-i>`
+`<C-p>` saves it and posts it, neither needing a trip through the list.
+
+If you write paragraphs more often than one-liners, swap the two:
+
+```toml
+[keys]
+compose_newline = ["<CR>", "<C-o>"]
+compose_submit  = ["<C-y>"]
+``` `<C-i>`
 inserts a preset at the caret, `@` inserts a file path, `<C-j>` is a line break.
 Nothing you type is deleted by either.
 
@@ -523,7 +534,7 @@ filters. `<Tab>` and `<S-Tab>`, the arrow keys, and `<C-n>`/`<C-p>` all move too
 ### In the compose box
 
 `<Esc>` leaves insert then leaves the box, `<CR>` sends, `<C-i>` inserts a
-preset, `@` inserts a file path, `<C-j>` is a line break, `<C-s>` saves a
+preset, `@` inserts a file path, `<C-o>` is a line break, `<C-s>` saves a
 comment and sends it at once. In normal mode: the review's motions plus
 `i a I A o O x D C dd cc d{motion} c{motion} u`.
 

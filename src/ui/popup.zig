@@ -1326,6 +1326,9 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
     });
     try add(f, v, &out, .compose_submit, commit);
     try add(f, v, &out, .compose_cancel, "cancel");
+    // Before the rest, because the footer sheds groups from the end and this
+    // is the one a reader needs on their second sentence.
+    if (!v.normal) try add(f, v, &out, .compose_newline, "line");
     if (v.saves) try add(f, v, &out, .compose_send_now, "save + send");
     if (v.saves and v.posts) try add(f, v, &out, .compose_post_now, "save + post");
     if (!v.normal) {

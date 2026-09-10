@@ -616,7 +616,19 @@ pub const default_bindings: []const Binding = &.{
     // keystroke arriving under its other name rather than a second binding.
     .{ .chords = &.{c(event.code.tab)}, .command = .compose_presets, .modes = Modes.compose_only },
     .{ .chords = &.{c('@')}, .command = .compose_mention, .modes = Modes.compose_only, .desc = "insert a file path at the caret" },
-    .{ .chords = &.{ctrl('j')}, .command = .compose_newline, .modes = Modes.compose_only, .desc = "a line break (Shift-Enter where the terminal sends it)" },
+    // `o` opens a line in the box's normal mode, so this is the same letter
+    // where the reader already is.
+    //
+    // Not `<C-j>` as the first choice, which is the terminal-native newline
+    // and the obvious pick: a vim-tmux-navigator setup binds `C-h/j/k/l` to
+    // move between panes, and tmux swallows it before lgtm is asked. It stays
+    // bound below for anyone whose tmux leaves it alone.
+    .{ .chords = &.{ctrl('o')}, .command = .compose_newline, .modes = Modes.compose_only, .desc = "a line break" },
+    .{ .chords = &.{ctrl('j')}, .command = .compose_newline, .modes = Modes.compose_only },
+    // What every chat box has taught people to press. Only a terminal
+    // reporting the kitty keyboard protocol tells it apart from `<CR>`; where
+    // one does not, this never fires and the two above are the answer.
+    .{ .chords = &.{shift(event.code.enter)}, .command = .compose_newline, .modes = Modes.compose_only },
 
     .{ .chords = &.{c(event.code.tab)}, .command = .list_down, .modes = Modes.lists },
     .{ .chords = &.{shift(event.code.tab)}, .command = .list_up, .modes = Modes.lists },

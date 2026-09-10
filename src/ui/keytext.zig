@@ -58,6 +58,7 @@ pub fn bufWriteChords(chords: []const Chord, buf: []u8) []const u8 {
             std.fmt.bufPrint(&tmp, "<C-{u}>", .{ch.cp}) catch "<C-?>"
         else if (ch.shift) switch (ch.cp) {
             event.code.tab => "<S-Tab>",
+            event.code.enter => "<S-CR>",
             else => std.fmt.bufPrint(&tmp, "<S-{u}>", .{ch.cp}) catch "<S-?>",
         } else switch (ch.cp) {
             event.code.escape => "<Esc>",
@@ -128,6 +129,7 @@ fn namedChord(name: []const u8) KeyParseError!Chord {
     // matcher could never see.
     if (name.len > 2 and std.ascii.toLower(name[0]) == 's' and name[1] == '-') {
         if (eq(name[2..], "Tab")) return .{ .cp = event.code.tab, .shift = true };
+        if (eq(name[2..], "CR") or eq(name[2..], "Enter")) return .{ .cp = event.code.enter, .shift = true };
         return error.BadKeyName;
     }
     if (eq(name, "Space")) return c(' ');
