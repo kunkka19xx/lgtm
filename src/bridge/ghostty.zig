@@ -165,18 +165,6 @@ pub fn parseList(arena: Allocator, text: []const u8, out: *std.ArrayList([]const
     }
 }
 
-/// The one terminal that is not ours, or null when there is more than one to
-/// choose between - the same rule, and the same reason, as the other four.
-pub fn soleOther(panes: []const []const u8, self: []const u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (panes) |p| {
-        if (self.len > 0 and std.mem.eql(u8, p, self)) continue;
-        if (found != null) return null;
-        found = p;
-    }
-    return found;
-}
-
 const testing = std.testing;
 
 test "a quote in a review comment cannot end the script" {
@@ -236,12 +224,4 @@ test "AppleScript renders a list comma-separated" {
     var bad: std.ArrayList([]const u8) = .empty;
     try parseList(a.allocator(), "execution error: Not authorized", &bad);
     try testing.expectEqual(@as(usize, 0), bad.items.len);
-}
-
-test "two terminals infer the other, three refuse" {
-    try testing.expectEqualStrings("2", soleOther(&.{ "1", "2" }, "1").?);
-    try testing.expect(soleOther(&.{ "1", "2", "3" }, "1") == null);
-    // Without a self id there is nothing to exclude, so two is still two and
-    // the inference declines rather than guessing which one is lgtm.
-    try testing.expect(soleOther(&.{ "1", "2" }, "") == null);
 }

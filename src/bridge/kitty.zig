@@ -101,18 +101,6 @@ pub fn parseList(arena: Allocator, text: []const u8, out: *std.ArrayList([]const
     }
 }
 
-/// The one window that is not ours, or null when there is more than one to
-/// choose between - the same rule, and the same reason, as the other two.
-pub fn soleOther(windows: []const []const u8, self: []const u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (windows) |w| {
-        if (self.len > 0 and std.mem.eql(u8, w, self)) continue;
-        if (found != null) return null;
-        found = w;
-    }
-    return found;
-}
-
 const testing = std.testing;
 
 test "send-text matches on id and separates the payload" {
@@ -153,9 +141,4 @@ test "a tab id is not a window id" {
     try testing.expectEqual(@as(usize, 2), out.items.len);
     try testing.expectEqualStrings("11", out.items[0]);
     try testing.expectEqualStrings("12", out.items[1]);
-}
-
-test "two windows infer the other, three refuse" {
-    try testing.expectEqualStrings("12", soleOther(&.{ "11", "12" }, "11").?);
-    try testing.expect(soleOther(&.{ "11", "12", "13" }, "11") == null);
 }

@@ -19,7 +19,9 @@ pub fn main(init: std.process.Init) !u8 {
     _ = args.next();
     const repo = args.next();
 
-    var parsed = git.diffPathsIn(init.gpa, init.io, repo, &.{}) catch |err| {
+    // No ignore patterns and against HEAD: the harness dumps what the review
+    // would parse, and `[review] ignore` is a display preference.
+    var parsed = git.diffPathsIn(init.gpa, init.io, repo, &.{}, &.{}, "HEAD") catch |err| {
         try w.print("git failed: {t}\n", .{err});
         try w.flush();
         return 1;

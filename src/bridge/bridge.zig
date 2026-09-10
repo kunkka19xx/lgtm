@@ -117,6 +117,24 @@ pub const Panes = struct {
 /// Kept for the callers that still say `Tmux`; the type is shared now.
 pub const Tmux = Panes;
 
+/// The one pane that is not ours, or null when there is more than one to
+/// choose between. Four backends had a copy each, and they were the same
+/// function: a list of ids and the reader's own.
+///
+/// Refusing past two is the whole point. A wrong guess types into somebody's
+/// editor, and refusing is the right answer for a machine and the wrong one
+/// for a person who can see their own screen - which is what the picker is
+/// for.
+fn soleOther(ids: []const []const u8, mine: []const u8) ?[]const u8 {
+    var found: ?[]const u8 = null;
+    for (ids) |id| {
+        if (mine.len > 0 and std.mem.eql(u8, id, mine)) continue;
+        if (found != null) return null;
+        found = id;
+    }
+    return found;
+}
+
 pub const Bridge = union(enum) {
     tmux: Panes,
     herdr: Panes,
@@ -431,9 +449,9 @@ pub const Bridge = union(enum) {
             // already set by the time it runs.
             .tmux => tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, false) catch return null, mine) orelse
                 tmux.soleOther(tmux.list(cx.gpa, arena, cx.io, true) catch return null, mine),
-            .herdr => herdr.soleOther(herdr.list(cx.gpa, arena, cx.io) catch return null, mine),
-            .wezterm => wezterm.soleOther(wezterm.list(cx.gpa, arena, cx.io) catch return null, mine),
-            .kitty => kitty.soleOther(kitty.list(cx.gpa, arena, cx.io) catch return null, mine),
+            .herdr => soleOther(herdr.list(cx.gpa, arena, cx.io) catch return null, mine),
+            .wezterm => soleOther(wezterm.list(cx.gpa, arena, cx.io) catch return null, mine),
+            .kitty => soleOther(kitty.list(cx.gpa, arena, cx.io) catch return null, mine),
             // Ghostty injects no per-pane id, so "ours" is the terminal that
             // is focused the first time this is asked - which is the moment
             // just after the reader typed `lgtm` into it. The one inference
@@ -442,7 +460,7 @@ pub const Bridge = union(enum) {
             .ghostty => blk: {
                 var self_buf: [max_pane_id]u8 = undefined;
                 const me = ghostty.front(cx.gpa, cx.io, &self_buf) orelse "";
-                break :blk ghostty.soleOther(ghostty.list(cx.gpa, arena, cx.io) catch return null, me);
+                break :blk soleOther(ghostty.list(cx.gpa, arena, cx.io) catch return null, me);
             },
             .osc52 => null,
         } orelse return null;
@@ -749,4 +767,13 @@ test "a pane longer than the inline buffer is truncated, not overrun" {
 test {
     _ = osc52;
     _ = tmux;
+}
+
+test "two panes infer the other one, three refuse to guess" {
+    try testing.expectEqualStrings("7", soleOther(&.{ "0", "7" }, "0").?);
+    // Three is a window nobody can be sure about, and guessing wrong types a
+    // review into someone's editor.
+    try testing.expect(soleOther(&.{ "0", "7", "9" }, "0") == null);
+    // Alone in the window there is nobody to send to.
+    try testing.expect(soleOther(&.{"0"}, "0") == null);
 }

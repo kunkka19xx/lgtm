@@ -1114,7 +1114,7 @@ pub const App = struct {
     /// `V` and `v`. Pressing the kind you are already in leaves; pressing the
     /// other switches, which is what vim does and what stops `v` from being a
     /// dead key inside a linewise selection.
-    pub fn toggleVisual(self: *App, kind: render.Selection.Kind) void {
+    fn toggleVisual(self: *App, kind: render.Selection.Kind) void {
         if (self.mode == .visual) {
             if (self.visual_kind == kind) return self.leaveVisual();
             self.visual_kind = kind;
@@ -1824,7 +1824,7 @@ pub const App = struct {
         self.moveTo(self.vp.pageTo(self.bodyOf(body), dir));
     }
 
-    pub fn centerCursor(self: *App, body: u16) void {
+    fn centerCursor(self: *App, body: u16) void {
         self.vp.centre(self.bodyOf(body));
     }
 

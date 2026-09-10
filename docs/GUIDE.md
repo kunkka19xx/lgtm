@@ -184,10 +184,12 @@ input box, never submitted, so you decide when to press return.
 **In the box:** `<C-o>` is a line break, mirroring the `o` that opens one in
 normal mode. `<C-j>` and `Shift-Enter` do the same where your terminal lets
 them through: a vim-tmux-navigator config binds `C-j` to move between panes, so
-tmux takes it before lgtm is asked. `<Esc>` leaves insert for normal mode, where the same vim
-motions work and `o` opens a line; a second `<Esc>` leaves the box. Writing a
-comment, `<C-s>` saves it and sends it to your agent, and on a pull request
-`<C-p>` saves it and posts it, neither needing a trip through the list.
+tmux takes it before lgtm is asked. `<C-i>` inserts a preset at the caret and
+`@` inserts a file path, neither deleting what you have typed. `<Esc>` leaves
+insert for normal mode, where the same vim motions work and `o` opens a line; a
+second `<Esc>` leaves the box. Writing a comment, `<C-s>` saves it and sends it
+to your agent, and on a pull request `<C-p>` saves it and posts it, neither
+needing a trip through the list.
 
 If you write paragraphs more often than one-liners, swap the two:
 
@@ -195,9 +197,7 @@ If you write paragraphs more often than one-liners, swap the two:
 [keys]
 compose_newline = ["<CR>", "<C-o>"]
 compose_submit  = ["<C-y>"]
-``` `<C-i>`
-inserts a preset at the caret, `@` inserts a file path, `<C-j>` is a line break.
-Nothing you type is deleted by either.
+```
 
 ### 3. Collect comments, submit once
 
@@ -206,11 +206,11 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | | |
 |---|---|
 | `<Space>c` | write a comment on this line, on removed code too. With `v` or `V` selecting more than one, the comment covers all of them |
-| `<Space>gc` | suggest a change: a comment already holding the selected lines in a ```suggestion block |
+| `<Space>gc` | suggest a change: a comment already holding the selected lines in a suggestion block |
 | | the box's title says what the comment covers: `a.txt:5` for one line, `a.txt:5-6` for a range |
 | `]c` `[c` | walk them |
 | `<Space>vc` | open the nearest one to read or edit |
-| `<Space>lc` | list every comment; the panel beside the list shows the one you are on and the code it is about. The filter still reaches the text, even though the rows only show where each remark is |
+| `<Space>lc` | list every comment |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
@@ -218,9 +218,20 @@ A dozen remarks is a dozen interruptions, or it is one file.
 Comments follow the code when the agent rewrites it, survive a restart, and say
 so when they can no longer be placed. A comment is never silently dropped.
 
+A comment over a selection covers every line it touches, `v` or `V` alike: a
+remark anchors to whole lines, so where in them the selection starts makes no
+difference. It can only cover lines the new file still has, so selecting a
+removed line along with the one that replaced it gives a remark on the
+replacement alone. The box's title is where you see what you actually got.
+
 In the comment list, `<C-s>` sends the highlighted one, `<C-x>` sends every open
 one as the review file, `<C-d>` deletes one. `J K` move and `H L` page, as in
-every list; the footer names only the keys you could not guess.
+every list; the footer names only the keys you could not guess. The rows are
+addresses, `path:line`, and the panel beside them carries the remark itself
+followed by the hunk it sits in: a remark squeezed into a column is a remark you
+cannot read, so it is not in the column. Typing part of one still finds it.
+
+#### On a pull request
 
 **`<Space>lp` lists the open pull requests, and Enter reviews one.** Each row
 is a number, a title and how big the read is; the state and the author appear
@@ -229,41 +240,21 @@ Typing digits means the request's number rather than a digit in a title.
 `:pr list all` takes in the merged and closed ones, `:prs` is the short
 spelling, and `:pr 16` still goes straight to one you already know.
 
-**Opening a pull request reads the review that is already on it.** Every
-inline remark anybody left comes down with the diff and sits in the gutter
-beside your own, in the comment list, and on `]c`. They carry the author's
-name, and one whose line has gone from the diff arrives stale rather than
-silently placed somewhere plausible. You cannot edit or delete one: it lives on
-the request, and a changed copy here would say something its author never
-wrote. They are never posted back, and they are not written to `.lgtm/`, so
-opening the request again reads them fresh rather than showing you yesterday's.
+**Opening one reads the review that is already there.** Every inline remark
+anybody left comes down with the diff and sits in the gutter beside your own,
+in the comment list, and on `]c`. They carry the author's name, and one whose
+line has gone from the diff arrives stale rather than silently placed somewhere
+plausible. You cannot edit or delete one: it lives on the request, and a changed
+copy here would say something its author never wrote. They are never posted
+back, and they are not written to `.lgtm/`, so opening the request again reads
+them fresh rather than showing you yesterday's. If `gh` cannot reach the forge
+the diff still opens and the tool says only that it could not read them.
 
-If `gh` cannot reach the forge the diff still opens and the tool says only that
-it could not read the remarks.
-
-**Reviewing a pull request, the same comments have a second home.** `:post`
-hands the collected ones to the request as one review; `:approve` and
-`:request-changes` are the same batch with a different verdict, and anything
-you type after the command becomes the review's opening sentence. In the list,
-`<C-p>` posts just the highlighted one, which is GitHub's "add single comment"
-beside its "submit review".
-
-A selection can only cover lines the new file still has, so selecting a
-removed line together with the one that replaced it gives a remark on the
-replacement alone. Nothing can be suggested for a line that is gone. The box's
-title is where you see what you actually got.
-
-A comment made over a selection covers every line it touches, `v` or `V`
-alike: a remark anchors to whole lines, so where in them the selection starts
-makes no difference. And `<Space>gc`
-opens one already holding those lines inside a ```suggestion fence, so you edit
-the code rather than describe the edit. Posted to a pull request it becomes a
-real suggestion the author applies with one click, and GitHub needs the range
-for that: a three-line replacement has to be anchored to three lines.
-
-The rows are addresses, `path:line`, and the panel carries the remark itself
-followed by the hunk it sits in. A remark squeezed into a column is a remark
-you cannot read, so it is not in the column; typing part of one still finds it.
+**Your own remarks get a second home.** `:post` hands the collected ones to the
+request as one review; `:approve` and `:request-changes` are the same batch with
+a different verdict, and anything you type after the command becomes the
+review's opening sentence. In the list, `<C-p>` posts just the highlighted one,
+which is GitHub's "add single comment" beside its "submit review".
 
 Posting and sending are separate facts, so a remark can go to your agent *and*
 to the author, and neither hides it from the other. Posting a second time sends
@@ -271,20 +262,19 @@ only what is new. A remark GitHub cannot attach to a line, one that went stale
 or that sits outside the diff, travels in the review's body with its file and
 line rather than being dropped.
 
+`<Space>gc` is worth more here than anywhere: posted to a request, a suggestion
+block becomes a real suggestion the author applies with one click. GitHub needs
+the range for that, which is why a three-line replacement has to be anchored to
+three lines. Nothing can be suggested for a line that is gone.
+
 Comments are kept per review: those written on `--pr 16` live in
 `.lgtm/pr-16.jsonl` and appear only while you are reviewing #16. Your working
 tree keeps its own in `.lgtm/comments.jsonl`.
 
 What the agent is told changes too. A pull request is somebody else's tree, so
-`src/config.zig:8` means nothing in your checkout; the review file opens by
-naming the request and how to get it:
-
-```markdown
-# Review 1
-
-> Pull request #16, kunkka19xx/lgtm. Line numbers are that tree, not the
-> working one: `gh pr checkout 16`.
-```
+`src/config.zig:8` means nothing in your checkout. The review file opens by
+naming the request, the repository and the `gh pr checkout` that fetches it,
+and every reference sent on its own is prefixed `PR #16`.
 
 ### 4. Come back to what's new
 
@@ -477,6 +467,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | Key | |
 |---|---|
 | `<Space>c` | write one here |
+| `<Space>gc` | suggest a change: a comment holding the selected lines |
 | `<Space>vc` | open the nearest to read or edit |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send this one on its own |
@@ -566,11 +557,15 @@ can drift from what the tool actually does.
 
 `J` and `K` move, `H` and `L` page, `<CR>` opens, `<Esc>` closes, and typing
 filters. `<Tab>` and `<S-Tab>`, the arrow keys, and `<C-n>`/`<C-p>` all move too.
+In the comment list only: `<C-s>` sends the highlighted remark, `<C-x>` sends
+every open one as the review file, `<C-d>` deletes one, and on a pull request
+`<C-p>` posts one.
 
 ### In the compose box
 
 `<Esc>` leaves insert then leaves the box, `<CR>` sends, `<C-i>` inserts a
-preset, `@` inserts a file path, `<C-o>` is a line break, `<C-s>` saves a
+preset, `@` inserts a file path, `<C-o>` (or `<C-j>`, or `<S-CR>` where your
+terminal sends it) is a line break, `<C-s>` saves a
 comment and sends it at once, and on a pull request `<C-p>` saves and posts it.
 The arrows move a line at a time; `<C-a>` `<C-e>` `<C-b>` `<C-f>` `<C-u>`
 `<C-w>` `<C-d>` are readline's. In normal mode: the review's motions plus

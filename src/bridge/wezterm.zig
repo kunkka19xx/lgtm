@@ -87,22 +87,6 @@ pub fn parseList(arena: Allocator, text: []const u8, out: *std.ArrayList([]const
     }
 }
 
-/// The one pane that is not ours, or null when there is more than one to
-/// choose between.
-///
-/// The same rule `tmux.soleOther` follows, and it is the rule rather than a
-/// heuristic: two panes means the other one is the agent, and three means
-/// guessing. Guessing wrong types a review into someone's editor.
-pub fn soleOther(panes: []const []const u8, self: []const u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (panes) |p| {
-        if (self.len > 0 and std.mem.eql(u8, p, self)) continue;
-        if (found != null) return null;
-        found = p;
-    }
-    return found;
-}
-
 const testing = std.testing;
 
 test "send-text is no-paste and separates the payload from the flags" {
@@ -136,13 +120,4 @@ test "a field that moved reads as no panes rather than as a wrong one" {
     var out: std.ArrayList([]const u8) = .empty;
     try parseList(arena.allocator(), "[{\"paneId\":3}]", &out);
     try testing.expectEqual(@as(usize, 0), out.items.len);
-}
-
-test "two panes infer the other one, three refuse to guess" {
-    try testing.expectEqualStrings("7", soleOther(&.{ "0", "7" }, "0").?);
-    // Three is a window nobody can be sure about, and guessing wrong types a
-    // review into someone's editor.
-    try testing.expect(soleOther(&.{ "0", "7", "9" }, "0") == null);
-    // Alone in the window there is nobody to send to.
-    try testing.expect(soleOther(&.{"0"}, "0") == null);
 }

@@ -15,11 +15,9 @@ A terminal diff reviewer for agentic coding. It runs in a pane beside your
 agent, shows what changed as it changes, and lets you point at exact lines when
 you reply.
 
-**You keep your editor.** `hjkl`, `w b e`, `f t F T`, `/` and `n`, `V` to
-select, `zz` to centre - the motions already in your fingers, now pointed at the
-agent's work.
+**You keep your editor, and review code with vim motions.**
 
-- _A pane with your agent and tmux panes inside a window_
+- _LGTM running in a pane with your agent and tmux panes inside a window_
 
 <img width="1400" height="900" alt="a-pane-with-agent" src="https://github.com/user-attachments/assets/416d924f-daf6-43cb-b906-68eb67f22e6e" />
 
@@ -29,14 +27,10 @@ agent's work.
 
 <img width="1400" height="900" alt="side-by-side" src="https://github.com/user-attachments/assets/2c585a09-129f-4377-bfca-ce25ceb2f704" />
 
-
-> **Status: pre-alpha**, and used daily by its author.
->
-> It began a long time ago as a Go tool for reading diffs in a terminal. This is
-> a rewrite in Zig, rebuilt around a coding agent rather than a person: the diff
-> re-renders as the agent writes, references go straight to its input, and
-> comments follow the code when it rewrites the file underneath them. The loop
-> works end to end; the numbers below are measured, not estimated.
+> It began a long time ago as a Go tool for reading diffs in a terminal.
+> This is a rewrite in Zig, rebuilt around a coding agent rather than a person:
+> the diff re-renders as the agent writes, references go straight to its input, and
+> comments follow the code when it rewrites the file underneath them. The loop works end to end.
 
 ## Why
 
@@ -74,7 +68,7 @@ nix profile add --refresh github:kunkka19xx/lgtm  # keep it on PATH
 `--refresh` is not optional: Nix caches what a `github:` ref points at for an
 hour, and without it you can get handed a build you already have.
 
-Upgrading is a *different* command, and this is the one that catches people:
+Upgrading is a _different_ command, and this is the one that catches people:
 
 ```sh
 nix profile upgrade --refresh lgtm
@@ -137,26 +131,6 @@ vim motions are fixed, because in a text box every printable key is data.
 
 **[Guide](docs/GUIDE.md)** is install, the loop and every key.
 **[Configuration](docs/CONFIG.md)** is every setting, command name and theme slot.
-
-## Numbers
-
-Measured on macOS arm64, ReleaseFast, in this repository:
-
-|                       |                                                    |
-| --------------------- | -------------------------------------------------- |
-| Binary                | 766 KB, one dependency (`libSystem`)               |
-| Frame                 | 0.30 ms at 80x26                                   |
-| Re-diff               | 40 ms: one `git diff` plus the parse               |
-| Re-anchoring comments | 100% across the fixture set (24/24), 1.8 ms per 50 |
-
-Everything durable is a plain file in `.lgtm/` - comments as jsonl, reviews as
-markdown. Kill it and restart it; you lose scroll position.
-
-Snapshots are ordinary git objects under `refs/lgtm/**`. That namespace is
-invisible to `git branch` and `git status`, though `git log --all` walks every
-ref and will show them. `git show refs/lgtm/<session>/3:src/auth.zig` reads a
-file out of one without lgtm installed, and deleting the refs is all it takes to
-be rid of them.
 
 ## License
 
