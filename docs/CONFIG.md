@@ -21,6 +21,16 @@ with the file, the line and the key, and only that one key falls back to its
 default. This is a rule, not an accident: a review tool that refuses to open
 because of a typo is a review tool you stop running.
 
+String lists can span multiple lines, with comments and a trailing comma:
+
+```toml
+[keys]
+next_hunk = [
+    "]h",
+    "<Space>nh", # alternative binding
+]
+```
+
 ---
 
 ## `[nav]`
