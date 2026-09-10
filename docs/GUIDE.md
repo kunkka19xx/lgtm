@@ -229,6 +229,18 @@ Typing digits means the request's number rather than a digit in a title.
 `:pr list all` takes in the merged and closed ones, `:prs` is the short
 spelling, and `:pr 16` still goes straight to one you already know.
 
+**Opening a pull request reads the review that is already on it.** Every
+inline remark anybody left comes down with the diff and sits in the gutter
+beside your own, in the comment list, and on `]c`. They carry the author's
+name, and one whose line has gone from the diff arrives stale rather than
+silently placed somewhere plausible. You cannot edit or delete one: it lives on
+the request, and a changed copy here would say something its author never
+wrote. They are never posted back, and they are not written to `.lgtm/`, so
+opening the request again reads them fresh rather than showing you yesterday's.
+
+If `gh` cannot reach the forge the diff still opens and the tool says only that
+it could not read the remarks.
+
 **Reviewing a pull request, the same comments have a second home.** `:post`
 hands the collected ones to the request as one review; `:approve` and
 `:request-changes` are the same batch with a different verdict, and anything

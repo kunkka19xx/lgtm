@@ -380,27 +380,6 @@ fn synthesiseAdd(gpa: Allocator, path: []const u8, bytes: []const u8) Allocator.
     return out;
 }
 
-/// Paths that differ from HEAD, for the watcher to narrow re-diffs to.
-/// One subprocess instead of N stat calls.
-pub fn changedPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
-    const out = try proc.run(gpa, io, &.{ "git", "--no-optional-locks", "diff", "HEAD", "--name-only" }, max_diff_bytes);
-    defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GitFailed;
-
-    var list: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (list.items) |p| gpa.free(p);
-        list.deinit(gpa);
-    }
-    var it = std.mem.splitScalar(u8, out.stdout, '\n');
-    while (it.next()) |line| {
-        const p = std.mem.trim(u8, line, " \t\r");
-        if (p.len == 0) continue;
-        try list.append(gpa, try gpa.dupe(u8, p));
-    }
-    return list.toOwnedSlice(gpa);
-}
-
 /// Every path the working tree has changed against HEAD, tracked and not.
 ///
 /// What the snapshot store stages. Deliberately *not* the review's file list:

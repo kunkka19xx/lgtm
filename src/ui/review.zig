@@ -423,12 +423,6 @@ pub const Review = struct {
         self.risk_total = total;
     }
 
-    /// What the change did to the tests in file `index`.
-    pub fn riskFor(self: *const Review, index: u32) testrisk.Risk {
-        if (index >= self.risk.len) return .{};
-        return self.risk[index];
-    }
-
     /// Which rows of file `index` are findings `]w` should stop on.
     pub fn riskRowsFor(self: *const Review, index: u32) []const bool {
         if (index >= self.risk_rows.len) return &.{};

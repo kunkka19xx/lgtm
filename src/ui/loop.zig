@@ -26,7 +26,12 @@ const bridge = @import("../bridge/bridge.zig");
 
 const config = @import("../config.zig");
 const app_mod = @import("app.zig");
+const turns_mod = @import("turns.zig");
+const pr_mod = @import("pr.zig");
+const finder_mod = @import("finder.zig");
 const App = app_mod.App;
+const outgoing = @import("outgoing.zig");
+const notes = @import("notes.zig");
 const editor = @import("editor.zig");
 const keytext = @import("keytext.zig");
 const render = @import("render.zig");
@@ -202,10 +207,10 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     fs.ensureSelfIgnore(io);
     // Notes outlive the process: the whole point of `.lgtm/` is that killing
     // the pane costs scroll position and nothing else.
-    app.pr_number = opts.pr;
-    app.pr_repo_len = @intCast(@min(opts.repo.len, app.pr_repo.len));
-    @memcpy(app.pr_repo[0..app.pr_repo_len], opts.repo[0..app.pr_repo_len]);
-    app.loadComments();
+    app.pr.number = opts.pr;
+    app.pr.repo_len = @intCast(@min(opts.repo.len, app.pr.repo.len));
+    @memcpy(app.pr.repo[0..app.pr.repo_len], opts.repo[0..app.pr.repo_len]);
+    notes.loadComments(&app);
     // The store needs an environment to run git in, which only this layer has.
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
     // mark picked up after it, when there are files to attach it to.
@@ -222,10 +227,10 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     }
 
     try app.rediff();
-    if (live) app.restoreMark();
+    if (live) turns_mod.restoreMark(&app);
     // After the first diff, because the path list is what it needs, and before
     // the agent has had a chance to write anything - which is the whole point.
-    app.takeBaseline();
+    turns_mod.takeBaseline(&app);
 
     while (!app.quit) {
         // A SIGWINCH that never reached the queue leaves the screen wider
@@ -257,9 +262,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         // about a second, and a reader who pressed a key and saw nothing
         // assumes the key missed. Armed by the command, performed here, so the
         // notice saying it is happening is already on screen.
-        if (app.want_post) |req| {
-            app.want_post = null;
-            app.performPost(req);
+        if (app.pr.want_post) |req| {
+            app.pr.want_post = null;
+            pr_mod.performPost(&app, req);
             // Straight back to the top rather than on to the wait: what the
             // call decided has to reach the screen, and the loop blocks for
             // input until something else happens.
@@ -291,8 +296,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
         // Before the send, because the point of picking a pane is to send to
         // it: the picker sets both in one keystroke.
-        if (app.want_target) |id| {
-            app.want_target = null;
+        if (app.finder_state.want_target) |id| {
+            app.finder_state.want_target = null;
             if (br.panes()) |p| {
                 p.setPane(id);
                 // Inference has been overruled by a person, so it must not run
@@ -301,8 +306,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             }
         }
 
-        if (app.want_panes) {
-            app.want_panes = false;
+        if (app.finder_state.want_panes) {
+            app.finder_state.want_panes = false;
             const cx: bridge.Ctx = .{ .gpa = app.gpa, .io = app.io, .w = w };
             if (!offerPanes(&app, &br, cx, null)) {
                 app.notice.set("no other {s} to send to", .{br.unit()});
@@ -365,7 +370,7 @@ fn offerPanes(app: *App, br: *bridge.Bridge, cx: bridge.Ctx, text: ?[]const u8) 
     // knows and the list does not.
     const current = if (br.panes()) |p| p.pane() else null;
 
-    var rows: std.ArrayList(App.PaneRow) = .empty;
+    var rows: std.ArrayList(finder_mod.PaneRow) = .empty;
     for (found) |c| {
         // Everything the backend knew, handed over as parts: what the row
         // ends up looking like, and in what order, is the picker's decision.
@@ -383,7 +388,7 @@ fn offerPanes(app: *App, br: *bridge.Bridge, cx: bridge.Ctx, text: ?[]const u8) 
     }
     if (rows.items.len == 0) return false;
 
-    app.openPanePicker(rows.items, text) catch return false;
+    finder_mod.openPanePicker(app, rows.items, text) catch return false;
     return true;
 }
 
@@ -394,7 +399,7 @@ fn deliver(
     how: App.Delivery,
     saved: *SavedTarget,
 ) !void {
-    const text = app.payload();
+    const text = outgoing.payload(app);
     if (text.len == 0) return;
 
     const cx: bridge.Ctx = .{ .gpa = app.gpa, .io = app.io, .w = w };
@@ -575,7 +580,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.bindings = app.km.bindings;
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
-        shown.files = try app.file_list.view(app.mode, app.pick_list.items, app.listCurrent(), app.km.bindings, arena);
+        shown.files = try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
@@ -607,14 +612,14 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         var room_top: u16 = 0;
         var room = win.height;
         if (app.compose.open) {
-            const cv = app.composeView(arena);
+            const cv = outgoing.composeView(app, arena);
             try render.drawCompose(frameOf(app, win, arena), cv, 0, win.height);
             if (render.composeBox(frameOf(app, win, arena), cv, 0, win.height)) |box| {
                 room_top = box.roomTop(0, win.height);
                 room = box.room(0, win.height);
             }
         }
-        if (try app.file_list.view(app.mode, app.pick_list.items, app.listCurrent(), app.km.bindings, arena)) |fv| {
+        if (try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, arena)) |fv| {
             try render.drawFileList(frameOf(app, win, arena), fv, room_top, room);
         }
         // The bottom row is the prompt when one is open, and whatever the last

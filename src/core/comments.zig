@@ -81,6 +81,18 @@ pub const Comment = struct {
     /// *agent* has seen it: a remark legitimately goes to both audiences, and
     /// one field for two would make either destination skip the other's work.
     posted: bool = false,
+    /// Who left it, when that is not the reader. Empty for their own.
+    ///
+    /// One field carries the whole of what it means to be somebody else's
+    /// remark: it cannot be edited or deleted, it is already posted so it is
+    /// never posted again, and it is not written to `.lgtm/` - the forge is
+    /// where it lives and opening the request fetches it. Owned when set, and
+    /// the empty default is a literal, which is why `deinit` asks.
+    author: []const u8 = "",
+
+    pub fn theirs(self: Comment) bool {
+        return self.author.len > 0;
+    }
 
     pub fn end(self: Comment) u32 {
         return self.line + @max(self.span, 1) - 1;
@@ -90,6 +102,7 @@ pub const Comment = struct {
         gpa.free(self.path);
         gpa.free(self.body);
         gpa.free(self.anchor);
+        if (self.author.len > 0) gpa.free(self.author);
     }
 };
 
@@ -163,6 +176,42 @@ pub const Store = struct {
         self.next_id += 1;
         self.dirty = true;
         return id;
+    }
+
+    /// Takes in a remark somebody else left on the request.
+    ///
+    /// Posted by definition, so `:post` never sends it back; stale when the
+    /// forge says the line it was written against has gone, which is the same
+    /// fact under the same name.
+    pub fn adopt(
+        self: *Store,
+        path: []const u8,
+        line: u32,
+        span: u32,
+        body: []const u8,
+        author: []const u8,
+        outdated: bool,
+    ) Allocator.Error!u32 {
+        const id = try self.addFull(path, line, body, "", false, span);
+        const n = self.find(id).?;
+        n.author = try self.gpa.dupe(u8, author);
+        n.posted = true;
+        if (outdated) n.state = .stale;
+        return id;
+    }
+
+    /// Forgets every remark that came from the forge, so a fresh read of the
+    /// request replaces them rather than doubling them.
+    pub fn dropTheirs(self: *Store) void {
+        var i: usize = 0;
+        while (i < self.list.items.len) {
+            if (!self.list.items[i].theirs()) {
+                i += 1;
+                continue;
+            }
+            self.list.items[i].deinit(self.gpa);
+            _ = self.list.orderedRemove(i);
+        }
     }
 
     pub fn find(self: *Store, id: u32) ?*Comment {
@@ -308,8 +357,13 @@ fn dist(a: u32, b: u32) u32 {
 
 /// Writes the store as jsonl. Order is the store's, so a file rewritten
 /// without changes is byte-identical.
+///
+/// Somebody else's remarks are not written. They belong to the request, not to
+/// this checkout, and a copy here would go stale the moment the author edited
+/// one - or come back twice when the request is opened again.
 pub fn write(out: *std.ArrayList(u8), gpa: Allocator, store: *const Store) Allocator.Error!void {
     for (store.items()) |n| {
+        if (n.theirs()) continue;
         var num: [24]u8 = undefined;
         try out.appendSlice(gpa, "{\"id\":");
         try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{n.id}) catch "0");
@@ -598,4 +652,43 @@ test "editing reopens a sent comment, because the agent has the old text" {
     try testing.expectEqual(State.open, store.find(id).?.state);
     try testing.expectEqualStrings("second thought", store.find(id).?.body);
     try testing.expectEqual(@as(u32, 1), store.openCount());
+}
+
+test "somebody else's remark is theirs and stays theirs" {
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    const mine = try store.add("a.zig", 10, "I would rename this");
+    const theirs = try store.adopt("a.zig", 47, 3, "this retry never backs off", "kunkka19xx", false);
+    const gone = try store.adopt("b.zig", 12, 1, "the line this was on has moved", "someone", true);
+
+    // Posted by definition, so a review never sends it back to its author.
+    try testing.expect(store.find(theirs).?.posted);
+    try testing.expect(store.find(theirs).?.theirs());
+    try testing.expect(!store.find(mine).?.theirs());
+    // The forge saying `null` for the line is the same fact `stale` records.
+    try testing.expectEqual(State.stale, store.find(gone).?.state);
+    try testing.expectEqual(@as(u32, 49), store.find(theirs).?.end());
+
+    // Not written to `.lgtm/`: the request is where they live, and a copy
+    // here would go stale the moment the author edited one.
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+    try write(&out, gpa, &store);
+    try testing.expect(std.mem.indexOf(u8, out.items, "I would rename this") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "never backs off") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "kunkka19xx") == null);
+
+    // Reading the request again replaces them rather than doubling them.
+    store.dropTheirs();
+    try testing.expectEqual(@as(usize, 1), store.len());
+    try testing.expect(store.find(mine) != null);
+
+    // And reading back gets only the reader's own, so opening the request
+    // again cannot come back with two of everything.
+    var back: Store = .init(gpa);
+    defer back.deinit();
+    try read(&back, out.items);
+    try testing.expectEqual(@as(usize, 1), back.len());
 }
