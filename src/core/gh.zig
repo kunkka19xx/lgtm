@@ -24,6 +24,12 @@ const proc = @import("../io/proc.zig");
 
 /// Bounds a `gh` that has gone wrong, not a title that is long.
 const view_output_max = 64 << 10;
+/// The same, for a page of requests rather than one.
+const list_output_max = 256 << 10;
+
+/// How many requests a list asks for. Past this a reader filters by name or
+/// types the number; a picker is for choosing, not for browsing a year.
+pub const list_limit = 50;
 
 pub const Error = error{
     /// Missing, unauthenticated, offline, or not a pull request. One error:
@@ -48,11 +54,31 @@ pub const Pr = struct {
     head_oid: []const u8,
     /// Where the owning repository is read from.
     url: []const u8,
+    /// Open but not finished. Its own field because `state` stays `OPEN` for
+    /// a draft, and a draft is the row a reader most often skips.
+    draft: bool = false,
+    author: []const u8 = "",
+    /// How big the read is, which is the one thing a list cannot say in
+    /// words and the reader most wants before choosing.
+    added: u32 = 0,
+    removed: u32 = 0,
+    /// Last, so a title containing a tab stays the person's sentence.
     title: []const u8,
+
+    /// The state as a reader thinks of it: a draft is one of them, though to
+    /// the forge it is a flag on an open request.
+    pub fn status(self: Pr) []const u8 {
+        if (self.draft) return "draft";
+        if (std.mem.eql(u8, self.state, "OPEN")) return "open";
+        if (std.mem.eql(u8, self.state, "MERGED")) return "merged";
+        if (std.mem.eql(u8, self.state, "CLOSED")) return "closed";
+        return self.state;
+    }
 };
 
-const fields = "number,state,baseRefName,baseRefOid,headRefOid,url,title";
-const template = "{{.number}}\t{{.state}}\t{{.baseRefName}}\t{{.baseRefOid}}\t{{.headRefOid}}\t{{.url}}\t{{.title}}";
+const fields = "number,state,baseRefName,baseRefOid,headRefOid,url,isDraft,author,additions,deletions,title";
+const row_template = "{{.number}}\t{{.state}}\t{{.baseRefName}}\t{{.baseRefOid}}\t{{.headRefOid}}\t{{.url}}\t{{.isDraft}}\t{{.author.login}}\t{{.additions}}\t{{.deletions}}\t{{.title}}";
+const list_template = "{{range .}}" ++ row_template ++ "\n{{end}}";
 
 /// Without a number `gh` answers for the current branch, which is the common
 /// case: the branch is checked out because the agent just pushed it.
@@ -60,8 +86,25 @@ pub fn viewArgv(arena: Allocator, number: ?u32) Allocator.Error![]const []const 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(arena, &.{ "gh", "pr", "view" });
     if (number) |n| try argv.append(arena, try std.fmt.allocPrint(arena, "{d}", .{n}));
-    try argv.appendSlice(arena, &.{ "--json", fields, "--template", template });
+    try argv.appendSlice(arena, &.{ "--json", fields, "--template", row_template });
     return argv.toOwnedSlice(arena);
+}
+
+/// `all` takes in merged and closed ones. Open by default: a review is
+/// usually of something not merged yet, and the closed ones only ever
+/// outnumber them.
+///
+/// The same fields a single view asks for, so a row the reader picks is
+/// already the two refs and needs no second round trip.
+pub fn listArgv(arena: Allocator, all: bool) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{
+        "gh",                                        "pr",
+        "list",                                      "--state",
+        if (all) "all" else "open",                  "--limit",
+        std.fmt.comptimePrint("{d}", .{list_limit}), "--json",
+        fields,                                      "--template",
+        list_template,
+    });
 }
 
 /// One line, six fields. Null when it is not: a `gh` too old to know a field
@@ -76,6 +119,10 @@ pub fn parseView(text: []const u8) ?Pr {
     const base_oid = it.next() orelse return null;
     const head_oid = it.next() orelse return null;
     const url = it.next() orelse return null;
+    const draft = it.next() orelse return null;
+    const author = it.next() orelse return null;
+    const added = it.next() orelse return null;
+    const removed = it.next() orelse return null;
     if (base_ref.len == 0 or base_oid.len == 0 or head_oid.len == 0) return null;
     // The title takes the rest: it is a person's sentence, tabs and all.
     return .{
@@ -85,8 +132,27 @@ pub fn parseView(text: []const u8) ?Pr {
         .base_oid = base_oid,
         .head_oid = head_oid,
         .url = url,
+        .draft = std.mem.eql(u8, draft, "true"),
+        .author = author,
+        // A view of one request answers with counts; a template gh cannot
+        // expand prints itself back, and a row is still worth listing.
+        .added = std.fmt.parseInt(u32, added, 10) catch 0,
+        .removed = std.fmt.parseInt(u32, removed, 10) catch 0,
         .title = it.rest(),
     };
+}
+
+/// One row per line, and a line that does not parse is skipped rather than
+/// failing the list: one malformed request should not hide the rest.
+pub fn parseList(arena: Allocator, text: []const u8) Allocator.Error![]Pr {
+    var out: std.ArrayList(Pr) = .empty;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        const row = std.mem.trimEnd(u8, line, "\r");
+        if (row.len == 0) continue;
+        try out.append(arena, parseView(row) orelse continue);
+    }
+    return out.toOwnedSlice(arena);
 }
 
 pub fn view(gpa: Allocator, arena: Allocator, io: std.Io, number: ?u32) Error!Pr {
@@ -140,16 +206,30 @@ fn pullRef(arena: Allocator, number: u32) Allocator.Error![]const u8 {
 
 pub const ResolveError = Error || git.Error;
 
-/// Number to refs: ask `gh` what the request is, make sure the objects are
-/// here, then work out the base with git.
+pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all: bool) Error![]Pr {
+    const argv = try listArgv(arena, all);
+    const out = proc.run(gpa, io, argv, list_output_max) catch return error.GhFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
+    return parseList(arena, try arena.dupe(u8, out.stdout));
+}
+
+/// Number to refs: ask `gh` what the request is, then work the rest out.
 pub fn resolve(
     gpa: Allocator,
     arena: Allocator,
     io: std.Io,
     number: ?u32,
 ) ResolveError!Refs {
-    const pr = try view(gpa, arena, io, number);
+    return refsOf(gpa, arena, io, try view(gpa, arena, io, number));
+}
 
+/// A request to the two refs a review reads: make sure the objects are here,
+/// then work out the base with git.
+///
+/// Split from `resolve` because a picked row is already a `Pr`, and asking
+/// GitHub again for what is on screen doubles the freeze.
+pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError!Refs {
     // Both sides: the base commit is a past tip of its branch, and a stale
     // `origin/main` does not have it.
     //
@@ -315,18 +395,51 @@ test "a resolve names the pull request or the current branch's" {
 }
 
 test "a view parses into two refs and a title" {
-    const pr = parseView("13\tMERGED\tmain\tbe94b77\tc7143ba\thttps://github.com/o/r/pull/13\tfeat: syntax highlight for json\n").?;
+    const pr = parseView("13\tMERGED\tmain\tbe94b77\tc7143ba\thttps://github.com/o/r/pull/13\tfalse\tkunkka19xx\t112\t11\tfeat: syntax highlight for json\n").?;
     try testing.expectEqual(@as(u32, 13), pr.number);
     try testing.expectEqualStrings("MERGED", pr.state);
     try testing.expectEqualStrings("main", pr.base_ref);
     // A commit, not a branch name: see `Pr.base_oid`.
     try testing.expectEqualStrings("be94b77", pr.base_oid);
     try testing.expectEqualStrings("c7143ba", pr.head_oid);
+    try testing.expectEqualStrings("kunkka19xx", pr.author);
+    try testing.expect(!pr.draft);
     try testing.expectEqualStrings("feat: syntax highlight for json", pr.title);
 
     // A title is a person's sentence: a tab in it is theirs, not a field.
-    const tabbed = parseView("1\tOPEN\tmain\tdef\tabc\thttps://github.com/o/r/pull/1\tfix:\tthe thing").?;
+    const tabbed = parseView("1\tOPEN\tmain\tdef\tabc\thttps://github.com/o/r/pull/1\tfalse\tme\t1\t0\tfix:\tthe thing").?;
     try testing.expectEqualStrings("fix:\tthe thing", tabbed.title);
+}
+
+test "a list is rows of the same shape, and a bad one costs only itself" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const rows = try parseList(arena, "19\tOPEN\tmain\t054ef14\t13623ca\thttps://github.com/o/r/pull/19\ttrue\tkunkka19xx\t112\t11\tfeat: posting\n" ++
+        "\n" ++
+        "nonsense\n" ++
+        "17\tMERGED\tmain\t4c5c96e\ta82d63c\thttps://github.com/o/r/pull/17\tfalse\tsomeone\t9\t3\tfeat: PR review\n");
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqual(@as(u32, 19), rows[0].number);
+    // A draft is open to the forge and its own state to a reader.
+    try testing.expectEqualStrings("draft", rows[0].status());
+    try testing.expectEqualStrings("merged", rows[1].status());
+    // The refs come with the row, so picking one asks GitHub nothing more.
+    try testing.expectEqualStrings("13623ca", rows[0].head_oid);
+    // How big the read is, drawn as the file list draws a file's.
+    try testing.expectEqual(@as(u32, 112), rows[0].added);
+}
+
+test "a list asks for open requests unless told otherwise" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+    try testing.expectEqualStrings("open", (try listArgv(arena, false))[4]);
+    try testing.expectEqualStrings("all", (try listArgv(arena, true))[4]);
+    // The same fields a single view asks for: a picked row is already refs.
+    const argv = try listArgv(arena, false);
+    try testing.expectEqualStrings(fields, argv[argv.len - 3]);
 }
 
 test "the owning repository is read out of the address, not asked for again" {
@@ -478,7 +591,7 @@ test "a pull request names a branch to fetch and a commit to diff against" {
     // Two different things, and using one for the other is the bug each was
     // added for: the branch moves, so it cannot be the base of the diff; the
     // commit may be absent, so it cannot be what is fetched.
-    const pr = parseView("13\tOPEN\tmain\tbe94b77\tc7143ba\thttps://github.com/o/r/pull/13\tfeat: json").?;
+    const pr = parseView("13\tOPEN\tmain\tbe94b77\tc7143ba\thttps://github.com/o/r/pull/13\tfalse\tme\t0\t0\tfeat: json").?;
     try testing.expectEqualStrings("main", pr.base_ref);
     try testing.expectEqualStrings("be94b77", pr.base_oid);
     try testing.expect(!std.mem.eql(u8, pr.base_ref, pr.base_oid));
@@ -488,7 +601,7 @@ test "a merged pull request still has a base that is not its own head" {
     // The failure this guards: `merge-base <branch> <head>` is the head once
     // the branch contains it, and the review comes back empty. `baseRefOid`
     // is the branch as it was, which does not move under a merged request.
-    const pr = parseView("12\tMERGED\tmain\tbe94b77\te721393\thttps://github.com/o/r/pull/12\tfeat: v0.1.3").?;
+    const pr = parseView("12\tMERGED\tmain\tbe94b77\te721393\thttps://github.com/o/r/pull/12\tfalse\tme\t0\t0\tfeat: v0.1.3").?;
     try testing.expect(!std.mem.eql(u8, pr.base_oid, pr.head_oid));
 }
 
@@ -499,5 +612,5 @@ test "anything that is not a pull request is not guessed at" {
     try testing.expect(parseView("") == null);
     try testing.expect(parseView("13\tOPEN\n") == null);
     // Present but empty is no answer either.
-    try testing.expect(parseView("13\tOPEN\tmain\t\t\turl\ttitle") == null);
+    try testing.expect(parseView("13\tOPEN\tmain\t\t\turl\tfalse\tme\t0\t0\ttitle") == null);
 }

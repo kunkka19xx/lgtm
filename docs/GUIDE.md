@@ -222,6 +222,13 @@ In the comment list, `<C-s>` sends the highlighted one, `<C-x>` sends every open
 one as the review file, `<C-d>` deletes one. `J K` move and `H L` page, as in
 every list; the footer names only the keys you could not guess.
 
+**`<Space>lp` lists the open pull requests, and Enter reviews one.** Each row
+is a number, a title and how big the read is; the state and the author appear
+only when the rows differ, because a word repeated down a list says nothing.
+Typing digits means the request's number rather than a digit in a title.
+`:pr list all` takes in the merged and closed ones, `:prs` is the short
+spelling, and `:pr 16` still goes straight to one you already know.
+
 **Reviewing a pull request, the same comments have a second home.** `:post`
 hands the collected ones to the request as one review; `:approve` and
 `:request-changes` are the same batch with a different verdict, and anything
@@ -430,6 +437,7 @@ documents itself. What follows is the defaults.
 | `*` `#` | search for the word under the cursor, forwards or back |
 | `<Space>f` | the changed files |
 | `<Space>F` | every file in the project |
+| `<Space>lp` | the open pull requests, to pick one to review |
 
 Every `]x` has a `<Space>nx` spelling and every `[x` a `<Space>px`, for anyone
 whose terminal makes brackets awkward.
@@ -493,6 +501,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `?` | every key, from your bindings |
 | `:` | run any command by name, `<Tab>` completes (see below) |
 | `:pr [n]` | review a pull request without restarting; bare, the current branch's. `:pr off` comes back to the working tree |
+| `:pr list` | pick one from the open requests. `:pr list all` includes merged and closed; `:prs` is the same as `:pr list` |
 | `:post` `:approve` `:request-changes` | hand the collected comments to the pull request, as one review |
 | `:q` | quit |
 
