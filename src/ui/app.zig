@@ -308,11 +308,17 @@ pub const App = struct {
         /// a machine and the wrong one for a person who can see their own
         /// screen.
         panes,
+        /// `<Space>lp`: the open pull requests, and Enter reviews one.
+        prs,
     } = .jump,
     /// The panes the picker is listing, copied into `pick_arena` for the
     /// reason the comment labels are: the list outlives the frame that built
     /// it. Parallel to `pick_list`, whose rows are the labels drawn.
     pane_ids: std.ArrayList([]const u8) = .empty,
+    /// The requests the picker is listing, in `pick_arena` for the reason the
+    /// pane ids are. Whole rows and not numbers: a row already carries the two
+    /// refs, so picking one asks GitHub nothing more.
+    pr_rows: std.ArrayList(gh.Pr) = .empty,
     /// What a send handed to the clipboard because it had no target. Sent to
     /// the pane the reader then picks, so choosing one finishes the keystroke
     /// that opened the picker rather than only preparing the next.
@@ -436,6 +442,7 @@ pub const App = struct {
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
         self.pane_ids.deinit(self.gpa);
+        self.pr_rows.deinit(self.gpa);
         if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
         self.frame_arena.deinit();
         self.* = undefined;
@@ -1272,6 +1279,7 @@ pub const App = struct {
                 self.clearPreview();
                 self.toggleFiles();
             },
+            .pr_list => try self.openPrList(false),
             .file_browse => {
                 if (self.mode == .finder) return self.closeFiles();
                 self.files_purpose = .browse;
@@ -1438,7 +1446,7 @@ pub const App = struct {
     pub fn listCurrent(self: *const App) u32 {
         return switch (self.files_purpose) {
             .jump, .mention, .browse => self.file_index,
-            .comments, .turns, .panes => std.math.maxInt(u32),
+            .comments, .turns, .panes, .prs => std.math.maxInt(u32),
         };
     }
 
@@ -1677,7 +1685,7 @@ pub const App = struct {
         // The picker's rows come from the loop, not from the review, and its
         // arena holds them: rebuilding here would empty the list under the
         // reader's filter.
-        if (self.files_purpose == .panes) return;
+        if (self.files_purpose == .panes or self.files_purpose == .prs) return;
         self.pick_list.clearRetainingCapacity();
         _ = self.pick_arena.reset(.retain_capacity);
         const arena = self.pick_arena.allocator();
@@ -1856,6 +1864,7 @@ pub const App = struct {
             .open => {
                 const picked = self.file_list.selected(self.pick_list.items);
                 if (self.files_purpose == .panes) return self.pickPane(picked);
+                if (self.files_purpose == .prs) return self.pickPr(picked);
                 if (self.files_purpose == .turns) {
                     const i = picked orelse {
                         self.closeFiles();
@@ -2131,6 +2140,7 @@ pub const App = struct {
             .{ "noh", .clear_search },
             .{ "nohl", .clear_search },
             .{ "nohlsearch", .clear_search },
+            .{ "prs", .pr_list },
             .{ "nomark", .clear_mark },
             .{ "nom", .clear_mark },
         };
@@ -2321,15 +2331,18 @@ pub const App = struct {
         self.notice.set("posting {s}:{d}...", .{ n.path, n.line });
     }
 
-    /// `:pr [n]`, or `:pr off` for the working tree. The same resolve `--pr`
-    /// runs, so the two spellings cannot disagree about what a request is.
-    fn openPr(self: *App, arg: []const u8) void {
+    /// `:pr [n]`, `:pr off` for the working tree, `:pr list [all]` to choose
+    /// from what is open. The same resolve `--pr` runs, so the spellings
+    /// cannot disagree about what a request is.
+    fn openPr(self: *App, arg: []const u8) Allocator.Error!void {
         if (std.mem.eql(u8, arg, "off")) return self.closePr();
+        if (std.mem.eql(u8, arg, "list")) return self.openPrList(false);
+        if (std.mem.eql(u8, arg, "list all") or std.mem.eql(u8, arg, "all")) return self.openPrList(true);
 
         var number: ?u32 = null;
         if (arg.len > 0) {
             number = std.fmt.parseInt(u32, arg, 10) catch {
-                self.notice.set("pr takes a number, not {s}", .{arg});
+                self.notice.set("pr takes a number or list, not {s}", .{arg});
                 return;
             };
         }
@@ -2343,7 +2356,14 @@ pub const App = struct {
             self.notice.set("could not open that pull request", .{});
             return;
         };
+        self.enterPr(refs);
+    }
 
+    /// Point the review at a request and start reading it.
+    ///
+    /// Everything it keeps is copied out of the caller's arena, so the caller
+    /// is free to drop it - which is what lets the picker close first.
+    fn enterPr(self: *App, refs: gh.Refs) void {
         self.review.base = self.keepRef(&self.pr_base, &self.pr_base_len, refs.base);
         self.review.target = self.keepRef(&self.pr_target, &self.pr_target_len, refs.target);
         self.review.setLabel(refs.label);
@@ -2354,6 +2374,124 @@ pub const App = struct {
         // Not the label: the badge shows it already. What is new is that the
         // review has stopped following the working tree.
         self.notice.set("static review of #{d} - :pr off to come back", .{refs.number});
+    }
+
+    /// The author column's ceiling. A login is short; a bot's is not, and one
+    /// of them should not push every title off an eighty-column pane.
+    const pr_author_max: usize = 14;
+
+    /// `<Space>lp`: the open requests, one per row, and Enter reviews one.
+    ///
+    /// Nothing is asked of GitHub twice. The rows carry the same fields a
+    /// single view returns, so choosing one is a merge-base and a re-diff.
+    fn openPrList(self: *App, all: bool) Allocator.Error!void {
+        if (self.mode == .finder) return self.closeFiles();
+
+        self.pick_list.clearRetainingCapacity();
+        self.pr_rows.clearRetainingCapacity();
+        _ = self.pick_arena.reset(.retain_capacity);
+        const arena = self.pick_arena.allocator();
+
+        const rows = gh.list(self.gpa, arena, self.io, all) catch {
+            self.notice.set("could not list pull requests - is gh set up?", .{});
+            return;
+        };
+        if (rows.len == 0) {
+            self.notice.set("no {s}pull requests", .{if (all) "" else "open "});
+            return;
+        }
+        try self.showPrs(arena, rows, all);
+    }
+
+    /// The rows as a list to choose from. Separate from fetching them so the
+    /// columns can be tested without a network.
+    fn showPrs(self: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allocator.Error!void {
+        self.files_purpose = .prs;
+
+        // A column earns its width or it is not drawn. Every row open, or
+        // every row the same person's, and the word repeats down the list
+        // saying nothing - and it is still in the panel beside it.
+        var mixed_state = false;
+        var mixed_author = false;
+        var w_num: usize = 0;
+        var w_state: usize = 0;
+        var w_author: usize = 0;
+        const whos = try arena.alloc([]const u8, rows.len);
+        for (rows, whos) |r, *who| {
+            mixed_state = mixed_state or !std.mem.eql(u8, r.status(), rows[0].status());
+            mixed_author = mixed_author or !std.mem.eql(u8, r.author, rows[0].author);
+            who.* = try shortAuthor(arena, r.author, self.glyphs.ellipsis);
+            w_num = @max(w_num, digits(r.number));
+            w_state = @max(w_state, r.status().len);
+            w_author = @max(w_author, wrap_mod.columns(who.*, .{ .method = .unicode }));
+        }
+
+        for (rows, whos) |r, who| {
+            var label: std.ArrayList(u8) = .empty;
+            try label.print(arena, "#{d}{s}", .{ r.number, pad(arena, w_num -| digits(r.number)) });
+            if (mixed_state) {
+                try label.print(arena, "  {s}{s}", .{ r.status(), pad(arena, w_state -| r.status().len) });
+            }
+            if (mixed_author) {
+                const w = wrap_mod.columns(who, .{ .method = .unicode });
+                try label.print(arena, "  {s}{s}", .{ who, pad(arena, w_author -| w) });
+            }
+            try label.print(arena, "  {s}", .{r.title});
+
+            try self.pr_rows.append(self.gpa, r);
+            try self.pick_list.append(self.gpa, .{
+                .path = label.items,
+                // How big the read is. The one thing the row cannot say in
+                // words, and the list already knows how to draw it.
+                .added = r.added,
+                .removed = r.removed,
+                .plain = true,
+                // A digits-only filter means the request's number, not the
+                // `2` in a title.
+                .key = r.number,
+            });
+        }
+
+        self.file_list.title = if (all) " pull requests " else " open pull requests ";
+        self.file_list.totals = null;
+        self.file_list.extra_keys = &.{};
+        self.file_list.open(0);
+        self.file_list.gutter = false;
+        self.file_list.max_share = picker_share;
+        self.mode = .finder;
+    }
+
+    /// ASCII from the forge, so bytes are columns.
+    fn shortAuthor(arena: Allocator, name: []const u8, ell: []const u8) Allocator.Error![]const u8 {
+        if (name.len <= pr_author_max) return name;
+        return std.fmt.allocPrint(arena, "{s}{s}", .{ name[0 .. pr_author_max - 1], ell });
+    }
+
+    fn digits(n: u32) usize {
+        var d: usize = 1;
+        var v = n;
+        while (v >= 10) : (v /= 10) d += 1;
+        return d;
+    }
+
+    /// `<CR>` in the request picker: review that one.
+    ///
+    /// The row is read before the picker closes: once the list is a file list
+    /// again the next rebuild empties the arena the rows live in. The refs
+    /// come back in a scratch arena, so entering the review can wait.
+    fn pickPr(self: *App, at: ?u32) void {
+        const i = at orelse return self.closeFiles();
+        if (i >= self.pr_rows.items.len) return self.closeFiles();
+
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const refs = gh.refsOf(self.gpa, scratch.allocator(), self.io, self.pr_rows.items[i]) catch {
+            self.closeFiles();
+            self.notice.set("could not open that pull request", .{});
+            return;
+        };
+        self.closeFiles();
+        self.enterPr(refs);
     }
 
     /// Copies a ref somewhere the review can hold it. Truncates rather than
@@ -2723,7 +2861,7 @@ pub const App = struct {
         try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not reviewing") != null);
 
         // A word is not a number, and this is caught before `gh` is spawned.
-        fx.app.openPr("main");
+        try fx.app.openPr("main");
         try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "takes a number") != null);
         try testing.expectEqualStrings("", fx.app.review.label());
 
@@ -2786,7 +2924,7 @@ pub const App = struct {
         // A resolve that cannot even start. The refs held an arena that was
         // reset before the resolve ran, so a failure freed what the review was
         // still pointing at and left it to diff against whatever landed there.
-        fx.app.openPr("not-a-number");
+        try fx.app.openPr("not-a-number");
         try testing.expectEqualStrings("be94b77de24e3c40f85f80bbcfc11b871335d065", fx.app.review.base);
         try testing.expectEqualStrings("c7143ba8237180b84b378d651f0b020652160868", fx.app.review.target.?);
         try testing.expectEqualStrings("#13 feat: syntax highlight for json", fx.app.review.label());
@@ -2816,6 +2954,71 @@ pub const App = struct {
         fx.app.review.setLabel(long);
         try testing.expect(fx.app.review.label().len <= 160);
         try testing.expect(std.mem.startsWith(u8, long, fx.app.review.label()));
+    }
+
+    fn prRow(number: u32, state: []const u8, author: []const u8, title: []const u8) gh.Pr {
+        return .{
+            .number = number,
+            .state = state,
+            .base_ref = "main",
+            .base_oid = "be94b77",
+            .head_oid = "c7143ba",
+            .url = "https://github.com/o/r/pull/1",
+            .author = author,
+            .title = title,
+        };
+    }
+
+    fn showPrRows(fx: *Fixture, rows: []const gh.Pr, all: bool) !void {
+        fx.app.pick_list.clearRetainingCapacity();
+        fx.app.pr_rows.clearRetainingCapacity();
+        _ = fx.app.pick_arena.reset(.retain_capacity);
+        try fx.app.showPrs(fx.app.pick_arena.allocator(), rows, all);
+    }
+
+    test "a column of one repeated word is not drawn" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+
+        // One person's open requests: saying `open` and their name on every
+        // row spends the width the titles need at eighty columns.
+        const same = [_]gh.Pr{
+            prRow(19, "OPEN", "kunkka19xx", "feat: posting comments to a PR"),
+            prRow(7, "OPEN", "kunkka19xx", "fix: the anchor table"),
+        };
+        try showPrRows(fx, &same, false);
+        try testing.expectEqual(event.Mode.finder, fx.app.mode);
+        // Or `<CR>` reads the row as a file path and jumps nowhere.
+        try testing.expectEqual(@TypeOf(fx.app.files_purpose).prs, fx.app.files_purpose);
+        // The number is padded so the titles line up, and nothing else is
+        // between them.
+        try testing.expectEqualStrings("#19  feat: posting comments to a PR", fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("#7   fix: the anchor table", fx.app.pick_list.items[1].path);
+        // A digits-only filter means the request, not a `7` in a title.
+        try testing.expectEqual(@as(?u32, 19), fx.app.pick_list.items[0].key);
+
+        // Mixed, and both columns are worth their width.
+        var mixed = [_]gh.Pr{
+            prRow(19, "OPEN", "kunkka19xx", "feat: posting"),
+            prRow(16, "MERGED", "someone", "chore: config"),
+        };
+        mixed[0].draft = true;
+        try showPrRows(fx, &mixed, true);
+        try testing.expectEqualStrings("#19  draft   kunkka19xx  feat: posting", fx.app.pick_list.items[0].path);
+        try testing.expectEqualStrings("#16  merged  someone     chore: config", fx.app.pick_list.items[1].path);
+    }
+
+    test "picking a request that is not there closes the list and does nothing" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const rows = [_]gh.Pr{prRow(19, "OPEN", "me", "feat: posting")};
+        try showPrRows(fx, &rows, false);
+
+        // No network in a test, so only the refusing half is exercised here:
+        // an index past the rows must not read one.
+        fx.app.pickPr(5);
+        try testing.expectEqual(event.Mode.normal, fx.app.mode);
+        try testing.expectEqual(@as(u32, 0), fx.app.pr_number);
     }
 
     test "the pane picker lists what it was handed and connects to one" {

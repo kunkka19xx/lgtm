@@ -83,6 +83,9 @@ pub const Command = enum {
     next_comment,
     prev_comment,
     submit_review,
+    /// The open pull requests, to pick one to review. `:pr <n>` reaches one
+    /// by number; this is for the number you do not know.
+    pr_list,
     toggle_ignored,
     /// "Since I last looked" (`core/checkpoint.zig`). `mark_here` records the
     /// working tree as the reader has now read it; the two steps walk the
@@ -564,6 +567,7 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ctrl('r')}, .command = .refresh, .desc = "reload the diff", .group = .view },
     .{ .chords = &.{ leader, c('f') }, .command = .file_list, .desc = "list the changed files", .group = .find },
     .{ .chords = &.{ leader, c('F') }, .command = .file_browse, .desc = "list every file in the project", .group = .find },
+    .{ .chords = &.{ leader, c('l'), c('p') }, .command = .pr_list, .desc = "list the open pull requests", .group = .find },
     // `?` opens the overlay. Closing it is `prompt.zig`'s Escape, because
     // inside the overlay the keys are a filter query rather than commands.
     .{ .chords = &.{c('?')}, .command = .help, .hint = "help", .desc = "this help", .group = .view },
