@@ -258,6 +258,109 @@ pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError
     };
 }
 
+/// A remark already on the request, by whoever left it.
+///
+/// The half of a review lgtm could not see. Reading a request without them
+/// means writing a remark somebody made yesterday and never knowing.
+pub const Remark = struct {
+    path: []const u8,
+    /// Where it sits in the request's head. Zero when the forge knows of no
+    /// line at all, which is a comment on a file rather than on code.
+    line: u32,
+    /// Lines it covers, one being just `line`.
+    span: u32 = 1,
+    author: []const u8,
+    body: []const u8,
+    /// The line it was written against has gone from the diff. GitHub answers
+    /// `null` for the line and keeps the original, which is the same fact
+    /// `comments.State.stale` records.
+    outdated: bool,
+};
+
+/// The fields, in the order `parseRemarks` reads them, with the body last so
+/// its own tabs stay its own.
+///
+/// `@tsv` escapes a newline, a tab, a return and a backslash in the field it
+/// writes, so a body of any shape survives one line - and `unescapeTsv` puts
+/// it back. That is the whole reason the rows can be tab-separated at all.
+const remark_query = ".[] | [.path, ((.line // .original_line // 0)|tostring), " ++
+    "(if .line == null then \"1\" else \"0\" end), .user.login, " ++
+    "((.start_line // .original_start_line // 0)|tostring), .body] | @tsv";
+
+/// `gh api repos/{owner}/{repo}/pulls/{n}/comments`
+///
+/// The inline remarks, not the conversation: these are the ones that carry a
+/// path and a line, which is what lets them sit in the gutter beside the
+/// reader's own.
+pub fn remarksArgv(arena: Allocator, repo: []const u8, number: u32) Allocator.Error![]const []const u8 {
+    const path = try std.fmt.allocPrint(arena, "repos/{s}/pulls/{d}/comments", .{ repo, number });
+    return arena.dupe([]const u8, &.{ "gh", "api", path, "--paginate", "--jq", remark_query });
+}
+
+/// Puts back what `@tsv` escaped. Anything else after a backslash is content:
+/// a body full of Zig `\\` lines must survive being read back.
+fn unescapeTsv(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
+    if (std.mem.indexOfScalar(u8, text, '\\') == null) return text;
+    var out: std.ArrayList(u8) = .empty;
+    try out.ensureTotalCapacity(arena, text.len);
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        if (text[i] != '\\' or i + 1 >= text.len) {
+            out.appendAssumeCapacity(text[i]);
+            continue;
+        }
+        i += 1;
+        switch (text[i]) {
+            'n' => out.appendAssumeCapacity('\n'),
+            't' => out.appendAssumeCapacity('\t'),
+            // Dropped rather than kept: the forge stores CRLF and every line
+            // of every body would otherwise end in a stray return.
+            'r' => {},
+            '\\' => out.appendAssumeCapacity('\\'),
+            else => {
+                out.appendAssumeCapacity('\\');
+                out.appendAssumeCapacity(text[i]);
+            },
+        }
+    }
+    return out.toOwnedSlice(arena);
+}
+
+pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark {
+    var out: std.ArrayList(Remark) = .empty;
+    var rows = std.mem.splitScalar(u8, text, '\n');
+    while (rows.next()) |row| {
+        if (row.len == 0) continue;
+        var it = std.mem.splitScalar(u8, row, '\t');
+        const path = it.next() orelse continue;
+        const line = std.fmt.parseInt(u32, it.next() orelse continue, 10) catch continue;
+        const outdated = std.mem.eql(u8, it.next() orelse continue, "1");
+        const author = it.next() orelse continue;
+        const start = std.fmt.parseInt(u32, it.next() orelse continue, 10) catch 0;
+        const body = try unescapeTsv(arena, it.rest());
+        if (path.len == 0 or body.len == 0) continue;
+        try out.append(arena, .{
+            .path = path,
+            .line = line,
+            // A range only when the forge gave both ends and they agree on
+            // which way round they are.
+            .span = if (start > 0 and line >= start) line - start + 1 else 1,
+            .author = author,
+            .body = body,
+            .outdated = outdated,
+        });
+    }
+    return out.toOwnedSlice(arena);
+}
+
+pub fn remarks(gpa: Allocator, arena: Allocator, io: std.Io, repo: []const u8, number: u32) Error![]Remark {
+    const argv = try remarksArgv(arena, repo, number);
+    const out = proc.run(gpa, io, argv, list_output_max) catch return error.GhFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
+    return parseRemarks(arena, try arena.dupe(u8, out.stdout));
+}
+
 /// What a review says when it is submitted.
 pub const Event = enum {
     comment,
@@ -570,6 +673,54 @@ test "a remark already posted is not posted twice" {
     try reviewBody(&out, gpa, &store, &files, .comment, "", &ids);
     try testing.expectEqual(@as(usize, 0), ids.items.len);
     try testing.expect(std.mem.indexOf(u8, out.items, "said once") == null);
+}
+
+test "the remarks already on a request come back with their lines" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    const rows = try parseRemarks(arena, "src/toml.zig\t221\t1\tkunkka19xx\t216\tthe list body is read as settings\n" ++
+        "docs/CONFIG.md\t26\t0\tsomeone\t0\tline one\\nline two\ttabbed\n" ++
+        "\n" ++
+        "src/config.zig\t8\t0\tme\t0\tsafe to delete\n");
+    try testing.expectEqual(@as(usize, 3), rows.len);
+
+    // A range, from the two ends the forge gave.
+    try testing.expectEqual(@as(u32, 6), rows[0].span);
+    // `null` for the line means the code it was written against has gone, and
+    // the original is where it was. Same fact as a stale comment.
+    try testing.expect(rows[0].outdated);
+    try testing.expectEqual(@as(u32, 221), rows[0].line);
+
+    // A body is one row however many lines it has: `@tsv` escapes the
+    // newlines and the tabs, and this puts them back.
+    try testing.expectEqualStrings("line one\nline two\ttabbed", rows[1].body);
+    try testing.expectEqualStrings("someone", rows[1].author);
+    try testing.expect(!rows[1].outdated);
+    try testing.expectEqual(@as(u32, 1), rows[1].span);
+}
+
+test "a remark full of backslashes survives the round trip" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    // A suggestion block of Zig multi-line strings, which is the shape of a
+    // real review remark on this codebase. Only the four escapes `@tsv`
+    // writes are escapes; everything else after a backslash is content.
+    const rows = try parseRemarks(arena, "a.zig\t1\t0\tme\t0\t```suggestion\\n    \\\\\\\\ a doc line\\n```\n");
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("```suggestion\n    \\\\ a doc line\n```", rows[0].body);
+}
+
+test "the remarks call asks the request that is being read" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const argv = try remarksArgv(a.allocator(), "kunkka19xx/lgtm", 16);
+    try testing.expectEqualStrings("repos/kunkka19xx/lgtm/pulls/16/comments", argv[2]);
+    // Every page: a long review runs past the first.
+    try testing.expectEqualStrings("--paginate", argv[3]);
 }
 
 test "posting goes to the repository the request is on" {

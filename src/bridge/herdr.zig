@@ -135,18 +135,6 @@ fn isIdent(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
-/// The one pane that is not ours, or null when there is more than one to
-/// choose between - the same rule, and the same reason, as the other three.
-pub fn soleOther(panes: []const []const u8, self: []const u8) ?[]const u8 {
-    var found: ?[]const u8 = null;
-    for (panes) |p| {
-        if (self.len > 0 and std.mem.eql(u8, p, self)) continue;
-        if (found != null) return null;
-        found = p;
-    }
-    return found;
-}
-
 const testing = std.testing;
 
 test "send-text is the documented spelling and the payload is its own argument" {
@@ -217,9 +205,4 @@ test "words that merely start with w are not pane ids" {
     var out: std.ArrayList([]const u8) = .empty;
     try parseList(arena.allocator(), "workspace:primary  wp1  w:p1  w1:p  raw1:p1", &out);
     try testing.expectEqual(@as(usize, 0), out.items.len);
-}
-
-test "two panes infer the other one, three refuse to guess" {
-    try testing.expectEqualStrings("w1:p2", soleOther(&.{ "w1:p1", "w1:p2" }, "w1:p1").?);
-    try testing.expect(soleOther(&.{ "w1:p1", "w1:p2", "w1:p3" }, "w1:p1") == null);
 }

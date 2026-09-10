@@ -21,10 +21,8 @@ const diff = @import("../core/diff.zig");
 const expand = @import("../core/expand.zig");
 const event = @import("../core/event.zig");
 const fs_mod = @import("../io/fs.zig");
-const gh = @import("../core/gh.zig");
 const git = @import("../core/git.zig");
 const comments_mod = @import("../core/comments.zig");
-const review_file = @import("../core/review.zig");
 const hunk = @import("../core/hunk.zig");
 const buffer = @import("../text/buffer.zig");
 const binary = @import("../core/binary.zig");
@@ -42,15 +40,20 @@ const anim = @import("anim.zig");
 const motion = @import("motion.zig");
 const compose_mod = @import("compose.zig");
 const prompt_mod = @import("prompt.zig");
+const pr_mod = @import("pr.zig");
+const turns_mod = @import("turns.zig");
+const walks = @import("walks.zig");
+const finder_mod = @import("finder.zig");
+const notes = @import("notes.zig");
+const cmdline = @import("cmdline.zig");
+const outgoing = @import("outgoing.zig");
 const render = @import("render.zig");
-const gitobj = @import("../snapshot/gitobj.zig");
 const snapshot = @import("../snapshot/snapshot.zig");
 const timeline = @import("../snapshot/timeline.zig");
 const review_mod = @import("review.zig");
 const rows_mod = @import("rows.zig");
 const viewport = @import("viewport.zig");
 const search = @import("search.zig");
-const fuzzy = @import("fuzzy.zig");
 const complete = @import("complete.zig");
 const theme_mod = @import("theme.zig");
 const wrap_mod = @import("wrap.zig");
@@ -99,10 +102,6 @@ pub const App = struct {
     /// the fixtures, which have no environ and want none: everything it does is
     /// a subprocess, and a test that wanted one would be testing git.
     snap: ?snapshot.Store = null,
-    /// Whether the mark has been looked for on disk yet. Once, after the first
-    /// diff: before it there are no files to attach the marked bytes to, and
-    /// after it a second look would undo whatever the reader has since marked.
-    mark_restored: bool = false,
 
     /// One diff generation and everything derived from it. The reader's
     /// position - which file, which row - is here; what changed is there.
@@ -204,7 +203,7 @@ pub const App = struct {
     /// Where the comment being written belongs, captured when the box opened.
     /// Opening it clears the selection, so asking again at save time would
     /// give a range of one line.
-    compose_spot: ?Spot2 = null,
+    compose_spot: ?notes.Spot2 = null,
     compose_is_comment: bool = false,
     /// How many reviews have been submitted this session, for the file name.
     review_n: u32 = 0,
@@ -233,58 +232,8 @@ pub const App = struct {
     /// What the file overlay is being used for. It is the same list, the same
     /// filter and the same drawing either way; only what happens on Enter
     /// differs, which is one field rather than a second overlay.
-    /// Turn numbers behind the rows of the turn list, so the index the overlay
-    /// hands back is the turn it names. Parallel to `pick_list` for the same
-    /// reason the comment list's is: the widget lists labelled rows, and what
-    /// a row *means* belongs to whoever built it.
-    pick_turns: std.ArrayList(u32) = .empty,
-    /// The turn list is showing every turn rather than eliding the middle.
-    /// Set by opening the `⋮` row or by typing a filter, and cleared when the
-    /// list is opened again - a fold the reader expanded once should not stay
-    /// expanded for the rest of the session.
-    turns_expanded: bool = false,
-
-    /// A restore waiting for the reader to say yes.
-    ///
-    /// The next key is the answer, the way the key after `f` is its target
-    /// rather than a command. One deliberate keystroke is the right amount of
-    /// friction here *because* the operation is undoable: a snapshot is taken
-    /// before anything is written, so the state being overwritten is one `[t`
-    /// away. If it were not recoverable this would ask for a typed word.
-    pending_restore: ?struct {
-        turn: u32,
-        path: [4096]u8 = undefined,
-        path_len: u16 = 0,
-
-        fn name(self: *const @This()) []const u8 {
-            return self.path[0..self.path_len];
-        }
-    } = null,
-
-    /// The last restore, for `u`.
-    ///
-    /// Session-only by design. The turn is on disk, but "the last thing you
-    /// restored" is not, and a `u` that survived a restart would undo
-    /// something the reader had long since forgotten doing.
-    ///
-    /// One step, and then gone: a second `u` says there is nothing to undo,
-    /// rather than walking back through a history. Going the other way is the
-    /// same move the notice already names - `[t` to the turn this made, then
-    /// `R` - because that is the mechanism, and this is only its shortcut.
-    last_restore: ?struct {
-        /// The turn holding the file as it was before the restore.
-        turn: u32,
-        path: [4096]u8 = undefined,
-        path_len: u16 = 0,
-        /// What the restore wrote. If the file no longer hashes to this,
-        /// something else has changed it since - the agent, an editor - and
-        /// undoing would not be undoing, it would be overwriting that.
-        wrote: u64 = 0,
-
-        fn name(self: *const @This()) []const u8 {
-            return self.path[0..self.path_len];
-        }
-    } = null,
+    /// The timeline, the mark walk and the restore, in `ui/turns.zig`.
+    turns: turns_mod.State = .{},
 
     files_purpose: enum {
         /// `<Space>f`: the changed files, and Enter goes to one.
@@ -311,25 +260,8 @@ pub const App = struct {
         /// `<Space>lp`: the open pull requests, and Enter reviews one.
         prs,
     } = .jump,
-    /// The panes the picker is listing, copied into `pick_arena` for the
-    /// reason the comment labels are: the list outlives the frame that built
-    /// it. Parallel to `pick_list`, whose rows are the labels drawn.
-    pane_ids: std.ArrayList([]const u8) = .empty,
-    /// The requests the picker is listing, in `pick_arena` for the reason the
-    /// pane ids are. Whole rows and not numbers: a row already carries the two
-    /// refs, so picking one asks GitHub nothing more.
-    pr_rows: std.ArrayList(gh.Pr) = .empty,
-    /// What a send handed to the clipboard because it had no target. Sent to
-    /// the pane the reader then picks, so choosing one finishes the keystroke
-    /// that opened the picker rather than only preparing the next.
-    pending_send: ?[]const u8 = null,
-    /// The pane the reader picked, for the loop to point the bridge at. The
-    /// same channel `want_send` is and for the same reason: this file does not
-    /// talk to a multiplexer, it says what it wants done with one.
-    want_target: ?[]const u8 = null,
-    /// Set by `pick_pane`: open the picker with nothing waiting to be sent.
-    want_panes: bool = false,
-    target_buf: [64]u8 = undefined,
+    /// The picker overlay, in `ui/finder.zig`.
+    finder_state: finder_mod.State = .{},
     /// The list the overlay is showing: the changed files for a jump, every
     /// file git knows about for a mention. Rebuilt when the overlay opens and
     /// owned here, because `selected` is asked outside any frame.
@@ -339,31 +271,8 @@ pub const App = struct {
     /// keystroke, and the frame arena is reset between them - which made every
     /// label a slice of freed memory and every filter a miss.
     pick_arena: std.heap.ArenaAllocator = undefined,
-    /// The two refs `review.base` and `review.target` point at in a pull
-    /// request. Inline rather than in an arena: the resolve allocates before
-    /// it can fail, so the arena had to be reset first and a failed `:pr` then
-    /// freed the refs the review was still using.
-    pr_base: [64]u8 = undefined,
-    pr_base_len: u8 = 0,
-    pr_target: [64]u8 = undefined,
-    pr_target_len: u8 = 0,
-    /// Which pull request the comment store belongs to, or zero for the
-    /// working tree. Remarks written against somebody else's branch are not
-    /// remarks about the tree on disk, and one file for both re-anchored them
-    /// onto whatever line they landed near.
-    pr_number: u32 = 0,
-    /// `owner/repo`, so posting does not have to ask again.
-    pr_repo: [128]u8 = undefined,
-    pr_repo_len: u8 = 0,
-    /// The sentence a posted review opens with, held across the frame between
-    /// arming the post and making it.
-    note_buf: [256]u8 = undefined,
-    note_len: u16 = 0,
-    /// Every path in the project, from `git ls-files`, loaded the first time
-    /// `@` asks and kept for the session. Not loaded at startup: most sessions
-    /// never mention a file, and cold start has a 50 ms budget.
-    project_paths: [][]const u8 = &.{},
-    project_loaded: bool = false,
+    /// Everything true only while a pull request is on screen, in `ui/pr.zig`.
+    pr: pr_mod.State = .{},
     /// Questions the box can insert, from `[presets]`. Empty falls back to the
     /// four built-in asks, so the list is never empty.
     presets_cfg: []const config.Preset = &.{},
@@ -406,8 +315,6 @@ pub const App = struct {
     /// A review the loop should hand to the forge. Armed rather than done on
     /// the spot: the call takes a second on the network, and the loop draws at
     /// the top of its iteration, so going through here is what puts a
-    /// `posting...` frame on screen before the freeze rather than after it.
-    want_post: ?Post = null,
     /// Every outgoing string is a template. Config-owned in
     /// v0.2; the defaults are the internal table until then.
     templates: template.Table = .{},
@@ -434,25 +341,25 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        self.pick_turns.deinit(self.gpa);
+        self.turns.deinit(self.gpa);
         self.outgoing.deinit(self.gpa);
         self.review.deinit();
         self.pick_arena.deinit();
         self.preview_arena.deinit();
         self.comments.deinit();
         self.pick_list.deinit(self.gpa);
-        self.pane_ids.deinit(self.gpa);
-        self.pr_rows.deinit(self.gpa);
-        if (self.project_paths.len > 0) git.freePaths(self.gpa, self.project_paths);
+        self.finder_state.deinit(self.gpa);
+        self.pr.deinit(self.gpa);
+        if (self.finder_state.project_paths.len > 0) git.freePaths(self.gpa, self.finder_state.project_paths);
         self.frame_arena.deinit();
         self.* = undefined;
     }
 
-    fn files(self: *App) []diff.FileDiff {
+    pub fn files(self: *App) []diff.FileDiff {
         return self.review.files();
     }
 
-    fn current(self: *App) ?*diff.FileDiff {
+    pub fn current(self: *App) ?*diff.FileDiff {
         if (self.preview) |*p| return p;
         return self.review.fileAt(self.file_index);
     }
@@ -465,7 +372,7 @@ pub const App = struct {
     /// noting and pointing all work here for free. Highlighting needs one
     /// thing more: the runs index a Buffer, and this file is not one of the
     /// review's, so it gets its own out of the same arena.
-    fn openPreview(self: *App, path: []const u8) !void {
+    pub fn openPreview(self: *App, path: []const u8) !void {
         _ = self.preview_arena.reset(.retain_capacity);
         self.preview_buf = null;
         const arena = self.preview_arena.allocator();
@@ -544,7 +451,7 @@ pub const App = struct {
     /// Any move back into the review drops the preview: it was a detour, and
     /// leaving it visible while `]f` walks the changed files would be two
     /// different answers to "which file am I on".
-    fn clearPreview(self: *App) void {
+    pub fn clearPreview(self: *App) void {
         if (self.preview == null) return;
         self.preview = null;
         self.preview_buf = null;
@@ -611,7 +518,7 @@ pub const App = struct {
             const now = self.review.buffersFor(b.path).work orelse continue;
             self.comments.carry(b.path, b.text, now.bytes) catch {};
         }
-        self.saveComments();
+        notes.saveComments(self);
 
         self.rows = rows_mod.Rows.empty;
         self.fn_names = &.{};
@@ -661,30 +568,7 @@ pub const App = struct {
         self.notice.set("{d} more line{s}", .{ got, if (got == 1) "" else "s" });
     }
 
-    /// Where the cursor goes after a hunk's context is folded away. Its line
-    /// is the first answer and is often gone with the fold, so the hunk it was
-    /// reading is the second - never the row index it happened to hold, which
-    /// after the fold belongs to a line further down the file.
-    fn foldedTo(self: *App, hi: u32, body: u16) !void {
-        const line = self.cursorLine();
-        try self.rebuildRows(.row);
-        const f = self.current() orelse return;
-        if (line != 0) {
-            if (self.rowForFileLine(f, line)) |r| {
-                self.vp.cursor = r;
-                self.clampScroll(body);
-                self.placeCursor();
-                return;
-            }
-        }
-        if (hi < self.rows.hunk_rows.len) {
-            self.vp.cursor = @min(self.rows.hunk_rows[hi] + 1, self.rows.len() -| 1);
-        }
-        self.clampScroll(body);
-        self.placeCursor();
-    }
-
-    fn rebuildRows(self: *App, keep: Keep) !void {
+    pub fn rebuildRows(self: *App, keep: Keep) !void {
         const f = self.current() orelse {
             self.rows = rows_mod.Rows.empty;
             self.fn_names = &.{};
@@ -770,7 +654,7 @@ pub const App = struct {
     /// - because a search, a re-anchor and a row lookup all want the row back
     /// and none of them has a cursor. This is the reader's answer, and it is
     /// what a reference, a yank and a comment are about.
-    fn lineAt(self: *const App, row: u32) ?u32 {
+    pub fn lineAt(self: *const App, row: u32) ?u32 {
         const p = self.rows.pairAt(row) orelse return self.rows.lineAt(row);
         return switch (self.sideOn(p)) {
             .old => p.left,
@@ -794,7 +678,7 @@ pub const App = struct {
     /// The working-tree line under the cursor, 1-based, or 0 when there is
     /// none: chrome has no line, and a deleted line exists only in the old
     /// file, so neither has anything to carry into the next generation.
-    fn cursorLine(self: *App) u32 {
+    pub fn cursorLine(self: *App) u32 {
         const f = self.current() orelse return 0;
         const li = self.lineAt(self.vp.cursor) orelse return 0;
         if (li >= f.lines.new_no.len) return 0;
@@ -805,7 +689,7 @@ pub const App = struct {
     /// A re-anchored line often lands in unchanged context that this
     /// generation no longer renders, and that is not a failure: the caller
     /// keeps the row it had.
-    fn rowForFileLine(self: *const App, f: *const diff.FileDiff, ln: u32) ?u32 {
+    pub fn rowForFileLine(self: *const App, f: *const diff.FileDiff, ln: u32) ?u32 {
         for (f.lines.new_no, 0..) |n, li| {
             if (n == ln) return self.rows.rowForLine(@intCast(li));
         }
@@ -842,7 +726,7 @@ pub const App = struct {
             .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
             .torn = self.review.torn,
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
-            .notes = self.commentMarks(),
+            .notes = notes.commentMarks(self),
             // Empty unless `--base` or `--target` moved them, so the badge
             // stays `NORMAL` for every ordinary session.
             .base = if (std.mem.eql(u8, self.review.base, "HEAD")) "" else self.review.base,
@@ -873,88 +757,9 @@ pub const App = struct {
                 .completion_at = self.comp_at,
             } else null,
             .notice = self.notice.text(),
-            .query = self.liveQuery(),
-            .compose = if (self.compose.open) self.composeView(self.frame_arena.allocator()) else null,
+            .query = cmdline.liveQuery(self),
+            .compose = if (self.compose.open) outgoing.composeView(self, self.frame_arena.allocator()) else null,
         };
-    }
-
-    /// The notes on the current file, for the gutter. Built into the frame
-    /// arena: the body reads them this frame and nothing keeps them.
-    fn commentMarks(self: *App) []const render.CommentMark {
-        const f = self.current() orelse return &.{};
-        var out: std.ArrayList(render.CommentMark) = .empty;
-        const arena = self.frame_arena.allocator();
-        for (self.comments.items()) |n| {
-            if (!std.mem.eql(u8, n.path, f.path())) continue;
-            out.append(arena, .{ .line = n.line, .body = n.body, .state = switch (n.state) {
-                .open => .open,
-                .sent => .sent,
-                .stale => .stale,
-            } }) catch return out.items;
-        }
-        return out.items;
-    }
-
-    /// The compose box as a view, for the callers that draw it without a
-    /// `View` around it - the empty screen has no diff to build one from.
-    pub fn composeView(self: *App, arena: Allocator) render.ComposeView {
-        // The line a note is being written against, in the title. The store
-        // holds it, so the body does not have to - and a note whose text
-        // repeats its own line number would say it twice in `review-N.md`.
-        var what: []const u8 = "compose";
-        if (self.compose_is_comment) {
-            // The spot the box opened on: the selection is gone by this
-            // frame, and the title would say one line for a range of three.
-            what = if (self.compose_spot orelse self.commentLine()) |at| blk: {
-                const tail: []const u8 = if (at.deleted) " - removed code" else "";
-                break :blk (if (at.span > 1)
-                    std.fmt.allocPrint(arena, "comment {s}:{d}-{d}{s}", .{ at.path, at.line, at.line + at.span - 1, tail })
-                else
-                    std.fmt.allocPrint(arena, "comment {s}:{d}{s}", .{ at.path, at.line, tail })) catch "comment";
-            } else "comment";
-        }
-        return .{
-            .what = what,
-            .bindings = self.km.bindings,
-            .text = self.compose.text(),
-            .cursor = self.compose.cursor,
-            .joins = compose_mod.hasBreak(self.compose.text()),
-            .presets = if (self.preset_index != null) self.presetEntries() else &.{},
-            .selected = self.preset_index,
-            .to_agent = self.compose_to == .send,
-            .at = self.compose_at,
-            .saves = self.compose_is_comment,
-            .posts = self.pr_number != 0,
-            .normal = self.compose.mode == .normal,
-        };
-    }
-
-    /// The presets as the popup lists them. Built into the frame arena, so
-    /// the view holds no pointer that outlives the frame that drew it.
-    fn presetEntries(self: *App) []const render.PresetEntry {
-        const list = self.presets();
-        const out = self.frame_arena.allocator().alloc(render.PresetEntry, list.len) catch return &.{};
-        for (list, 0..) |p, i| out[i] = .{ .name = p.name, .text = p.text };
-        return out;
-    }
-
-    /// The pattern the renderer highlights this frame.
-    ///
-    /// While a `/` prompt is open it is the text being typed, so matches light
-    /// up as the query is built rather than only once Enter is pressed. That
-    /// is vim's `incsearch`, and the reason it earns its place: you find out
-    /// you have typed enough to be unambiguous *before* committing to it, and
-    /// a query that matches nothing says so while there is still a keystroke
-    /// left to fix it.
-    ///
-    /// A `:` prompt highlights nothing. Its text is a command, not a pattern,
-    /// and painting `noh` across the diff while it is typed is exactly the
-    /// noise this feature is supposed to reduce.
-    fn liveQuery(self: *App) search.Pattern {
-        if (self.prompt.open and self.prompt.kind == .search_forward) {
-            return .{ .text = self.prompt.text() };
-        }
-        return self.finder.shownPattern();
     }
 
     /// 1-based position of the cursor's hunk across the whole review.
@@ -1021,76 +826,70 @@ pub const App = struct {
             .find_reverse => if (self.last_walk) |w| {
                 if (w.opposite()) |back| return self.run(back, body);
             } else if (self.last_find) |f| self.applyFind(f.flip()),
-            .next_hunk => try self.stepHunk(1),
-            .prev_hunk => try self.stepHunk(-1),
-            .next_break => self.stepBreak(1),
-            .prev_break => self.stepBreak(-1),
+            .next_hunk => try walks.stepHunk(self, 1),
+            .prev_hunk => try walks.stepHunk(self, -1),
+            .next_break => walks.stepBreak(self, 1),
+            .prev_break => walks.stepBreak(self, -1),
             .next_file => {
                 self.clearPreview();
-                try self.stepFile(1);
+                try walks.stepFile(self, 1);
             },
             .prev_file => {
                 self.clearPreview();
-                try self.stepFile(-1);
+                try walks.stepFile(self, -1);
             },
             .center => self.centerCursor(body),
             .refresh => try self.rediff(),
             .visual_toggle => self.toggleVisual(.line),
             .visual_char_toggle => self.toggleVisual(.char),
             .visual_cancel => self.leaveVisual(),
-            .search_forward => self.openPrompt(.search_forward),
-            .search_next => try self.searchStep(self.finder.dir),
-            .search_prev => try self.searchStep(self.finder.dir.flip()),
-            .search_word => try self.searchWord(.forward),
-            .search_word_back => try self.searchWord(.backward),
-            .command_line => self.openPrompt(.command),
+            .search_forward => cmdline.openPrompt(self, .search_forward),
+            .search_next => try walks.searchStep(self, self.finder.dir),
+            .search_prev => try walks.searchStep(self, self.finder.dir.flip()),
+            .search_word => try cmdline.searchWord(self, .forward),
+            .search_word_back => try cmdline.searchWord(self, .backward),
+            .command_line => cmdline.openPrompt(self, .command),
             // The run loop owns the terminal and is the only thing that can
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
-            .send_ref => try self.openCompose(.send, .ref),
+            .send_ref => try outgoing.openCompose(self, .send, .ref),
             .comment_add => {
                 if (self.readOnly()) return;
-                try self.commentAdd();
+                try notes.commentAdd(self);
             },
-            .comment_suggest => try self.commentSuggest(),
-            .comment_view => try self.commentView(body),
+            .comment_suggest => try notes.commentSuggest(self),
+            .comment_view => try notes.commentView(self, body),
             .comment_list => {
-                if (self.mode == .finder) return self.closeFiles();
+                if (self.mode == .finder) return finder_mod.closeFiles(self);
                 if (self.comments.len() == 0) {
-                    self.noComments();
+                    notes.noComments(self);
                     return;
                 }
                 self.files_purpose = .comments;
-                self.buildPickList();
-                self.file_list.title = " comments ";
-                self.file_list.totals = null;
-                // This list's own keys, and not the shared footer's: they do
-                // nothing in the file or turn lists, and a footer naming a key
-                // that does nothing is worse than a shorter one. Still read
-                // from the keymap, so a remap moves them.
-                self.file_list.extra_keys = self.commentListKeys(self.pick_arena.allocator());
-                self.file_list.open(0);
-                self.file_list.max_share = picker_share; // after `open` resets it
-                self.mode = .finder;
+                finder_mod.buildPickList(self);
+                finder_mod.show(self, .{
+                    .title = " comments ",
+                    .keys = finder_mod.commentListKeys(self, self.pick_arena.allocator()),
+                });
             },
-            .comment_send => try self.commentSend(),
-            .comment_send_one => try self.listSendOne(),
-            .comment_post_one => self.postOne(),
+            .comment_send => try notes.commentSend(self),
+            .comment_send_one => try notes.listSendOne(self),
+            .comment_post_one => pr_mod.postOne(self),
             .comment_send_all => {
-                self.closeFiles();
-                try self.submitReview();
+                finder_mod.closeFiles(self);
+                try notes.submitReview(self);
                 self.rebuildRows(.line) catch {};
             },
-            .comment_drop => self.listDrop(),
-            .comment_delete => self.commentDelete(),
-            .next_comment => self.commentStep(1, body),
-            .prev_comment => self.commentStep(-1, body),
+            .comment_drop => notes.listDrop(self),
+            .comment_delete => notes.commentDelete(self),
+            .next_comment => walks.commentStep(self, 1, body),
+            .prev_comment => walks.commentStep(self, -1, body),
             .submit_review => {
                 if (self.readOnly()) return;
-                try self.submitReview();
+                try notes.submitReview(self);
             },
             .compose_ask => {
-                try self.openCompose(.send, .ref);
+                try outgoing.openCompose(self, .send, .ref);
                 self.preset_index = 0;
             },
             .clear_search => self.finder.hide(),
@@ -1131,7 +930,7 @@ pub const App = struct {
             // keys that ask for it.
             // The loop owns the bridge, so this only says it wants the list;
             // `want_panes` is the same channel `want_send` is.
-            .pick_pane => self.want_panes = true,
+            .pick_pane => self.finder_state.want_panes = true,
             .expand_up, .expand_down => try self.growContext(
                 body,
                 if (cmd == .expand_up) .up else .down,
@@ -1141,7 +940,7 @@ pub const App = struct {
                 const f = self.current() orelse return;
                 const hi = self.rows.hunkAt(self.vp.cursor) orelse 0;
                 if (self.review.foldAllContext(f.path()) catch false) {
-                    try self.foldedTo(hi, body);
+                    try walks.foldedTo(self, hi, body);
                     self.notice.set("context folded in this file", .{});
                 } else {
                     self.notice.set("no context to fold here", .{});
@@ -1158,7 +957,7 @@ pub const App = struct {
                 if (!f.summarised) {
                     if (self.rows.hunkAt(self.vp.cursor)) |hi| {
                         if (self.review.foldContext(f.path(), hi) catch false) {
-                            try self.foldedTo(hi, body);
+                            try walks.foldedTo(self, hi, body);
                             self.notice.set("context folded", .{});
                             return;
                         }
@@ -1193,7 +992,7 @@ pub const App = struct {
                 // one; the checkpoint and the snapshot are
                 // one thing, so this is one keystroke doing one thing twice
                 // rather than two states to keep in step.
-                const kept = self.snapshotMark();
+                const kept = turns_mod.snapshotMark(self);
                 self.notice.set("marked {d} file{s} as read{s}", .{
                     n,
                     if (n == 1) "" else "s",
@@ -1221,22 +1020,22 @@ pub const App = struct {
             .compose_mention,
             .compose_newline,
             => {},
-            .restore_file => try self.restoreAsk(),
-            .undo_restore => try self.undoRestore(body),
+            .restore_file => try turns_mod.restoreAsk(self),
+            .undo_restore => try turns_mod.undoRestore(self, body),
             .turn_list => {
-                if (self.mode == .finder) return self.closeFiles();
-                try self.openTurnList();
+                if (self.mode == .finder) return finder_mod.closeFiles(self);
+                try turns_mod.openTurnList(self);
             },
-            .next_turn => try self.turnStep(1, body),
-            .prev_turn => try self.turnStep(-1, body),
-            .next_risk => try self.riskStep(1),
-            .prev_risk => try self.riskStep(-1),
-            .next_fresh => try self.freshStep(1),
-            .prev_fresh => try self.freshStep(-1),
-            .copy_text => try self.yank(.selection),
-            .copy_text_lines => try self.yank(.lines),
-            .copy_ref => try self.buildPayload(.copy, .ref),
-            .copy_ref_lines => try self.buildPayload(.copy, .ref_lines),
+            .next_turn => try turns_mod.turnStep(self, 1, body),
+            .prev_turn => try turns_mod.turnStep(self, -1, body),
+            .next_risk => try walks.riskStep(self, 1),
+            .prev_risk => try walks.riskStep(self, -1),
+            .next_fresh => try turns_mod.freshStep(self, 1),
+            .prev_fresh => try turns_mod.freshStep(self, -1),
+            .copy_text => try outgoing.yank(self, .selection),
+            .copy_text_lines => try outgoing.yank(self, .lines),
+            .copy_ref => try outgoing.buildPayload(self, .copy, .ref),
+            .copy_ref_lines => try outgoing.buildPayload(self, .copy, .ref_lines),
             // Both relay out every row under the cursor, so it is placed
             // rather than walked: zen changes the body's height and wrap
             // changes what every line is worth in screen rows. Travelling
@@ -1277,26 +1076,21 @@ pub const App = struct {
             .help => self.toggleHelp(),
             .file_list => {
                 self.clearPreview();
-                self.toggleFiles();
+                finder_mod.toggleFiles(self);
             },
-            .pr_list => try self.openPrList(false),
+            .pr_list => try pr_mod.openPrList(self, false),
             .file_browse => {
-                if (self.mode == .finder) return self.closeFiles();
+                if (self.mode == .finder) return finder_mod.closeFiles(self);
                 self.files_purpose = .browse;
-                self.buildPickList();
-                self.file_list.title = " every file ";
-                self.file_list.totals = null;
-                self.file_list.extra_keys = &.{};
-                self.file_list.open(0);
-                self.file_list.max_share = picker_share;
-                self.mode = .finder;
+                finder_mod.buildPickList(self);
+                finder_mod.show(self, .{ .title = " every file " });
             },
             // One set of list keys, two overlays. Which one they move is the
             // mode, because only one of them can be open.
-            .list_down => self.moveList(1),
-            .list_up => self.moveList(-1),
-            .list_right => self.pageList(1),
-            .list_left => self.pageList(-1),
+            .list_down => finder_mod.moveList(self, 1),
+            .list_up => finder_mod.moveList(self, -1),
+            .list_right => finder_mod.pageList(self, 1),
+            .list_left => finder_mod.pageList(self, -1),
         }
         self.clampScroll(body);
         // A jump inside one file is motion the eye can follow, so the viewport
@@ -1332,7 +1126,7 @@ pub const App = struct {
         self.anchor_col = self.vp.col;
     }
 
-    fn leaveVisual(self: *App) void {
+    pub fn leaveVisual(self: *App) void {
         self.mode = .normal;
         self.anchor = self.vp.cursor;
         self.anchor_col = self.vp.col;
@@ -1366,13 +1160,6 @@ pub const App = struct {
 
     // -- prompt and search ---------------------------------------------------
 
-    fn openPrompt(self: *App, kind: prompt_mod.Kind) void {
-        self.prompt_return = self.mode;
-        self.prompt.start(kind);
-        self.mode = .command;
-        self.notice.clear();
-    }
-
     /// `?` from normal or visual opens the overlay; `?`, `Esc` or `q` from
     /// inside closes it. One command rather than two, for the same reason
     /// `visual_toggle` is one: the key that opens it also closes it. While
@@ -1388,19 +1175,6 @@ pub const App = struct {
         }
     }
 
-    /// Keys inside the popup are filter text, not commands - the same rule the
-    /// bottom-line prompt follows, and why `help` is a mode the keymap ignores.
-    /// `F` opens the file list; `F`, `Esc` or backspacing out of an empty
-    /// filter closes it. One command for both, the way `?` and `V` are one.
-    /// Shuts the overlay and hands the keyboard back to whoever had it: the
-    /// compose box when the list was opened from inside one, the diff
-    /// otherwise.
-    fn closeFiles(self: *App) void {
-        self.file_list.close();
-        self.mode = if (self.files_purpose != .jump and self.compose.open) .note_input else .normal;
-        self.files_purpose = .jump;
-    }
-
     /// The rows the overlay will show, for whichever job it was opened to do.
     ///
     /// A jump lists the changed files, because jumping to an unchanged one
@@ -1408,118 +1182,12 @@ pub const App = struct {
     /// changed ones first, in review order, then the rest - because mentioning
     /// an unchanged file to an agent is the whole point of `@`, and the file
     /// you are looking at is the one you are most likely to name.
-    /// One row of the pane picker, in this file's own vocabulary. The loop
-    /// fills these from whatever its bridge knows: `ui/app.zig` never sees a
-    /// multiplexer. The fields are the parts, not a finished line - ordering
-    /// and column widths are decisions about a list.
-    /// A review the loop is to hand to the forge.
-    pub const Post = struct {
-        event: gh.Event,
-        /// One comment by id, or null for every unposted one.
-        one: ?u32 = null,
-    };
-
-    pub const PaneRow = struct {
-        id: []const u8,
-        /// Where the pane is, in whatever the multiplexer calls places.
-        where: []const u8 = "",
-        /// What it is running.
-        command: []const u8 = "",
-        /// What it calls itself. Last, and unpadded: it is a sentence, and it
-        /// is the field worth the leftover width.
-        title: []const u8 = "",
-        /// Which group the row belongs to. Rows sharing one stay together.
-        session: []const u8 = "",
-        /// That group is the one lgtm is running in.
-        here: bool = false,
-        /// Running something that is not a shell, an editor or a pager.
-        agent: bool = false,
-        /// Sends already go here.
-        target: bool = false,
-        /// What the pane is showing, for the panel beside the list.
-        preview: []const u8 = "",
-    };
-
-    /// Which row the list marks as "you are here", or none. `file_index` is
-    /// a fact about a list of files; on any other list it marks whatever row
-    /// landed at that index, and argues with the cursor.
-    pub fn listCurrent(self: *const App) u32 {
-        return switch (self.files_purpose) {
-            .jump, .mention, .browse => self.file_index,
-            .comments, .turns, .panes, .prs => std.math.maxInt(u32),
-        };
-    }
-
-    /// The location column's ceiling: padding to the widest made every row
-    /// pay for the longest session name. Fourteen holds `session:W.P` for a
-    /// session named after a repository.
-    ///
-    /// The head goes, not the tail: `:window.pane` tells the rows of one
-    /// session apart, and the session repeats down the group anyway.
-    const pane_where_max: usize = 14;
-
     /// Lines of a file's diff kept for its panel, and the bytes they may not
     /// exceed. Twenty is what `popup.preview_rows_beside` draws, as a number
     /// rather than an import: `ui/app.zig` must not reach into the renderer.
     /// Every file gets one, so the two together bound a large review.
-    const preview_lines: usize = 20;
-    const preview_bytes: usize = 1536;
-
-    /// The head of a file's diff, as unified text for the panel.
-    ///
-    /// Built from the parsed hunks rather than sliced out of the raw `git
-    /// diff`. Slicing was cheaper and wrong for the files a reader most wants
-    /// to see: an untracked file's diff is synthesised, never parsed from
-    /// git's output, so it has no byte range and drew no panel at all. Walking
-    /// `lines` costs a `memcpy` either way and works for both.
-    ///
-    /// The `@@` header is rebuilt because it carries the enclosing symbol,
-    /// which is most of what orients a reader in a hunk they have not scrolled
-    /// to yet.
-    fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
-        return diffText(arena, f, null);
-    }
-
-    /// As `diffHead`, from the hunk that contains `at` rather than the first.
-    /// What a comment is *about*, which is the one thing its row does not
-    /// already say.
-    pub fn diffText(arena: Allocator, f: diff.FileDiff, at: ?u32) []const u8 {
-        var out: std.ArrayList(u8) = .empty;
-        var lines: usize = 0;
-        var started = at == null;
-        for (f.hunks) |h| {
-            if (!started) {
-                if (h.overlapsNew(at.?, 1) == 0) continue;
-                started = true;
-            }
-            if (lines >= preview_lines or out.items.len >= preview_bytes) break;
-            out.print(arena, "@@ -{d},{d} +{d},{d} @@{s}{s}\n", .{
-                h.old_start,                        h.old_count,
-                h.new_start,                        h.new_count,
-                if (h.section.len > 0) " " else "", h.section,
-            }) catch return out.items;
-            lines += 1;
-
-            for (h.lo..h.hi) |i| {
-                if (lines >= preview_lines or out.items.len >= preview_bytes) break;
-                const sign: u8 = switch (f.lines.kind[i]) {
-                    .add => '+',
-                    .del => '-',
-                    .context => ' ',
-                };
-                out.append(arena, sign) catch return out.items;
-                out.appendSlice(arena, f.lines.text[i]) catch return out.items;
-                out.append(arena, '\n') catch return out.items;
-                lines += 1;
-            }
-        }
-        return out.items;
-    }
-
-    /// Whether a list may draw the panel beside it at all.
-    fn previews(self: *const App) bool {
-        return self.list_preview;
-    }
+    pub const preview_lines: usize = 20;
+    pub const preview_bytes: usize = 1536;
 
     /// The most of the pane a box with a panel in it may take. These lists
     /// are opened from the middle of a hunk to answer something about that
@@ -1527,437 +1195,7 @@ pub const App = struct {
     ///
     /// Eighty and not seventy: a stacked panel spends nine rows before the
     /// list gets any, and seventy left six of sixteen panes on screen.
-    const picker_share: u8 = 80;
-
-    fn shortWhere(arena: Allocator, where: []const u8, ell: []const u8, ell_w: usize) Allocator.Error![]const u8 {
-        // ASCII from the multiplexer, so bytes are columns.
-        if (where.len <= pane_where_max) return where;
-        const colon = std.mem.lastIndexOfScalar(u8, where, ':') orelse where.len;
-        const tail = where[colon..];
-        if (tail.len + ell_w + 1 > pane_where_max) return where[0..pane_where_max];
-        return std.fmt.allocPrint(arena, "{s}{s}{s}", .{
-            where[0 .. pane_where_max - tail.len - ell_w],
-            ell,
-            tail,
-        });
-    }
-
-    /// Our own session first, then the others by name, then agents ahead of
-    /// shells inside each, then the order the multiplexer gave.
-    ///
-    /// Grouping outranks agent-ness: a session is how a reader knows *which*
-    /// agent, and sorting every agent to the top scatters the panes of one
-    /// piece of work.
-    fn paneBefore(_: void, a: PaneRow, b: PaneRow) bool {
-        if (a.here != b.here) return a.here;
-        const by_name = std.mem.order(u8, a.session, b.session);
-        if (by_name != .eq) return by_name == .lt;
-        if (a.agent != b.agent) return a.agent;
-        return false;
-    }
-
-    /// Opens the picker over a list the loop has already gathered.
-    ///
-    /// `pending` is the payload the send could not deliver. It is on the
-    /// clipboard by the time this is called - losing the reader's text is
-    /// never the price of not knowing where to put it - and it is kept here so
-    /// that picking a pane sends it rather than merely arranging for the next
-    /// one to go somewhere.
-    pub fn openPanePicker(self: *App, rows: []const PaneRow, pending: ?[]const u8) Allocator.Error!void {
-        self.files_purpose = .panes;
-        self.pick_list.clearRetainingCapacity();
-        self.pane_ids.clearRetainingCapacity();
-        _ = self.pick_arena.reset(.retain_capacity);
-        const arena = self.pick_arena.allocator();
-
-        const ordered = try arena.dupe(PaneRow, rows);
-        // Insertion, not pdq: the last tiebreak is the multiplexer's own
-        // order, which only a stable sort keeps. Tens of rows either way.
-        std.sort.insertion(PaneRow, ordered, {}, paneBefore);
-
-        // Padded to the widest of each so the eye runs down a column. Every
-        // field but the last is ASCII from a multiplexer, so bytes are
-        // columns; the last is a sentence and is last so it is never measured.
-        // Shortened first, then measured: the widest of what is drawn. The id
-        // stands in where a backend reports nothing else - WezTerm, kitty and
-        // herdr list ids, and a row built from the rest would be blank.
-        const ell = self.glyphs.ellipsis;
-        const ell_w = wrap_mod.columns(ell, .{ .method = .unicode });
-        const wheres = try arena.alloc([]const u8, ordered.len);
-        var w_where: usize = 0;
-        for (ordered, wheres) |r, *w| {
-            w.* = try shortWhere(arena, if (r.where.len > 0) r.where else r.id, ell, ell_w);
-            w_where = @max(w_where, wrap_mod.columns(w.*, .{ .method = .unicode }));
-        }
-
-        var at: usize = 0;
-        for (ordered, 0..) |r, i| {
-            // Two states, two columns. Sharing one hid the agent that is
-            // already the target from a `*` filter.
-            const target = if (r.target) self.glyphs.target_mark else " ";
-            const agent = if (r.agent) self.glyphs.agent_mark else " ";
-            // One column for what the pane is, not two: on an agent row the
-            // command is noise beside the mark, and on a shell row the title
-            // is the terminal's default and the same on every one.
-            const what = if (r.agent and r.title.len > 0) r.title else r.command;
-            // No id: it names a pane to the multiplexer and to nobody else,
-            // and is never typed. It survives in `detail`, for `--pane`.
-            const shown_where = wheres[i];
-            const where_w = wrap_mod.columns(shown_where, .{ .method = .unicode });
-            const label = try std.fmt.allocPrint(arena, "{s}{s} {s}{s}  {s}", .{
-                target,
-                agent,
-                shown_where,
-                pad(arena, w_where -| where_w),
-                what,
-            });
-            // Only what the row does not already say: a backend with nothing
-            // but an id has it in the row, and would open a panel to repeat it.
-            const detail = if (r.where.len > 0)
-                try std.fmt.allocPrint(arena, "{s}  {s}  {s}", .{ r.id, r.where, r.command })
-            else
-                "";
-            const id = try arena.dupe(u8, r.id);
-            try self.pane_ids.append(self.gpa, id);
-            try self.pick_list.append(self.gpa, .{
-                // Or the row ends in padding aligning a column nothing
-                // follows.
-                .path = std.mem.trimEnd(u8, label, " "),
-                .added = 0,
-                .removed = 0,
-                .in_review = false,
-                .plain = true,
-                .detail = if (self.previews()) detail else "",
-                .preview = if (self.previews()) try arena.dupe(u8, r.preview) else "",
-                .preview_kind = .log,
-            });
-            if (r.target) at = i;
-        }
-
-        self.pending_send = if (pending) |t| try arena.dupe(u8, t) else null;
-        self.file_list.title = " panes ";
-        self.file_list.totals = null;
-        self.file_list.extra_keys = &.{};
-        // On the pane sends already go to, so reconnecting is a confirmation
-        // rather than a search. Otherwise the top, which the ordering has
-        // made the likeliest answer.
-        self.file_list.open(at);
-        // No row here is a file, so the icon and mark columns are blank.
-        self.file_list.gutter = false;
-        self.file_list.max_share = picker_share;
-        self.mode = .finder;
-    }
-
-    /// `n` spaces, from the pick arena.
-    fn pad(arena: Allocator, n: usize) []const u8 {
-        const buf = arena.alloc(u8, n) catch return "";
-        @memset(buf, ' ');
-        return buf;
-    }
-
-    /// `<CR>` in the picker: connect to that pane, and send what was waiting.
-    fn pickPane(self: *App, at: ?u32) void {
-        const i = at orelse {
-            self.closeFiles();
-            return;
-        };
-        if (i >= self.pane_ids.items.len) {
-            self.closeFiles();
-            return;
-        }
-        const id = self.pane_ids.items[i];
-        const n = @min(id.len, self.target_buf.len);
-        @memcpy(self.target_buf[0..n], id[0..n]);
-        self.want_target = self.target_buf[0..n];
-
-        // The payload has to leave the pick arena before `closeFiles` resets
-        // it, and `outgoing` is the buffer the loop reads a send from.
-        if (self.pending_send) |text| {
-            self.outgoing.clearRetainingCapacity();
-            self.outgoing.appendSlice(self.gpa, text) catch {};
-            self.want_send = .send;
-        }
-        self.pending_send = null;
-        self.closeFiles();
-    }
-
-    fn buildPickList(self: *App) void {
-        // The picker's rows come from the loop, not from the review, and its
-        // arena holds them: rebuilding here would empty the list under the
-        // reader's filter.
-        if (self.files_purpose == .panes or self.files_purpose == .prs) return;
-        self.pick_list.clearRetainingCapacity();
-        _ = self.pick_arena.reset(.retain_capacity);
-        const arena = self.pick_arena.allocator();
-        const changed = self.review.files();
-        for (changed) |f| {
-            // Copied, not borrowed. `f.path()` lives in the review's arena,
-            // which every re-diff resets - and the list outlives a re-diff,
-            // because the agent goes on writing while it is open. Borrowing
-            // showed as a row whose path was a fragment of whatever the arena
-            // had been reused for, which is the same failure the comment
-            // labels below were already copied to avoid.
-            const path = arena.dupe(u8, f.path()) catch return;
-            self.pick_list.append(self.gpa, .{
-                .path = path,
-                .added = f.added,
-                .removed = f.removed,
-                .status = f.status,
-                .preview = if (self.previews()) diffHead(arena, f) else "",
-                .preview_kind = .diff,
-            }) catch return;
-        }
-        if (self.files_purpose == .comments) {
-            // One row per comment, in store order, so the index the overlay
-            // hands back is the comment it names. The label carries the file,
-            // the line and the text, which means the filter reaches all three:
-            // typing part of a remark finds it.
-            self.pick_list.clearRetainingCapacity();
-            for (self.comments.items()) |n| {
-                var one: [256]u8 = undefined;
-                const body = compose_mod.flatten(&one, n.body);
-                // A stale or already-sent comment has no dot on screen - one
-                // points at code that moved, the other has been handed over -
-                // so a list showing four when two are visible has to say why.
-                const mark = switch (n.state) {
-                    .open => "",
-                    .sent => "[sent] ",
-                    .stale => "[stale] ",
-                };
-                // The row is the remark's address, not the remark. It used to
-                // carry the body too, flattened and cut at whatever the column
-                // left, which is unreadable beside a panel showing the whole
-                // thing. The filter still reaches the text; see `filter`.
-                const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
-                    n.path, n.line, mark, if (n.posted) "[posted] " else "",
-                }) catch continue;
-                const searchable = std.fmt.allocPrint(arena, "{s}:{d}  {s}", .{
-                    n.path, n.line, body,
-                }) catch label;
-                self.pick_list.append(self.gpa, .{
-                    .path = std.mem.trimEnd(u8, label, " "),
-                    .filter = searchable,
-                    .added = 0,
-                    .removed = 0,
-                    .in_review = false,
-                    .icon_path = n.path,
-                    .detail = if (self.previews()) std.mem.trimEnd(u8, label, " ") else "",
-                    // The remark first, then the code it is about. Neither is
-                    // in the row any more, and both are what a reader opened
-                    // the list to see.
-                    .preview = if (self.previews()) self.commentPanel(arena, n) else "",
-                    .preview_lead = lineCount(n.body),
-                    .preview_kind = .diff,
-                }) catch return;
-            }
-            return;
-        }
-        if (self.files_purpose == .jump) return;
-
-        self.loadProject();
-        for (self.project_paths) |p| {
-            // The changed ones are already at the top; git lists them again.
-            var seen = false;
-            for (changed) |f| {
-                if (std.mem.eql(u8, f.path(), p)) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (seen) continue;
-            // No counts: it is a path, not a change, and `+0 -0` beside it
-            // would dress up a file that did not change as one that did.
-            // Borrowed on purpose: `project_paths` is session-lived and never
-            // moves, and copying fifty thousand of them into the arena would
-            // cost more than the bug it would be preventing.
-            self.pick_list.append(self.gpa, .{ .path = p, .added = 0, .removed = 0, .in_review = false }) catch return;
-        }
-    }
-
-    /// Added and removed across every file of the review.
-    ///
-    /// Summed here rather than kept on `Review`, because it is asked for once
-    /// when an overlay opens and never in a frame: a field would be a number
-    /// to keep in step with every re-diff for a caller that appears twice.
-    fn reviewTotals(self: *App) render.Totals {
-        var out: render.Totals = .{ .added = 0, .removed = 0 };
-        for (self.review.files()) |*f| {
-            out.added +|= f.added;
-            out.removed +|= f.removed;
-        }
-        return out;
-    }
-
-    /// Best effort, once. A repository that cannot be listed leaves the
-    /// mention list as the changed files, which is what it was before `@`
-    /// reached further and is still useful.
-    fn loadProject(self: *App) void {
-        if (self.project_loaded) return;
-        self.project_loaded = true;
-        self.project_paths = git.projectFiles(self.gpa, self.io) catch &.{};
-    }
-
-    fn toggleFiles(self: *App) void {
-        if (self.mode == .finder) {
-            self.closeFiles();
-        } else {
-            self.files_purpose = .jump;
-            self.buildPickList();
-            self.file_list.title = " changed files ";
-            self.file_list.totals = self.reviewTotals();
-            self.file_list.extra_keys = &.{};
-            self.file_list.open(files_mod.rowOf(self.pick_list.items, self.file_index));
-            // A panel costs rows; same ceiling as the other lists with one.
-            self.file_list.max_share = picker_share;
-            self.mode = .finder;
-        }
-    }
-
-    fn moveList(self: *App, delta: i32) void {
-        switch (self.mode) {
-            .help => self.help.move(self.km.bindings, delta),
-            .finder => self.file_list.move(self.pick_list.items, delta),
-            else => {},
-        }
-    }
-
-    fn pageList(self: *App, delta: i32) void {
-        switch (self.mode) {
-            .help => self.help.moveGroup(delta),
-            .finder => self.file_list.movePage(self.pick_list.items, delta),
-            else => {},
-        }
-    }
-
-    /// Keys inside the file list are filter text, exactly as in the `?`
-    /// overlay. `Enter` jumps to the selected file, which is the whole point
-    /// of the list and the one thing it does that `?` does not.
-    fn feedFiles(self: *App, key: event.Key, body: u16) !void {
-        // `<C-d>` clears the highlighted comment out of the list. It has to be
-        // a chord: every printable key in this overlay is a filter character,
-        // and a comment on a file that no longer exists cannot be reached to
-        // be deleted any other way.
-        switch (self.km.feed(key, .finder)) {
-            .command => |cmd| return self.run(cmd, body),
-            .pending, .none => {},
-        }
-        // A filter expands the fold before it runs. A search that skipped
-        // folded rows would be a search that lies, and the reader typing a
-        // turn number is exactly the case the fold hid the answer to.
-        const filtering = self.files_purpose == .turns and !self.turns_expanded and
-            key.codepoint >= 0x20 and key.codepoint != event.code.escape;
-
-        switch (self.file_list.feed(key)) {
-            .stay => {
-                // The turn list expands as it is filtered, because a search
-                // that skipped folded rows would lie. Only that list: every
-                // other purpose has its rows already, and the picker's are the
-                // loop's - `fillTurnRows` would replace them with a timeline.
-                if (filtering and self.files_purpose == .turns and
-                    self.file_list.filter.text().len > 0)
-                {
-                    self.turns_expanded = true;
-                    self.rebuildTurns();
-                }
-            },
-            .close => self.closeFiles(),
-            .open => {
-                const picked = self.file_list.selected(self.pick_list.items);
-                if (self.files_purpose == .panes) return self.pickPane(picked);
-                if (self.files_purpose == .prs) return self.pickPr(picked);
-                if (self.files_purpose == .turns) {
-                    const i = picked orelse {
-                        self.closeFiles();
-                        return;
-                    };
-                    const want: u32 = if (i < self.pick_turns.items.len)
-                        self.pick_turns.items[i]
-                    else
-                        std.math.maxInt(u32);
-                    // Opening the fold shows what it hid rather than opening a
-                    // turn: a summary that cannot be opened is a wall, and the
-                    // reader is still choosing.
-                    if (want == elided_row or want == run_row) {
-                        self.turns_expanded = true;
-                        self.rebuildTurns();
-                        return;
-                    }
-                    self.closeFiles();
-                    try self.showTurnNumber(want, body);
-                    return;
-                }
-                if (self.files_purpose == .comments) {
-                    const i = picked orelse {
-                        self.closeFiles();
-                        return;
-                    };
-                    const list = self.comments.items();
-                    var want_path: [4096]u8 = undefined;
-                    var want_line: u32 = 0;
-                    var have = false;
-                    if (i < list.len) {
-                        const n = list[i];
-                        @memcpy(want_path[0..n.path.len], n.path);
-                        want_line = n.line;
-                        have = true;
-                        self.closeFiles();
-                        try self.showComment(want_path[0..n.path.len], want_line, body);
-                        return;
-                    }
-                    self.closeFiles();
-                    self.clampScroll(body);
-                    return;
-                }
-                if (self.files_purpose == .browse) {
-                    const i = picked orelse {
-                        self.closeFiles();
-                        return;
-                    };
-                    const e = self.pick_list.items[i];
-                    if (e.in_review) {
-                        // It is in the review, so show it: that is what the
-                        // reader asked for by picking a file with a diff.
-                        self.clearPreview();
-                        for (self.review.files(), 0..) |f, fi| {
-                            if (!std.mem.eql(u8, f.path(), e.path)) continue;
-                            if (fi != self.file_index) {
-                                self.file_index = @intCast(fi);
-                                try self.rebuildRows(.reset);
-                            }
-                            break;
-                        }
-                        self.closeFiles();
-                        self.clampScroll(body);
-                        return;
-                    }
-                    // Nothing changed in it, so the review has nothing to
-                    // show - but the file is still there to read. Opened
-                    // whole, every line context, outside the review.
-                    var buf: [4096]u8 = undefined;
-                    const p = std.fmt.bufPrint(&buf, "{s}", .{e.path}) catch e.path;
-                    self.closeFiles();
-                    try self.openPreview(p);
-                    self.clampScroll(body);
-                    return;
-                }
-                if (self.files_purpose == .mention) {
-                    // The path lands at the caret, straight after the `@` that
-                    // opened the list, and nothing else is touched.
-                    if (picked) |i| self.compose.insert(self.pick_list.items[i].path);
-                    self.closeFiles();
-                    return;
-                }
-                if (picked) |i| {
-                    if (i != self.file_index) {
-                        self.file_index = i;
-                        try self.rebuildRows(.reset);
-                    }
-                }
-                self.closeFiles();
-                self.clampScroll(body);
-            },
-        }
-    }
+    pub const picker_share: u8 = 80;
 
     fn feedHelp(self: *App, key: event.Key, body: u16) !void {
         // Navigation is an action and stays in the keymap, so it is remappable
@@ -1973,708 +1211,20 @@ pub const App = struct {
         }
     }
 
-    fn closePrompt(self: *App) void {
-        self.comp = .{};
-        self.prompt.close();
-        self.mode = self.prompt_return;
-    }
-
-    /// Text entry, which is why it does not go through the keymap: inside a
-    /// prompt `j` is the letter j, not a motion (see prompt.zig).
-    fn feedPrompt(self: *App, key: event.Key, body: u16) !void {
-        switch (self.prompt.feed(key)) {
-            // Any edit invalidates the cycle: the reader has said something
-            // new, so the next `<Tab>` starts from what is now on the line.
-            .typing => self.comp = .{},
-            .complete => self.completeStep(1),
-            .complete_back => self.completeStep(-1),
-            .cancel => self.closePrompt(),
-            .submit => {
-                // Copied out before closing: the prompt's buffer is about to
-                // be declared empty, and submitting can re-enter it.
-                var buf: [prompt_mod.max_bytes]u8 = undefined;
-                const text = self.prompt.text();
-                @memcpy(buf[0..text.len], text);
-                const kind = self.prompt.kind;
-                self.closePrompt();
-                try self.submitPrompt(kind, buf[0..text.len], body);
-                self.clampScroll(body);
-            },
-        }
-    }
-
-    fn submitPrompt(self: *App, kind: prompt_mod.Kind, line: []const u8, body: u16) !void {
-        switch (kind) {
-            .search_forward => {
-                // Bare Enter repeats the last query, as in vim. Every search
-                // starts forward; `N` is what runs it backwards.
-                if (line.len != 0) self.finder.set(line, .forward);
-                try self.searchStep(if (line.len == 0) self.finder.dir else .forward);
-            },
-            .command => try self.submitCommand(line, body),
-            // The popup's filter is its own `Prompt`, fed by `feedHelp`, so it
-            // never arrives here.
-            .help_filter => {},
-        }
-    }
-
-    /// `<Tab>` in the `:` line: extend to what every candidate shares, then
-    /// cycle through them.
-    ///
-    /// Vim's `longest:full` in two rules. Typing `n` and pressing Tab gets to
-    /// `next_` without committing to which `next_` it is, because that is the
-    /// part the reader would have typed anyway; only when there is nothing
-    /// left to share does Tab start choosing for them.
-    fn completeStep(self: *App, dir: i32) void {
-        if (self.prompt.kind != .command) return;
-
-        // Past the verb of a line that takes a value, Tab is completing the
-        // value: `:theme <Tab>` walks the palettes, not the command names.
-        // Everything below is the same two rules either way, so the only
-        // difference is which list and what gets written back.
-        const arg = settingOf(self.prompt.text());
-
-        if (self.comp.empty()) {
-            const typed = if (arg) |a| a.arg else self.prompt.text();
-            self.comp = if (arg) |a|
-                complete.fromNames(a.setting.names, typed)
-            else
-                complete.candidates(self.km.bindings, typed);
-            self.comp_at = null;
-            if (self.comp.empty()) return;
-
-            // Something shared beyond what was typed: hand that over and stop.
-            // The strip stays up, so the reader can see what they are choosing
-            // between before the next press picks one.
-            if (self.comp.common > typed.len) {
-                self.setLine(arg, self.comp.items[0][0..self.comp.common]);
-                // One candidate means the line is now that command, whole.
-                if (self.comp.len == 1) self.comp_at = 0;
-                return;
-            }
-        }
-
-        const n = self.comp.len;
-        if (n == 0) return;
-        const next = if (self.comp_at) |at| blk: {
-            const step = @as(i64, @intCast(at)) + dir;
-            break :blk @as(usize, @intCast(@mod(step, @as(i64, @intCast(n)))));
-        } else if (dir > 0) 0 else n - 1;
-
-        self.comp_at = next;
-        self.setLine(arg, self.comp.items[next]);
-    }
-
-    /// Writes a completion back into the line: the whole line for a command,
-    /// the part after the verb for a value.
-    fn setLine(self: *App, arg: ?Typed, name: []const u8) void {
-        const a = arg orelse return self.prompt.set(name);
-        var buf: [prompt_mod.max_bytes]u8 = undefined;
-        const line = std.fmt.bufPrint(&buf, "{s} {s}", .{ a.setting.verb, name }) catch return;
-        self.prompt.set(line);
-    }
-
-    /// `:` runs a command by the name `[keys]` binds it by.
-    ///
-    /// The same `stringToEnum` the config parser uses, pointed at what the
-    /// reader typed. That is the whole implementation, and it is the
-    /// convention that every action is a named command finally being worth
-    /// something where a user can see it: `?` shows the keys, `:` runs the
-    /// names, and both read the one table, so neither can drift from what the
-    /// tool does.
-    ///
-    /// A key is scarce and a name is not, which is why this matters beyond
-    /// convenience: `quit` has no binding at all and never has, and `:q` is
-    /// how it is reached. This generalises that to all of them.
-    fn submitCommand(self: *App, line: []const u8, body: u16) !void {
-        const typed = std.mem.trim(u8, line, " ");
-        if (typed.len == 0) return;
-
-        // Before the table, because a line with a value in it is not a name in
-        // the table and never will be.
-        if (settingOf(typed)) |s| {
-            if (std.mem.eql(u8, s.setting.verb, "pr")) return self.openPr(s.arg);
-            if (std.mem.eql(u8, s.setting.verb, "post")) return self.postReview(.comment, s.arg);
-            if (std.mem.eql(u8, s.setting.verb, "approve")) return self.postReview(.approve, s.arg);
-            if (std.mem.eql(u8, s.setting.verb, "request-changes")) return self.postReview(.request_changes, s.arg);
-            return self.setTheme(s.arg);
-        }
-
-        const cmd = aliasFor(typed) orelse
-            std.meta.stringToEnum(keymap.Command, typed) orelse
-            {
-                // Naming the nearest one beats refusing: the names are long
-                // and a reader typing them has already got most of it right.
-                // Without echoing the typo back: the reader typed it a
-                // keystroke ago, and at 80 columns the slot is about 54
-                // characters. A message that gets cut off is a worse bug
-                // than a message that says less.
-                if (self.nearestCommand(typed)) |near| {
-                    self.notice.set("not a command - did you mean :{s}?", .{@tagName(near)});
-                } else {
-                    self.notice.set("not a command: :{s}", .{typed});
-                }
-                return;
-            };
-
-        if (!keymap.typeable(self.km.bindings, cmd)) {
-            self.notice.set(":{s} works only in {s}", .{ typed, self.onlyIn(cmd) });
-            return;
-        }
-        try self.run(cmd, body);
-    }
-
-    /// Vim's spellings for the commands a reader arrives already knowing.
-    ///
-    /// Aliases onto the same table rather than a second implementation: `:noh`
-    /// and the key that clears the highlight have to keep meaning the same
-    /// thing, and two code paths are how that quietly stops being true. It
-    /// already had: `:nomark` used to drop the mark without noticing there was
-    /// none to drop, which `clear_mark` has always got right.
-    fn aliasFor(text: []const u8) ?keymap.Command {
-        const table = [_]struct { []const u8, keymap.Command }{
-            .{ "q", .quit },
-            .{ "q!", .quit },
-            .{ "qa", .quit },
-            .{ "qa!", .quit },
-            .{ "noh", .clear_search },
-            .{ "nohl", .clear_search },
-            .{ "nohlsearch", .clear_search },
-            .{ "prs", .pr_list },
-            .{ "nomark", .clear_mark },
-            .{ "nom", .clear_mark },
-        };
-        for (table) |e| {
-            if (std.mem.eql(u8, text, e[0])) return e[1];
-        }
-        return null;
-    }
-
-    /// The `:` lines that take a value, and the value's completions.
-    ///
-    /// One entry so far. It is a table rather than an `if` because the second
-    /// one is what turns an `if` into a bug: the split, the completion and the
-    /// dispatch all have to agree on the same verb, and here they read it from
-    /// the same row.
-    const Setting = struct {
-        verb: []const u8,
-        names: []const []const u8,
-    };
-
-    /// A line split at its verb: which setting it names, and the value typed
-    /// after it - empty while the reader is still at `:theme `.
-    const Typed = struct { setting: Setting, arg: []const u8 };
-
-    const settings = [_]Setting{
-        .{ .verb = "theme", .names = theme_mod.bundled_names },
-        // No completions: the numbers are GitHub's, and asking it for them on
-        // every `<Tab>` is a network call for a list the reader already has
-        // in the branch they are on.
-        .{ .verb = "pr", .names = &.{} },
-        .{ .verb = "post", .names = &.{} },
-        .{ .verb = "approve", .names = &.{} },
-        .{ .verb = "request-changes", .names = &.{} },
-        // vim's spelling, for the reader who arrives already knowing it.
-        .{ .verb = "colorscheme", .names = theme_mod.bundled_names },
-        .{ .verb = "colo", .names = theme_mod.bundled_names },
-    };
-
-    /// The setting a line names, and whatever follows it. Null for every other
-    /// line, which is the ordinary command path.
-    fn settingOf(line: []const u8) ?Typed {
-        const text = std.mem.trimStart(u8, line, " ");
-        for (settings) |st| {
-            if (!std.mem.startsWith(u8, text, st.verb)) continue;
-            const rest = text[st.verb.len..];
-            // `:themes` is not `:theme` with an argument.
-            if (rest.len != 0 and rest[0] != ' ') continue;
-            return .{ .setting = st, .arg = std.mem.trim(u8, rest, " ") };
-        }
-        return null;
-    }
-
-    /// `:theme <name>` changes the palette for this session.
-    ///
-    /// Not an entry in the `Command` table: that table maps a name to an
-    /// action with no argument, and every entry in it can be bound to a key. A
-    /// value cannot be typed by a keystroke.
-    ///
-    /// Session-only, and it says so. Writing it back would mean rewriting a
-    /// file the reader hand-wrote, comments and all; naming the two lines they
-    /// would type is honest and costs them one paste. Slot overrides in
-    /// `[theme]` are discarded, which is what setting `name` does in the file
-    /// too.
-    fn setTheme(self: *App, arg: []const u8) void {
-        if (arg.len == 0) {
-            self.notice.set("theme {s} - :theme <Tab> to change it", .{self.theme_name});
-            return;
-        }
-        const found = theme_mod.lookup(arg) orelse {
-            var buf: [256]u8 = undefined;
-            self.notice.set("no theme called {s} - try {s}", .{ arg, config.themeNames(&buf) });
-            return;
-        };
-        self.theme = found.theme;
-        self.theme_name = found.name;
-        self.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
-    }
-
-    /// What the line numbers in a review file belong to. Empty for the working
-    /// tree, where they belong to the files on disk.
-    fn reviewScope(self: *const App, buf: []u8) []const u8 {
-        if (self.pr_number == 0) return "";
-        return std.fmt.bufPrint(
-            buf,
-            "Pull request #{d}, {s}. Line numbers are that tree, not the working one: `gh pr checkout {d}`.",
-            .{ self.pr_number, self.postRepo() orelse "", self.pr_number },
-        ) catch "";
-    }
-
-    /// The repository a pull request review is posted to, remembered from the
-    /// resolve so posting costs no second question.
-    fn postRepo(self: *const App) ?[]const u8 {
-        if (self.pr_number == 0 or self.pr_repo_len == 0) return null;
-        return self.pr_repo[0..self.pr_repo_len];
-    }
-
-    /// `:post`, `:approve`, `:request-changes`. One review, one request, so a
-    /// partial failure cannot happen.
-    ///
-    /// The argument, if any, is the covering note the review opens with. An
-    /// approval needs nothing to say; the other two do, or there is no reason
-    /// to have notified anybody.
-    fn postReview(self: *App, want: gh.Event, note: []const u8) void {
-        if (self.postRepo() == null) {
-            self.notice.set("not reviewing a pull request", .{});
-            return;
-        }
-        if (self.unposted() == 0 and want != .approve and note.len == 0) {
-            if (self.comments.len() == 0) {
-                self.notice.set("no comments to post", .{});
-            } else {
-                self.notice.set("everything here is posted already", .{});
-            }
-            return;
-        }
-        self.note_len = @intCast(@min(note.len, self.note_buf.len));
-        @memcpy(self.note_buf[0..self.note_len], note[0..self.note_len]);
-        self.want_post = .{ .event = want };
-        self.notice.set("posting to #{d}...", .{self.pr_number});
-    }
-
-    fn unposted(self: *const App) usize {
-        var n: usize = 0;
-        for (self.comments.items()) |c| {
-            if (!c.posted) n += 1;
-        }
-        return n;
-    }
-
-    /// The call itself, from the loop, one frame after the notice that says it
-    /// is happening.
-    pub fn performPost(self: *App, req: Post) void {
-        const repo = self.postRepo() orelse return;
-
-        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
-        defer scratch.deinit();
-        const arena = scratch.allocator();
-
-        var one: comments_mod.Store = .init(self.gpa);
-        defer one.deinit();
-        var store = &self.comments;
-        if (req.one) |id| {
-            const n = self.comments.find(id) orelse return;
-            _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed, n.span) catch return;
-            one.list.items[0].state = n.state;
-            store = &one;
-        }
-
-        var out: std.ArrayList(u8) = .empty;
-        var ids: std.ArrayList(u32) = .empty;
-        const note = self.note_buf[0..self.note_len];
-        gh.reviewBody(&out, arena, store, self.review.files(), req.event, note, &ids) catch {
-            self.notice.set("could not build the review", .{});
-            return;
-        };
-
-        gh.post(self.gpa, arena, self.io, repo, self.pr_number, out.items) catch {
-            self.notice.set("could not post to #{d}", .{self.pr_number});
-            return;
-        };
-
-        if (req.one) |id| {
-            self.comments.markPosted(&.{id});
-            self.notice.set("posted 1 to #{d}", .{self.pr_number});
-        } else {
-            self.comments.markPosted(ids.items);
-            self.closeFiles();
-            self.notice.set("posted {d} to #{d} as {s}", .{ ids.items.len, self.pr_number, req.event.wire() });
-        }
-        self.saveComments();
-    }
-
-    /// `<C-p>` in the comment list: the one under the cursor, on its own.
-    /// GitHub's "add single comment" beside its "submit review", which is the
-    /// split every reader already knows from the web.
-    fn postOne(self: *App) void {
-        const n = self.listSelected() orelse return;
-        if (self.postRepo() == null) {
-            self.notice.set("not reviewing a pull request", .{});
-            return;
-        }
-        if (n.posted) {
-            self.notice.set("already posted", .{});
-            return;
-        }
-        self.note_len = 0;
-        self.want_post = .{ .event = .comment, .one = n.id };
-        self.notice.set("posting {s}:{d}...", .{ n.path, n.line });
-    }
-
-    /// `:pr [n]`, `:pr off` for the working tree, `:pr list [all]` to choose
-    /// from what is open. The same resolve `--pr` runs, so the spellings
-    /// cannot disagree about what a request is.
-    fn openPr(self: *App, arg: []const u8) Allocator.Error!void {
-        if (std.mem.eql(u8, arg, "off")) return self.closePr();
-        if (std.mem.eql(u8, arg, "list")) return self.openPrList(false);
-        if (std.mem.eql(u8, arg, "list all") or std.mem.eql(u8, arg, "all")) return self.openPrList(true);
-
-        var number: ?u32 = null;
-        if (arg.len > 0) {
-            number = std.fmt.parseInt(u32, arg, 10) catch {
-                self.notice.set("pr takes a number or list, not {s}", .{arg});
-                return;
-            };
-        }
-
-        // Dies with the call; what the review keeps is copied out. Nothing
-        // is touched before the resolve can fail, so a failure leaves the
-        // review where it was.
-        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
-        defer scratch.deinit();
-        const refs = gh.resolve(self.gpa, scratch.allocator(), self.io, number) catch {
-            self.notice.set("could not open that pull request", .{});
-            return;
-        };
-        self.enterPr(refs);
-    }
-
-    /// Point the review at a request and start reading it.
-    ///
-    /// Everything it keeps is copied out of the caller's arena, so the caller
-    /// is free to drop it - which is what lets the picker close first.
-    fn enterPr(self: *App, refs: gh.Refs) void {
-        self.review.base = self.keepRef(&self.pr_base, &self.pr_base_len, refs.base);
-        self.review.target = self.keepRef(&self.pr_target, &self.pr_target_len, refs.target);
-        self.review.setLabel(refs.label);
-        self.pr_repo_len = @intCast(@min(refs.repo.len, self.pr_repo.len));
-        @memcpy(self.pr_repo[0..self.pr_repo_len], refs.repo[0..self.pr_repo_len]);
-        self.swapComments(refs.number);
-        self.reopen();
-        // Not the label: the badge shows it already. What is new is that the
-        // review has stopped following the working tree.
-        self.notice.set("static review of #{d} - :pr off to come back", .{refs.number});
-    }
-
-    /// The author column's ceiling. A login is short; a bot's is not, and one
-    /// of them should not push every title off an eighty-column pane.
-    const pr_author_max: usize = 14;
-
-    /// `<Space>lp`: the open requests, one per row, and Enter reviews one.
-    ///
-    /// Nothing is asked of GitHub twice. The rows carry the same fields a
-    /// single view returns, so choosing one is a merge-base and a re-diff.
-    fn openPrList(self: *App, all: bool) Allocator.Error!void {
-        if (self.mode == .finder) return self.closeFiles();
-
-        self.pick_list.clearRetainingCapacity();
-        self.pr_rows.clearRetainingCapacity();
-        _ = self.pick_arena.reset(.retain_capacity);
-        const arena = self.pick_arena.allocator();
-
-        const rows = gh.list(self.gpa, arena, self.io, all) catch {
-            self.notice.set("could not list pull requests - is gh set up?", .{});
-            return;
-        };
-        if (rows.len == 0) {
-            self.notice.set("no {s}pull requests", .{if (all) "" else "open "});
-            return;
-        }
-        try self.showPrs(arena, rows, all);
-    }
-
-    /// The rows as a list to choose from. Separate from fetching them so the
-    /// columns can be tested without a network.
-    fn showPrs(self: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allocator.Error!void {
-        self.files_purpose = .prs;
-
-        // A column earns its width or it is not drawn. Every row open, or
-        // every row the same person's, and the word repeats down the list
-        // saying nothing - and it is still in the panel beside it.
-        var mixed_state = false;
-        var mixed_author = false;
-        var w_num: usize = 0;
-        var w_state: usize = 0;
-        var w_author: usize = 0;
-        const whos = try arena.alloc([]const u8, rows.len);
-        for (rows, whos) |r, *who| {
-            mixed_state = mixed_state or !std.mem.eql(u8, r.status(), rows[0].status());
-            mixed_author = mixed_author or !std.mem.eql(u8, r.author, rows[0].author);
-            who.* = try shortAuthor(arena, r.author, self.glyphs.ellipsis);
-            w_num = @max(w_num, digits(r.number));
-            w_state = @max(w_state, r.status().len);
-            w_author = @max(w_author, wrap_mod.columns(who.*, .{ .method = .unicode }));
-        }
-
-        for (rows, whos) |r, who| {
-            var label: std.ArrayList(u8) = .empty;
-            try label.print(arena, "#{d}{s}", .{ r.number, pad(arena, w_num -| digits(r.number)) });
-            if (mixed_state) {
-                try label.print(arena, "  {s}{s}", .{ r.status(), pad(arena, w_state -| r.status().len) });
-            }
-            if (mixed_author) {
-                const w = wrap_mod.columns(who, .{ .method = .unicode });
-                try label.print(arena, "  {s}{s}", .{ who, pad(arena, w_author -| w) });
-            }
-            try label.print(arena, "  {s}", .{r.title});
-
-            try self.pr_rows.append(self.gpa, r);
-            try self.pick_list.append(self.gpa, .{
-                .path = label.items,
-                // How big the read is. The one thing the row cannot say in
-                // words, and the list already knows how to draw it.
-                .added = r.added,
-                .removed = r.removed,
-                .plain = true,
-                // A digits-only filter means the request's number, not the
-                // `2` in a title.
-                .key = r.number,
-            });
-        }
-
-        self.file_list.title = if (all) " pull requests " else " open pull requests ";
-        self.file_list.totals = null;
-        self.file_list.extra_keys = &.{};
-        self.file_list.open(0);
-        self.file_list.gutter = false;
-        self.file_list.max_share = picker_share;
-        self.mode = .finder;
-    }
-
-    /// ASCII from the forge, so bytes are columns.
-    fn shortAuthor(arena: Allocator, name: []const u8, ell: []const u8) Allocator.Error![]const u8 {
-        if (name.len <= pr_author_max) return name;
-        return std.fmt.allocPrint(arena, "{s}{s}", .{ name[0 .. pr_author_max - 1], ell });
-    }
-
-    fn digits(n: u32) usize {
-        var d: usize = 1;
-        var v = n;
-        while (v >= 10) : (v /= 10) d += 1;
-        return d;
-    }
-
-    /// `<CR>` in the request picker: review that one.
-    ///
-    /// The row is read before the picker closes: once the list is a file list
-    /// again the next rebuild empties the arena the rows live in. The refs
-    /// come back in a scratch arena, so entering the review can wait.
-    fn pickPr(self: *App, at: ?u32) void {
-        const i = at orelse return self.closeFiles();
-        if (i >= self.pr_rows.items.len) return self.closeFiles();
-
-        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
-        defer scratch.deinit();
-        const refs = gh.refsOf(self.gpa, scratch.allocator(), self.io, self.pr_rows.items[i]) catch {
-            self.closeFiles();
-            self.notice.set("could not open that pull request", .{});
-            return;
-        };
-        self.closeFiles();
-        self.enterPr(refs);
-    }
-
-    /// Copies a ref somewhere the review can hold it. Truncates rather than
-    /// refuses: a ref that does not resolve is git's error to report.
-    fn keepRef(_: *App, buf: []u8, len: *u8, ref: []const u8) []const u8 {
-        len.* = @intCast(@min(ref.len, buf.len));
-        @memcpy(buf[0..len.*], ref[0..len.*]);
-        return buf[0..len.*];
-    }
-
-    /// A reader who can get into a pull request without restarting should be
-    /// able to get out the same way.
-    fn closePr(self: *App) void {
-        if (self.review.label().len == 0) {
-            self.notice.set("not reviewing a pull request", .{});
-            return;
-        }
-        self.review.base = "HEAD";
-        self.review.target = null;
-        self.review.setLabel("");
-        self.pr_base_len = 0;
-        self.pr_target_len = 0;
-        self.pr_repo_len = 0;
-        self.swapComments(0);
-        self.reopen();
-        self.notice.set("back to the working tree", .{});
-    }
-
-    /// Re-diff against whatever the review now points at, and start again at
-    /// the top: the cursor's line number means nothing in a different diff.
-    fn reopen(self: *App) void {
-        self.file_index = 0;
-        self.vp.cursor = 0;
-        self.rediff() catch {};
-    }
-
-    /// Where a command that `:` refuses does live, for the message that says so.
-    ///
-    /// Naming the one place beats listing every place it is not: "works only
-    /// in a list" tells a reader what to do next, and it fits the slot.
-    fn onlyIn(self: *App, cmd: keymap.Command) []const u8 {
-        for (self.km.bindings) |b| {
-            if (b.command != cmd) continue;
-            if (b.modes.compose) return "the compose box";
-            if (b.modes.help or b.modes.finder) return "a list";
-        }
-        return "another mode";
-    }
-
-    /// The closest command name to something that was not one.
-    ///
-    /// Only ever suggests a command `:` would actually run, because pointing a
-    /// reader at `:compose_submit` and then refusing it is worse than saying
-    /// nothing.
-    fn nearestCommand(self: *App, typed: []const u8) ?keymap.Command {
-        var loose: ?keymap.Command = null;
-        for (std.enums.values(keymap.Command)) |cmd| {
-            if (!keymap.typeable(self.km.bindings, cmd)) continue;
-            const tier = fuzzy.match(@tagName(cmd), typed) orelse continue;
-            switch (tier) {
-                .solid => return cmd,
-                .loose => if (loose == null) {
-                    loose = cmd;
-                },
-            }
-        }
-        return loose;
-    }
-
-    /// `*` and `#`: search the review for the identifier under the cursor.
-    ///
-    /// The review's most common question - where else does this name appear,
-    /// now that it has changed - without typing the name. Matched whole, so
-    /// `*` on `id` walks the four places `id` is used rather than every
-    /// `width` and `valid` between them. `/` is still there for a fragment.
-    ///
-    /// The word is copied into the finder's fixed buffer, so it does not
-    /// outlive the diff arena it was read from.
-    fn searchWord(self: *App, dir: search.Direction) !void {
-        const word = motion.wordAt(self.cursorText(), self.vp.col) orelse {
-            // The same courtesy `f` gets: a key that moved nothing says why.
-            self.notice.set("no word under the cursor", .{});
-            return;
-        };
-        self.finder.setWord(word, dir);
-        try self.searchStep(dir);
-    }
-
-    /// One search step across the whole review, not just the current file: a
-    /// reviewer who types `/token` means anywhere in the change. Files other
-    /// than the current one have no rows built, so the scan runs over their
-    /// `DiffLines` and only the file that hits gets laid out.
-    fn searchStep(self: *App, dir: search.Direction) !void {
-        const pat = self.finder.pattern();
-        if (pat.empty()) {
-            self.notice.set("no previous search", .{});
-            return;
-        }
-        const fs = self.files();
-        if (fs.len == 0) return;
-
-        self.finder.wrapped = false;
-        self.finder.failed = false;
-        // `n` after `:noh` paints again, which is what vim does: the reader
-        // asked to be shown the next one.
-        self.finder.show();
-
-        const start_file = self.file_index;
-        var fi: u32 = start_file;
-        var from: ?u32 = self.lineAt(self.vp.cursor);
-        var wrapped = false;
-
-        var step: usize = 0;
-        while (step <= fs.len) : (step += 1) {
-            if (search.findLine(fs[fi].lines, from, dir, pat)) |hit| {
-                if (fi != self.file_index) {
-                    self.file_index = fi;
-                    try self.rebuildRows(.reset);
-                }
-                if (self.rows.rowForLine(hit.line)) |row| {
-                    self.moveTo(row);
-                    // After `moveTo`, which sets the column from `want_col`:
-                    // the match is where the reader is going, so it becomes
-                    // the desired column too, the way vim's `n` does. Without
-                    // this the cursor lands on the right line at the wrong
-                    // end of it, and on a long line that reads as a miss.
-                    self.setCol(motion.clamp(self.cursorText(), hit.col));
-                }
-                self.finder.wrapped = wrapped;
-                if (wrapped) self.notice.set("search wrapped", .{});
-                return;
-            }
-            // Step to the neighbouring file, noting when that crossed the end
-            // of the review - which is the only thing that counts as a wrap.
-            const next = wrapIndex(@as(i64, @intCast(fi)) + dir.delta(), fs.len);
-            fi = next.index;
-            wrapped = wrapped or next.wrapped;
-            // A file entered from outside has no cursor to start after.
-            from = null;
-        }
-
-        self.finder.failed = true;
-        self.notice.set("pattern not found: {s}", .{pat.text});
-    }
-
-    test "the fold keeps the newest, the mark, the baseline and where you are" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // A long session: turn 40 is newest, the mark has stood since turn 3, and
-        // the reader is parked in turn 17.
-        fx.app.review.viewing = 17;
-        const marked: u32 = 3;
-
-        // Index 0 is the newest turn, so the first `turns_shown` survive on
-        // distance alone.
-        try testing.expect(fx.app.turnKept(40, 0, 40, marked));
-        try testing.expect(fx.app.turnKept(33, 7, 40, marked));
-        try testing.expect(!fx.app.turnKept(32, 8, 40, marked));
-
-        // The three that survive wherever they fall.
-        try testing.expect(fx.app.turnKept(marked, 37, 40, marked));
-        try testing.expect(fx.app.turnKept(0, 40, 40, marked));
-        try testing.expect(fx.app.turnKept(17, 23, 40, marked));
-
-        // And an ordinary middle turn does not.
-        try testing.expect(!fx.app.turnKept(18, 22, 40, marked));
-    }
-
     test "a break is a blank line or a piece of chrome, and a note is neither" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
         // Row 0 is the hunk header: chrome, and a gap the eye already stops at.
-        try testing.expect(fx.app.isBreak(0));
+        try testing.expect(walks.isBreak(&fx.app, 0));
         // Rows 1..3 are the file's lines, none of them blank.
-        try testing.expect(!fx.app.isBreak(1));
-        try testing.expect(!fx.app.isBreak(2));
+        try testing.expect(!walks.isBreak(&fx.app, 1));
+        try testing.expect(!walks.isBreak(&fx.app, 2));
 
         // A line that is nothing but whitespace is blank: it renders as a gap, so
         // it has to behave as one.
         fx.files[0].lines.text[1] = "   \t ";
-        try testing.expect(fx.app.isBreak(2));
+        try testing.expect(walks.isBreak(&fx.app, 2));
     }
 
     test "the paragraph motions cross a run of blanks as one gap" {
@@ -2689,11 +1239,11 @@ pub const App = struct {
         fx.files[0].lines.text[2] = "";
         fx.app.vp.cursor = 1;
 
-        fx.app.stepBreak(1);
+        walks.stepBreak(&fx.app, 1);
         try testing.expectEqual(@as(u32, 2), fx.app.vp.cursor);
         // Already inside the run: the next `}` steps out of it, finds no further
         // break, and stops at the end rather than refusing.
-        fx.app.stepBreak(1);
+        walks.stepBreak(&fx.app, 1);
         try testing.expectEqual(fx.app.rows.len() - 1, fx.app.vp.cursor);
     }
 
@@ -2705,74 +1255,16 @@ pub const App = struct {
         // stop at the ends of the buffer, and one that silently returned to the
         // top would be a different key wearing the same glyph.
         fx.app.vp.cursor = fx.app.rows.len() - 1;
-        fx.app.stepBreak(1);
+        walks.stepBreak(&fx.app, 1);
         try testing.expectEqual(fx.app.rows.len() - 1, fx.app.vp.cursor);
 
         // Backwards, the header is the first break there is; past it the motion
         // lands on the first row that holds a line rather than on chrome.
         fx.app.vp.cursor = 1;
-        fx.app.stepBreak(-1);
+        walks.stepBreak(&fx.app, -1);
         try testing.expectEqual(@as(u32, 0), fx.app.vp.cursor);
-        fx.app.stepBreak(-1);
+        walks.stepBreak(&fx.app, -1);
         try testing.expectEqual(fx.app.rows.firstLineRow(), fx.app.vp.cursor);
-    }
-
-    test "a run is folded only when every turn in it is unremarkable" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        fx.app.review.viewing = null;
-
-        const a: timeline.Turn = .{ .number = 4, .files = 1, .path = "src/ui/app.zig" };
-        const b: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/app.zig" };
-        try testing.expect(fx.app.runsWith(a, b, 0));
-
-        // A different file is a different piece of work.
-        const other: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/body.zig" };
-        try testing.expect(!fx.app.runsWith(a, other, 0));
-
-        // Six things stop a fold, each because the row has something of its own
-        // to say and folding it away would hide exactly what it was drawn for.
-        const marked: timeline.Turn = .{ .number = 3, .files = 1, .path = "src/ui/app.zig" };
-        try testing.expect(!fx.app.runsWith(a, marked, 3));
-
-        var reverted = b;
-        reverted.reverted = true;
-        try testing.expect(!fx.app.runsWith(a, reverted, 0));
-
-        var answered = b;
-        answered.answered = true;
-        try testing.expect(!fx.app.runsWith(a, answered, 0));
-
-        var quiet = b;
-        quiet.files = 0;
-        try testing.expect(!fx.app.runsWith(a, quiet, 0));
-
-        var baseline = b;
-        baseline.number = 0;
-        try testing.expect(!fx.app.runsWith(a, baseline, 0));
-
-        fx.app.review.viewing = 3;
-        try testing.expect(!fx.app.runsWith(a, b, 0));
-        fx.app.review.viewing = null;
-
-        // And expanding stops every fold, which is what opening one means.
-        fx.app.turns_expanded = true;
-        try testing.expect(!fx.app.runsWith(a, b, 0));
-    }
-
-    test "elision is by distance, not by read state" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        fx.app.review.viewing = null;
-
-        // The failure `SNAPSHOTS.md` 5.3b's own rule has: a mark that has stood
-        // all morning leaves every turn unread, so a fold keyed on read state
-        // fires on nothing at all. Distance folds the middle regardless.
-        try testing.expect(!fx.app.turnKept(20, 20, 900, 1));
-
-        // Expanding shows everything, which is what opening the `⋮` row does.
-        fx.app.turns_expanded = true;
-        try testing.expect(fx.app.turnKept(20, 20, 900, 1));
     }
 
     test "auto splits when the pane is wide enough and folds back when it is not" {
@@ -2813,7 +1305,7 @@ pub const App = struct {
     /// and so cannot tell the two columns apart. This makes its middle line a
     /// replacement - one removed, one added, in the shape git emits - and lays it
     /// out side by side.
-    fn splitReplacement(fx: *Fixture) !void {
+    pub fn splitReplacement(fx: *Fixture) !void {
         const l = &fx.files[0].lines;
         l.kind[1] = .del;
         l.kind[2] = .add;
@@ -2852,100 +1344,6 @@ pub const App = struct {
         try testing.expectEqual(@as(f32, @floatFromInt(gutter)), left.col);
     }
 
-    test "a pull request is opened by number and left by name" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // Nothing to leave yet, and saying so beats silently re-diffing.
-        fx.app.closePr();
-        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not reviewing") != null);
-
-        // A word is not a number, and this is caught before `gh` is spawned.
-        try fx.app.openPr("main");
-        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "takes a number") != null);
-        try testing.expectEqualStrings("", fx.app.review.label());
-
-        // The label is what the status row shows instead of two shas, and it
-        // is what `:pr off` tests to know there is something to leave.
-        fx.app.review.setLabel("#13 feat: syntax highlight for json");
-        try testing.expectEqualStrings("#13 feat: syntax highlight for json", fx.app.review.label());
-        fx.app.review.target = "c7143ba";
-        fx.app.closePr();
-        try testing.expectEqualStrings("", fx.app.review.label());
-        try testing.expect(fx.app.review.target == null);
-        try testing.expectEqualStrings("HEAD", fx.app.review.base);
-    }
-
-    test "remarks on a pull request do not follow you to the working tree" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // One file per scope, so nothing has to filter and a working-tree
-        // review never re-anchors somebody else's branch onto the tree here.
-        var buf: [64]u8 = undefined;
-        try testing.expectEqualStrings(".lgtm/comments.jsonl", fx.app.commentsPath(&buf));
-        fx.app.pr_number = 13;
-        try testing.expectEqualStrings(".lgtm/pr-13.jsonl", fx.app.commentsPath(&buf));
-    }
-
-    test "swapping scope empties the store and reloads the new one" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        _ = try fx.app.comments.add("a.zig", 1, "about the working tree");
-        try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
-        // Nothing here may write to the repository the tests run in.
-        fx.app.comments.dirty = false;
-
-        // A scope with no file: the store comes back empty rather than
-        // carrying the previous one's remarks across, and rather than picking
-        // up `notes.jsonl`, which belongs to the working tree alone.
-        fx.app.swapComments(999_999);
-        try testing.expectEqual(@as(usize, 0), fx.app.comments.len());
-        try testing.expectEqual(@as(u32, 999_999), fx.app.pr_number);
-
-        // Asking for the scope already open is not a reload: it would drop
-        // unsaved remarks on the way out and back.
-        _ = try fx.app.comments.add("b.zig", 2, "about the request");
-        fx.app.comments.dirty = false;
-        fx.app.swapComments(999_999);
-        try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
-    }
-
-    test "a failed pull request leaves the review pointing where it was" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // Standing in one pull request, as if a resolve had succeeded.
-        fx.app.review.base = fx.app.keepRef(&fx.app.pr_base, &fx.app.pr_base_len, "be94b77de24e3c40f85f80bbcfc11b871335d065");
-        fx.app.review.target = fx.app.keepRef(&fx.app.pr_target, &fx.app.pr_target_len, "c7143ba8237180b84b378d651f0b020652160868");
-        fx.app.review.setLabel("#13 feat: syntax highlight for json");
-
-        // A resolve that cannot even start. The refs held an arena that was
-        // reset before the resolve ran, so a failure freed what the review was
-        // still pointing at and left it to diff against whatever landed there.
-        try fx.app.openPr("not-a-number");
-        try testing.expectEqualStrings("be94b77de24e3c40f85f80bbcfc11b871335d065", fx.app.review.base);
-        try testing.expectEqualStrings("c7143ba8237180b84b378d651f0b020652160868", fx.app.review.target.?);
-        try testing.expectEqualStrings("#13 feat: syntax highlight for json", fx.app.review.label());
-
-        // And leaving puts back refs that are not owned by anything at all.
-        fx.app.closePr();
-        try testing.expectEqualStrings("HEAD", fx.app.review.base);
-        try testing.expect(fx.app.review.target == null);
-        try testing.expectEqual(@as(u8, 0), fx.app.pr_base_len);
-    }
-
-    test "a ref longer than the buffer is truncated rather than overrunning it" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const long = "a" ** 200;
-        const kept = fx.app.keepRef(&fx.app.pr_base, &fx.app.pr_base_len, long);
-        try testing.expectEqual(fx.app.pr_base.len, kept.len);
-        try testing.expect(std.mem.startsWith(u8, long, kept));
-    }
-
     test "a label longer than the row still fits the buffer that holds it" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
@@ -2956,416 +1354,23 @@ pub const App = struct {
         try testing.expect(std.mem.startsWith(u8, long, fx.app.review.label()));
     }
 
-    fn prRow(number: u32, state: []const u8, author: []const u8, title: []const u8) gh.Pr {
-        return .{
-            .number = number,
-            .state = state,
-            .base_ref = "main",
-            .base_oid = "be94b77",
-            .head_oid = "c7143ba",
-            .url = "https://github.com/o/r/pull/1",
-            .author = author,
-            .title = title,
-        };
-    }
-
-    fn showPrRows(fx: *Fixture, rows: []const gh.Pr, all: bool) !void {
-        fx.app.pick_list.clearRetainingCapacity();
-        fx.app.pr_rows.clearRetainingCapacity();
-        _ = fx.app.pick_arena.reset(.retain_capacity);
-        try fx.app.showPrs(fx.app.pick_arena.allocator(), rows, all);
-    }
-
-    test "a column of one repeated word is not drawn" {
+    test "a comment is a row under the line it is about" {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
+        const f = fx.app.current().?;
+        const line = f.lines.new_no[0];
 
-        // One person's open requests: saying `open` and their name on every
-        // row spends the width the titles need at eighty columns.
-        const same = [_]gh.Pr{
-            prRow(19, "OPEN", "kunkka19xx", "feat: posting comments to a PR"),
-            prRow(7, "OPEN", "kunkka19xx", "fix: the anchor table"),
-        };
-        try showPrRows(fx, &same, false);
-        try testing.expectEqual(event.Mode.finder, fx.app.mode);
-        // Or `<CR>` reads the row as a file path and jumps nowhere.
-        try testing.expectEqual(@TypeOf(fx.app.files_purpose).prs, fx.app.files_purpose);
-        // The number is padded so the titles line up, and nothing else is
-        // between them.
-        try testing.expectEqualStrings("#19  feat: posting comments to a PR", fx.app.pick_list.items[0].path);
-        try testing.expectEqualStrings("#7   fix: the anchor table", fx.app.pick_list.items[1].path);
-        // A digits-only filter means the request, not a `7` in a title.
-        try testing.expectEqual(@as(?u32, 19), fx.app.pick_list.items[0].key);
+        _ = try fx.app.comments.add(f.path(), line, "mine");
+        _ = try fx.app.comments.adopt(f.path(), line, 1, "theirs", "someone", false);
+        try fx.app.rebuildRows(.line);
 
-        // Mixed, and both columns are worth their width.
-        var mixed = [_]gh.Pr{
-            prRow(19, "OPEN", "kunkka19xx", "feat: posting"),
-            prRow(16, "MERGED", "someone", "chore: config"),
-        };
-        mixed[0].draft = true;
-        try showPrRows(fx, &mixed, true);
-        try testing.expectEqualStrings("#19  draft   kunkka19xx  feat: posting", fx.app.pick_list.items[0].path);
-        try testing.expectEqualStrings("#16  merged  someone     chore: config", fx.app.pick_list.items[1].path);
-    }
-
-    test "picking a request that is not there closes the list and does nothing" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        const rows = [_]gh.Pr{prRow(19, "OPEN", "me", "feat: posting")};
-        try showPrRows(fx, &rows, false);
-
-        // No network in a test, so only the refusing half is exercised here:
-        // an index past the rows must not read one.
-        fx.app.pickPr(5);
-        try testing.expectEqual(event.Mode.normal, fx.app.mode);
-        try testing.expectEqual(@as(u32, 0), fx.app.pr_number);
-    }
-
-    test "the pane picker lists what it was handed and connects to one" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{
-            .{ .id = "%1", .where = "a:1.0", .command = "zsh", .title = "shell", .session = "a" },
-            .{
-                .id = "%7",
-                .where = "a:2.0",
-                .command = "claude",
-                .title = "reviewing the diff",
-                .session = "a",
-                .agent = true,
-            },
-        };
-        try fx.app.openPanePicker(&rows, "#3 src/main.zig:12");
-
-        try testing.expectEqual(event.Mode.finder, fx.app.mode);
-        try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
-        // The agent leads its session, and the ids move with the rows.
-        try testing.expectEqualStrings("%7", fx.app.pane_ids.items[0]);
-        try testing.expectEqualStrings("%1", fx.app.pane_ids.items[1]);
-        // Rows are labels, not paths: no filetype icon is guessed from one.
-        try testing.expect(fx.app.pick_list.items[1].plain);
-
-        // Picking asks the loop for two things at once, which is the point:
-        // connect, and deliver what the failed send was carrying.
-        fx.app.pickPane(0);
-        try testing.expectEqualStrings("%7", fx.app.want_target.?);
-        try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
-        try testing.expectEqualStrings("#3 src/main.zig:12", fx.app.outgoing.items);
-        try testing.expectEqual(event.Mode.normal, fx.app.mode);
-    }
-
-    test "the picker groups by session, ours first, agents leading each" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // Handed in the order tmux lists them, which is by session name: the
-        // one we are in is in the middle of it.
-        const rows = [_]App.PaneRow{
-            .{ .id = "%566", .where = "look:1.0", .command = "2.1.261", .session = "look", .agent = true },
-            .{ .id = "%665", .where = "look:4.0", .command = "zsh", .session = "look" },
-            .{ .id = "%645", .where = "lgtm:2.0", .command = "zsh", .session = "lgtm", .here = true },
-            .{ .id = "%667", .where = "lgtm:4.0", .command = "zsh", .session = "lgtm", .here = true },
-            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .here = true, .agent = true },
-            .{ .id = "%540", .where = "setting:1.0", .command = "zsh", .session = "setting" },
-        };
-        try fx.app.openPanePicker(&rows, null);
-
-        const want = [_][]const u8{ "%604", "%645", "%667", "%566", "%665", "%540" };
-        for (want, 0..) |id, i| try testing.expectEqualStrings(id, fx.app.pane_ids.items[i]);
-    }
-
-    test "a pane row is padded into columns and marked" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{
-            .{ .id = "%604", .where = "lgtm:1.0", .command = "2.1.263", .session = "lgtm", .agent = true, .title = "JSON highlighting" },
-            .{ .id = "%7", .where = "lgtm:12.0", .command = "zsh", .title = "kunkka07xx", .session = "lgtm" },
-        };
-        try fx.app.openPanePicker(&rows, null);
-
-        // Padded, so the last column starts in the same place on every row:
-        // the agent's title, the shell's command. No id - it moved to
-        // `detail`.
-        const first = try std.fmt.allocPrint(
-            testing.allocator,
-            " {s} lgtm:1.0   JSON highlighting",
-            .{fx.app.glyphs.agent_mark},
-        );
-        defer testing.allocator.free(first);
-        try testing.expectEqualStrings(first, fx.app.pick_list.items[0].path);
-        try testing.expectEqualStrings("   lgtm:12.0  zsh", fx.app.pick_list.items[1].path);
-        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
-    }
-
-    test "what a pane is showing reaches the row that draws it" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{.{
-            .id = "%604",
-            .where = "lgtm:1.0",
-            .command = "2.1.263",
-            .title = "JSON highlighting",
-            .session = "lgtm",
-            .agent = true,
-            .preview = "> waiting\n$ zig build test\n",
-        }};
-        try fx.app.openPanePicker(&rows, null);
-
-        // Owned by the pick arena, like the labels.
-        try testing.expectEqualStrings("> waiting\n$ zig build test\n", fx.app.pick_list.items[0].preview);
-        try testing.expectEqualStrings("%604  lgtm:1.0  2.1.263", fx.app.pick_list.items[0].detail);
-
-        // Empty by default, so every other list draws no panel.
-        const plain: render.FileEntry = .{ .path = "src/main.zig", .added = 0, .removed = 0 };
-        try testing.expectEqualStrings("", plain.preview);
-        try testing.expectEqualStrings("", plain.detail);
-    }
-
-    test "only a list of files marks a row as the one you are on" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        fx.app.files_purpose = .jump;
-        try testing.expectEqual(fx.app.file_index, fx.app.listCurrent());
-
-        // On a list of panes `file_index` names a file, and the row at that
-        // index is whichever pane landed there.
-        fx.app.files_purpose = .panes;
-        try testing.expectEqual(std.math.maxInt(u32), fx.app.listCurrent());
-    }
-
-    test "a long session name loses its head, not the pane it names" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{
-            .{ .id = "%1", .where = "noah-tech-cl-v2:1.0", .command = "zsh", .session = "noah-tech-cl-v2" },
-            .{ .id = "%2", .where = "noah-tech-cl-v2:2.0", .command = "zsh", .session = "noah-tech-cl-v2" },
-        };
-        try fx.app.openPanePicker(&rows, null);
-
-        // Capped, and `:1.0` survives: it is what tells the two rows apart.
-        const e = fx.app.glyphs.ellipsis;
-        const want = try std.fmt.allocPrint(testing.allocator, "   noah-tech{s}:1.0  zsh", .{e});
-        defer testing.allocator.free(want);
-        try testing.expectEqualStrings(want, fx.app.pick_list.items[0].path);
-        // The whole of it is still one keystroke away, beside the list.
-        try testing.expectEqualStrings("%1  noah-tech-cl-v2:1.0  zsh", fx.app.pick_list.items[0].detail);
-    }
-
-    test "the agent mark survives being the target, so the filter still finds it" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{
-            .{ .id = "%1", .where = "a:1.0", .command = "claude", .session = "a", .agent = true, .target = true },
-            .{ .id = "%2", .where = "a:2.0", .command = "claude", .session = "a", .agent = true },
-            .{ .id = "%3", .where = "a:3.0", .command = "zsh", .session = "a" },
-        };
-        try fx.app.openPanePicker(&rows, null);
-
-        const g = fx.app.glyphs;
-        // Two columns: where sends go, and whether it is an agent. Sharing
-        // one hid this row from a `*` filter.
-        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[0].path, g.target_mark));
-        for (fx.app.pick_list.items[0..2]) |row| {
-            try testing.expect(std.mem.indexOf(u8, row.path, g.agent_mark) != null);
+        var seen: usize = 0;
+        for (fx.app.rows.items) |r| {
+            if (r == .note) seen += 1;
         }
-        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[2].path, g.agent_mark) == null);
-    }
-
-    test "a file row previews the head of its diff, header and all" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        const arena = fx.app.pick_arena.allocator();
-
-        var kinds = [_]hunk.LineKind{ .context, .del, .add };
-        var olds = [_]u32{ 1, 2, 0 };
-        var news = [_]u32{ 1, 0, 2 };
-        var texts = [_][]const u8{ "const std = @import(\"std\");", "const old = 1;", "const new = 2;" };
-        var hunks = [_]hunk.Hunk{.{
-            .old_start = 1,
-            .old_count = 2,
-            .new_start = 1,
-            .new_count = 2,
-            .section = "pub fn main()",
-            .lo = 0,
-            .hi = 3,
-        }};
-        const f: diff.FileDiff = .{
-            .old_path = "a.zig",
-            .new_path = "a.zig",
-            .status = .modified,
-            .hunks = &hunks,
-            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
-        };
-
-        const head = App.diffHead(arena, f);
-        // The header is rebuilt rather than sliced, because it carries the
-        // enclosing symbol and that is most of what orients a reader.
-        try testing.expect(std.mem.startsWith(u8, head, "@@ -1,2 +1,2 @@ pub fn main()\n"));
-        try testing.expect(std.mem.indexOf(u8, head, "\n-const old = 1;\n") != null);
-        try testing.expect(std.mem.indexOf(u8, head, "\n+const new = 2;\n") != null);
-        try testing.expect(std.mem.indexOf(u8, head, "\n const std") != null);
-    }
-
-    test "a file git never diffed still gets a preview" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        const arena = fx.app.pick_arena.allocator();
-
-        // An untracked file's diff is synthesised rather than parsed, so it
-        // has no byte range in git's output. Slicing that range drew no panel
-        // at all for exactly the files a reader most wants to look at.
-        var kinds = [_]hunk.LineKind{ .add, .add };
-        var olds = [_]u32{ 0, 0 };
-        var news = [_]u32{ 1, 2 };
-        var texts = [_][]const u8{ "// SPDX-License-Identifier: Apache-2.0", "const std = @import(\"std\");" };
-        var hunks = [_]hunk.Hunk{.{
-            .old_start = 0,
-            .old_count = 0,
-            .new_start = 1,
-            .new_count = 2,
-            .lo = 0,
-            .hi = 2,
-        }};
-        const f: diff.FileDiff = .{
-            .old_path = "/dev/null",
-            .new_path = "src/core/gh.zig",
-            .status = .added,
-            .added = 2,
-            .hunks = &hunks,
-            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
-            // No raw section, which is the whole point of the case.
-            .raw_lo = 0,
-            .raw_hi = 0,
-        };
-
-        const head = App.diffHead(arena, f);
-        try testing.expect(head.len > 0);
-        try testing.expect(std.mem.indexOf(u8, head, "+// SPDX-License-Identifier") != null);
-        // A hunk with no enclosing symbol closes its header rather than
-        // trailing a space.
-        try testing.expect(std.mem.startsWith(u8, head, "@@ -0,0 +1,2 @@\n"));
-    }
-
-    test "a file with nothing parsed previews nothing rather than a blank panel" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        const arena = fx.app.pick_arena.allocator();
-
-        // A file past `large_file_lines` keeps its counts and no hunks until
-        // `zo` opens it. Empty is honest: there is nothing to show yet.
-        try testing.expectEqualStrings("", App.diffHead(arena, .{
-            .old_path = "big.json",
-            .new_path = "big.json",
-            .status = .modified,
-            .summarised = true,
-            .added = 9000,
-        }));
-    }
-
-    test "previews can be turned off, and then no list builds one" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        _ = try fx.app.comments.add("src/net.zig", 47, "a remark");
-        fx.app.list_preview = false;
-        fx.app.files_purpose = .comments;
-        fx.app.buildPickList();
-
-        // Not merely hidden at draw time: nothing is copied into the arena
-        // either, which is the point of a setting rather than a branch in the
-        // renderer.
-        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
-        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
-        // The row itself is untouched: the label is what the filter reads.
-        try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "a remark") != null);
-    }
-
-    test "posting is armed, not done, so the frame saying so is drawn first" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // Outside a pull request there is nothing to arm and the answer is
-        // immediate: a `posting...` that resolved to an error would flash.
-        fx.app.postReview(.comment, "");
-        try testing.expect(fx.app.want_post == null);
-        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not reviewing") != null);
-
-        fx.app.pr_number = 16;
-        fx.app.pr_repo_len = @intCast("o/r".len);
-        @memcpy(fx.app.pr_repo[0..3], "o/r");
-
-        // Nothing to say is also answered on the spot.
-        fx.app.postReview(.comment, "");
-        try testing.expect(fx.app.want_post == null);
-
-        // With something to post the call is left for the loop, which draws
-        // before it performs.
-        _ = try fx.app.comments.add("a.zig", 1, "a remark");
-        fx.app.postReview(.request_changes, "have a look");
-        const req = fx.app.want_post.?;
-        try testing.expectEqual(gh.Event.request_changes, req.event);
-        try testing.expect(req.one == null);
-        try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "posting") != null);
-        // The note outlives the prompt buffer it was typed into.
-        try testing.expectEqualStrings("have a look", fx.app.note_buf[0..fx.app.note_len]);
-    }
-
-    test "a comment's panel starts at the hunk it sits in" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        const arena = fx.app.pick_arena.allocator();
-
-        var kinds = [_]hunk.LineKind{ .context, .add, .context, .add };
-        var olds = [_]u32{ 1, 0, 90, 0 };
-        var news = [_]u32{ 1, 2, 90, 91 };
-        var texts = [_][]const u8{ "top of file", "first change", "further down", "second change" };
-        var hunks = [_]hunk.Hunk{
-            .{ .old_start = 1, .old_count = 1, .new_start = 1, .new_count = 2, .lo = 0, .hi = 2 },
-            .{ .old_start = 90, .old_count = 1, .new_start = 90, .new_count = 2, .lo = 2, .hi = 4 },
-        };
-        const f: diff.FileDiff = .{
-            .old_path = "a.zig",
-            .new_path = "a.zig",
-            .status = .modified,
-            .hunks = &hunks,
-            .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
-        };
-
-        // A remark on line 91 is about the second hunk, and showing the first
-        // would be showing the wrong code with total confidence.
-        const at = App.diffText(arena, f, 91);
-        try testing.expect(std.mem.startsWith(u8, at, "@@ -90,1 +90,2 @@"));
-        try testing.expect(std.mem.indexOf(u8, at, "second change") != null);
-        try testing.expect(std.mem.indexOf(u8, at, "first change") == null);
-
-        // The file list wants the head instead, which is the same walk from
-        // the first hunk.
-        try testing.expect(std.mem.startsWith(u8, App.diffText(arena, f, null), "@@ -1,1 +1,2 @@"));
-
-        // A line in no hunk at all shows nothing rather than the nearest thing.
-        try testing.expectEqualStrings("", App.diffText(arena, f, 5000));
-    }
-
-    test "the remark leads its panel and is coloured as one" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        _ = try fx.app.comments.add("a.zig", 1, "one line\ntwo lines\nthree");
-        fx.app.files_purpose = .comments;
-        fx.app.buildPickList();
-
-        // The lead is the remark's own lines, so the renderer knows how much
-        // of the panel is the reader's words and how much is the code.
-        try testing.expectEqual(@as(u16, 3), fx.app.pick_list.items[0].preview_lead);
-        try testing.expectEqual(@as(u16, 1), App.lineCount("just one"));
-        // A trailing newline does not invent a line.
-        try testing.expectEqual(@as(u16, 2), App.lineCount("a\nb\n"));
+        // Two remarks on one line are two rows under it. Without this the
+        // gutter says a remark is there and the screen never shows it.
+        try testing.expectEqual(@as(usize, 2), seen);
     }
 
     test "a charwise selection across lines still covers those lines" {
@@ -3377,89 +1382,8 @@ pub const App = struct {
         var fx = try Fixture.init(testing.allocator);
         defer fx.deinit();
 
-        try testing.expect(App.Range.covers(.{ .lo = 5, .hi = 7, .rows = 3, .skipped = 0 }) == 3);
-        try testing.expect(App.Range.covers(.{ .lo = 5, .hi = 5, .rows = 1, .skipped = 0 }) == 1);
-    }
-
-    test "a comment row is its address; the remark is in the panel and the filter" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const body = "the retry loop here\nnever backs off";
-        _ = try fx.app.comments.add("src/net.zig", 47, body);
-        fx.app.files_purpose = .comments;
-        fx.app.buildPickList();
-
-        const row = fx.app.pick_list.items[0];
-        // Drawn: where it is. The remark used to be here too, flattened and
-        // cut at whatever the column left, beside a panel showing it whole.
-        try testing.expectEqualStrings("src/net.zig:47", row.path);
-        // Matched: the remark as well, so typing part of one still finds it.
-        try testing.expect(std.mem.indexOf(u8, row.filter, "retry loop") != null);
-        // Shown: the remark as written, unflattened.
-        try testing.expect(std.mem.indexOf(u8, row.preview, "the retry loop here\nnever backs off") != null);
-    }
-
-    test "a backend that reports only ids still gets a list worth reading" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        // WezTerm, kitty and herdr answer ids and nothing else. Built from
-        // the fields they leave empty, every row was a blank line you could
-        // still press Enter on.
-        const rows = [_]App.PaneRow{ .{ .id = "1" }, .{ .id = "12" } };
-        try fx.app.openPanePicker(&rows, null);
-
-        try testing.expectEqualStrings("   1", fx.app.pick_list.items[0].path);
-        try testing.expectEqualStrings("   12", fx.app.pick_list.items[1].path);
-        // And no panel: the id is already in the row, so one saying it again
-        // would be a panel opened to repeat the list.
-        try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
-        try testing.expectEqualStrings("", fx.app.pick_list.items[0].preview);
-    }
-
-    test "the picker opens on the pane sends already go to" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{
-            .{ .id = "%1", .command = "zsh", .session = "a" },
-            .{ .id = "%2", .command = "zsh", .session = "a", .target = true },
-        };
-        try fx.app.openPanePicker(&rows, null);
-
-        // The marker takes the column an agent dot would have had, and the
-        // cursor starts there rather than at the top.
-        try testing.expect(std.mem.startsWith(u8, fx.app.pick_list.items[1].path, fx.app.glyphs.target_mark));
-        fx.app.pickPane(@intCast(fx.app.file_list.index));
-        try testing.expectEqualStrings("%2", fx.app.want_target.?);
-    }
-
-    test "the picker opened by hand sends nothing" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
-        try fx.app.openPanePicker(&rows, null);
-        fx.app.pickPane(0);
-
-        // `<Space>t` is "point sends there", not "send now": there is nothing
-        // waiting, so nothing goes.
-        try testing.expectEqualStrings("%2", fx.app.want_target.?);
-        try testing.expect(fx.app.want_send == null);
-    }
-
-    test "leaving the picker connects to nothing" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-
-        const rows = [_]App.PaneRow{.{ .id = "%2", .where = "b:1.0", .command = "bash", .session = "b" }};
-        try fx.app.openPanePicker(&rows, "text");
-        fx.app.pickPane(null);
-
-        try testing.expect(fx.app.want_target == null);
-        try testing.expect(fx.app.want_send == null);
-        try testing.expectEqual(event.Mode.normal, fx.app.mode);
+        try testing.expect(notes.Range.covers(.{ .lo = 5, .hi = 7, .rows = 3, .skipped = 0 }) == 3);
+        try testing.expect(notes.Range.covers(.{ .lo = 5, .hi = 5, .rows = 1, .skipped = 0 }) == 1);
     }
 
     test "H and L put the cursor in the other column of a split row" {
@@ -3486,24 +1410,6 @@ pub const App = struct {
         fx.app.vp.cursor = 1;
         try fx.press("H");
         try testing.expectEqual(@as(u32, 0), fx.app.lineAt(1).?);
-    }
-
-    test "a yank takes the column the reader is standing in" {
-        var fx = try Fixture.init(testing.allocator);
-        defer fx.deinit();
-        try splitReplacement(fx);
-
-        const lines = fx.app.current().?.lines;
-        fx.app.vp.cursor = 2;
-
-        try fx.press("Y");
-        try testing.expectEqualStrings(lines.text[2], fx.app.outgoing.items);
-
-        // The whole point of `H`: the removed text was unreachable before it, and
-        // copying it is most of what anyone wants the old column for.
-        try fx.press("H");
-        try fx.press("Y");
-        try testing.expectEqualStrings(lines.text[1], fx.app.outgoing.items);
     }
 
     test "a padding row keeps the cursor on the side that has a line" {
@@ -3609,7 +1515,7 @@ pub const App = struct {
 
     /// What to compose. `ask` carries its own template rather than an enum the
     /// dispatch would have to translate back into one.
-    const What = union(enum) {
+    pub const What = union(enum) {
         ref,
         ref_lines,
         ask: []const u8,
@@ -3636,151 +1542,11 @@ pub const App = struct {
         span: []const u8 = "",
     };
 
-    /// What the cursor, or the selection, is pointing at.
-    pub fn refAt(self: *App) ?Ref {
-        const f = self.current() orelse return null;
-        const path = f.path();
-
-        const hunk_index = self.rows.hunkAt(self.vp.cursor);
-        const id = if (hunk_index) |h|
-            (if (h < f.hunks.len) f.hunks[h].id else hunk.no_id)
-        else
-            hunk.no_id;
-
-        // A selection resolves to the new-file lines it covers; without one
-        // the range is the cursor row alone. Rows that are chrome, and lines
-        // that exist only in HEAD, contribute nothing either way.
-        const sel = self.selection();
-        const lo_row = if (sel) |s| s.lo else self.vp.cursor;
-        const hi_row = if (sel) |s| s.hi else self.vp.cursor;
-
-        var first: u32 = 0;
-        var last: u32 = 0;
-        var row = lo_row;
-        while (row <= hi_row) : (row += 1) {
-            const li = self.lineAt(row) orelse continue;
-            if (li >= f.lines.len()) continue;
-            const n = f.lines.new_no[li];
-            if (n == 0) continue;
-            if (first == 0) first = n;
-            last = n;
-        }
-        if (first != 0) {
-            return .{
-                .change_id = id,
-                .path = path,
-                .line = first,
-                .end = if (last > first) last else 0,
-                .span = self.spanText(sel),
-            };
-        }
-
-        // Nothing under the cursor survives in the new file. The enclosing
-        // hunk is where the deletion happened, which is the closest thing to
-        // a place the agent can look.
-        if (hunk_index) |h| {
-            if (h < f.hunks.len) return .{
-                .change_id = id,
-                .path = path,
-                .line = f.hunks[h].new_start,
-                .deleted = true,
-            };
-        }
-        return .{ .change_id = id, .path = path };
-    }
-
-    /// The words a charwise selection covers, trimmed, or empty when there is
-    /// no such thing to point at. Only within one line: the text of a
-    /// selection spanning two would contain the newline between them.
-    fn spanText(self: *App, sel: ?render.Selection) []const u8 {
-        const s = sel orelse return "";
-        if (s.kind != .char or s.lo != s.hi) return "";
-        const text = self.textOfRow(s.lo);
-        const lo = @min(s.lo_col, text.len);
-        const hi = @min(s.hi_col, text.len);
-        if (hi <= lo) return "";
-        return std.mem.trim(u8, text[lo..hi], " \t");
-    }
-
-    /// The reference as text. Which template applies is decided here and
-    /// nowhere else, so a user who replaces one of them replaces exactly the
-    /// case they meant to.
-    fn refText(self: *App, out: *std.ArrayList(u8), r: Ref) Allocator.Error!void {
-        var id_buf: [12]u8 = undefined;
-        var line_buf: [12]u8 = undefined;
-        var end_buf: [12]u8 = undefined;
-        const id = std.fmt.bufPrint(&id_buf, "{d}", .{r.change_id}) catch unreachable;
-        const line = std.fmt.bufPrint(&line_buf, "{d}", .{r.line}) catch unreachable;
-        const end = std.fmt.bufPrint(&end_buf, "{d}", .{r.end}) catch unreachable;
-
-        // No hunk and no line is a file whose body was never parsed. `#0` and
-        // `:0` would both be lies, so the path is the whole reference.
-        // Three shapes, twice: with a change id for a file in the review, and
-        // without for one being read outside it. The `#id` is a claim that
-        // this hunk changed, so a file with no hunks does not get one.
-        const tmpl = if (r.line == 0)
-            self.templates.ref_file
-        else if (r.change_id == hunk.no_id)
-            (if (r.end != 0)
-                self.templates.ref_file_range
-            else if (r.span.len > 0)
-                self.templates.ref_file_span
-            else
-                self.templates.ref_file_line)
-        else if (r.deleted)
-            self.templates.ref_hunk
-        else if (r.end != 0)
-            self.templates.ref_range
-        else if (r.span.len > 0)
-            self.templates.ref_span
-        else
-            self.templates.ref_single;
-
-        var pr_buf: [12]u8 = undefined;
-        const pr = std.fmt.bufPrint(&pr_buf, "{d}", .{self.pr_number}) catch "";
-        const vars = [_]template.Var{
-            .{ .name = "pr", .value = pr },
-            .{ .name = "change_id", .value = id },
-            .{ .name = "path", .value = r.path },
-            .{ .name = "line", .value = line },
-            .{ .name = "start", .value = line },
-            .{ .name = "end", .value = end },
-            .{ .name = "span", .value = r.span },
-        };
-        // Every reference, not just the ones a comment carries: `<CR>` sends
-        // one straight from the diff and it lands in the same agent.
-        if (self.pr_number != 0) try template.render(self.gpa, out, self.templates.ref_prefix, &vars);
-        try template.render(self.gpa, out, tmpl, &vars);
-    }
-
-    /// The lines themselves, under the reference, markers kept. `Y` exists to
-    /// paste a change into a message, and `+`/`-` is what says which side of
-    /// it a line is on - without them a mixed range reads as nonsense.
-    fn appendLines(self: *App, out: *std.ArrayList(u8)) Allocator.Error!void {
-        const f = self.current() orelse return;
-        const sel = self.selection();
-        const lo_row = if (sel) |s| s.lo else self.vp.cursor;
-        const hi_row = if (sel) |s| s.hi else self.vp.cursor;
-
-        var row = lo_row;
-        while (row <= hi_row) : (row += 1) {
-            const li = self.lineAt(row) orelse continue;
-            if (li >= f.lines.len()) continue;
-            try out.append(self.gpa, '\n');
-            try out.append(self.gpa, switch (f.lines.kind[li]) {
-                .add => '+',
-                .del => '-',
-                .context => ' ',
-            });
-            try out.appendSlice(self.gpa, f.lines.text[li]);
-        }
-    }
-
     /// Builds the payload and hands it to the loop. Nothing here talks to a
     /// bridge: `core/` and `ui/app.zig` are both testable without one, and
     /// this is the file the tests are in.
     /// How much of the line a yank takes.
-    const Extent = enum {
+    pub const Extent = enum {
         /// What is actually selected: the characters under a charwise
         /// selection, the whole lines under a linewise one.
         selection,
@@ -3789,1010 +1555,9 @@ pub const App = struct {
         lines,
     };
 
-    /// `y` and `Y`: the selected text itself, onto the clipboard.
-    ///
-    /// This is the vim key doing the vim thing, and it is separate from
-    /// `<leader>y` on purpose. `y` used to copy a *reference* - the text
-    /// wrapped in `#3 path:47` - which is what the tool is for but not what
-    /// the most-known key in vim means. The surprise was silent: nothing looks
-    /// wrong until the paste lands somewhere else, and by then the selection
-    /// is gone. Pointing at code has its own key and always did (`Enter`), so
-    /// `y` does not need to carry it too.
-    ///
-    /// Newlines are fine here. Hard rule 1 is about what `send-keys` does with
-    /// one, and this never reaches `send-keys`: `y` is the clipboard whatever
-    /// the backend is.
-    fn yank(self: *App, extent: Extent) Allocator.Error!void {
-        const f = self.current() orelse {
-            self.notice.set("nothing here to yank", .{});
-            return;
-        };
-        const sel = self.selection();
-        const lo = if (sel) |s| s.lo else self.vp.cursor;
-        const hi = if (sel) |s| s.hi else self.vp.cursor;
-
-        self.outgoing.clearRetainingCapacity();
-        var rows: u32 = 0;
-        var row = lo;
-        while (row <= hi) : (row += 1) {
-            const li = self.lineAt(row) orelse continue;
-            if (li >= f.lines.len()) continue;
-            const text = f.lines.text[li];
-
-            // The diff's sign column is lgtm's, not the file's: a yanked line
-            // pasted into an editor should compile, so the `+` goes nowhere.
-            const part = if (extent == .selection and sel != null) blk: {
-                const span = sel.?.span(row, @intCast(text.len)) orelse break :blk "";
-                break :blk text[span.lo..span.hi];
-            } else text;
-
-            if (rows > 0) try self.outgoing.append(self.gpa, '\n');
-            try self.outgoing.appendSlice(self.gpa, part);
-            rows += 1;
-        }
-
-        if (self.outgoing.items.len == 0) {
-            self.notice.set("nothing here to yank", .{});
-            return;
-        }
-        self.want_send = .copy;
-        if (self.mode == .visual) self.leaveVisual();
-    }
-
-    /// The four built-ins, for a config with no `[presets]` of its own. The
-    /// same questions the ask keys send, because someone who liked them
-    /// enough to bind a key to them will want them in the box too.
-    fn presets(self: *App) []const config.Preset {
-        if (self.presets_cfg.len > 0) return self.presets_cfg;
-        return &.{
-            .{ .name = "why", .text = "why this approach?" },
-            .{ .name = "revert", .text = "revert this, keep the rest" },
-            .{ .name = "test", .text = "add a test covering this" },
-            .{ .name = "explain", .text = "explain what this does" },
-        };
-    }
-
-    /// Opens the compose box on what `compose` would have sent outright.
-    ///
-    /// Every send goes through here now. A fixed string was the wrong shape
-    /// for the thing being said: "why this approach?" is the first half of a
-    /// sentence, and the second half - the part that says *what* looked wrong
-    /// - had nowhere to go. The reference and the question are the seed, the
-    /// caret is past them, and Enter is still what sends.
-    fn openCompose(self: *App, how: Delivery, what: What) Allocator.Error!void {
-        // With nothing to review there is nothing to point at, and the box
-        // opens empty rather than refusing. A clean tree is where a pane
-        // spends most of its day (`ui/splash.zig`), and "talk to the agent"
-        // is a thing to want there - having to make a change first before the
-        // tool would let you type is the tail wagging the dog.
-        if (self.current() == null) {
-            self.outgoing.clearRetainingCapacity();
-            self.want_send = null;
-            self.compose_to = how;
-            self.compose.start("");
-            self.preset_index = null;
-            self.mode = .note_input;
-            return;
-        }
-        // The seed is the reference and nothing else, whichever key opened the
-        // box. A canned question typed in for you is a sentence you now have
-        // to read and mostly delete - and the presets have their own key
-        // (`Ctrl-i`), which puts them in when they are wanted rather than
-        // before anyone has decided.
-        _ = what;
-        try self.buildPayload(how, .ref);
-        // `compose` sets `want_send`; the box is what decides now, so take it
-        // back and hold the delivery until Enter.
-        self.want_send = null;
-        self.compose_to = how;
-        self.compose.start(self.outgoing.items);
-        self.preset_index = null;
-        self.mode = .note_input;
-    }
-
     // -- notes ---------------------------------------------------------------
 
-    /// The line the cursor points at, as the note store counts them: the new
-    /// file's line, which is what survives a re-diff and what a reference
-    /// names. Null on a row that is chrome, or a line that exists only in HEAD.
-    const Spot2 = struct { path: []const u8, line: u32, deleted: bool = false, span: u32 = 1, rows: u32 = 1, skipped: u32 = 0 };
-
-    /// The new-file lines a selection covers, or null when it touches none.
-    /// A remark cannot span code the new file does not have.
-    const Range = struct {
-        lo: u32,
-        hi: u32,
-        rows: u32,
-        skipped: u32,
-
-        /// Lines the remark covers, which is what the store calls its span.
-        pub fn covers(self: Range) u32 {
-            return self.hi - self.lo + 1;
-        }
-    };
-
-    fn selectedRange(self: *App) ?Range {
-        const sel = self.selection() orelse return null;
-        // Both kinds: a comment anchors to whole lines, so the rows a
-        // selection touches matter and where in them it starts does not.
-        // Refusing charwise fell back to the caret's line, the last of them.
-        const f = self.current() orelse return null;
-
-        var lo: u32 = 0;
-        var hi: u32 = 0;
-        var rows: u32 = 0;
-        var skipped: u32 = 0;
-        var row = sel.lo;
-        while (row <= sel.hi) : (row += 1) {
-            rows += 1;
-            const li = self.lineAt(row) orelse {
-                skipped += 1;
-                continue;
-            };
-            if (li >= f.lines.len()) {
-                skipped += 1;
-                continue;
-            }
-            const no = f.lines.new_no[li];
-            if (no == 0) {
-                skipped += 1;
-                continue;
-            }
-            if (lo == 0 or no < lo) lo = no;
-            if (no > hi) hi = no;
-        }
-        return if (lo == 0) null else .{ .lo = lo, .hi = hi, .rows = rows, .skipped = skipped };
-    }
-
-    /// The text of a new-file line, for the anchor a comment carries across a
-    /// restart. It has to be the line the comment *attached* to, not the one
-    /// the cursor was on: a deleted line's text is not in the new file, so an
-    /// anchor taken from it would find nothing and go stale immediately.
-    fn textOfNewLine(self: *App, line: u32) []const u8 {
-        const f = self.current() orelse return "";
-        var i: u32 = 0;
-        while (i < f.lines.len()) : (i += 1) {
-            if (f.lines.new_no[i] == line) return f.lines.text[i];
-        }
-        return "";
-    }
-
-    /// Where a comment written here would attach.
-    ///
-    /// A deleted line has no line in the new file, and the store anchors to
-    /// new-file lines - so a remark about removed code used to be refused
-    /// outright. It attaches to the enclosing hunk instead, on the first line
-    /// of it that still exists, and is marked as being about the removal so
-    /// the review file and the box say which. Refusing was the honest answer
-    /// to the wrong question: "why did you take this out" is a thing a
-    /// reviewer says constantly.
-    fn commentLine(self: *App) ?Spot2 {
-        const f = self.current() orelse return null;
-        const li = self.lineAt(self.vp.cursor) orelse return null;
-        if (li >= f.lines.len()) return null;
-        const no = f.lines.new_no[li];
-        if (no != 0) {
-            // Anchored at the selection's *first* new-file line: the caret
-            // is at its bottom, and measuring from there covers one line.
-            if (self.selectedRange()) |r| return .{
-                .path = f.path(),
-                .line = r.lo,
-                .span = r.covers(),
-                .rows = r.rows,
-                .skipped = r.skipped,
-            };
-            return .{ .path = f.path(), .line = no };
-        }
-
-        // On a deletion: the first surviving line of the hunk it sits in.
-        const hi = self.rows.hunkAt(self.vp.cursor) orelse return null;
-        if (hi >= f.hunks.len) return null;
-        const h = f.hunks[hi];
-        var i = h.lo;
-        while (i < h.hi) : (i += 1) {
-            if (i < f.lines.len() and f.lines.new_no[i] != 0) {
-                return .{ .path = f.path(), .line = f.lines.new_no[i], .deleted = true };
-            }
-        }
-        // A hunk that is nothing but deletions has no surviving line at all.
-        // `new_start` is where the removed code used to begin, which is the
-        // only place left to point at.
-        if (h.new_start == 0) return null;
-        return .{ .path = f.path(), .line = h.new_start, .deleted = true };
-    }
-
-    /// `c`: the compose box, pointed at a line instead of at the agent.
-    fn commentAdd(self: *App) Allocator.Error!void {
-        const at = self.commentLine() orelse {
-            self.notice.set("nothing here to comment on", .{});
-            return;
-        };
-        self.compose_is_comment = true;
-        self.compose_comment = null;
-        self.compose_spot = at;
-        self.compose_to = .copy;
-        self.outgoing.clearRetainingCapacity();
-        self.compose.start("");
-        self.preset_index = null;
-        self.mode = .note_input;
-    }
-
-    /// `<Space>gc`: a comment box holding the selected lines in a
-    /// ```suggestion fence, so the remark is the edit rather than a
-    /// description of one. The block replaces the lines it is attached to.
-    fn commentSuggest(self: *App) Allocator.Error!void {
-        if (self.readOnly()) return;
-        const at = self.commentLine() orelse {
-            self.notice.set("nothing here to suggest a change to", .{});
-            return;
-        };
-
-        var seed: std.ArrayList(u8) = .empty;
-        defer seed.deinit(self.gpa);
-        try seed.appendSlice(self.gpa, "```suggestion\n");
-        var no = at.line;
-        while (no < at.line + @max(at.span, 1)) : (no += 1) {
-            try seed.appendSlice(self.gpa, self.textOfNewLine(no));
-            try seed.append(self.gpa, '\n');
-        }
-        try seed.appendSlice(self.gpa, "```");
-
-        self.compose_is_comment = true;
-        self.compose_comment = null;
-        self.compose_spot = at;
-        self.compose_to = .copy;
-        self.outgoing.clearRetainingCapacity();
-        self.compose.start(seed.items);
-        // Inside the fence: the reader came to change that, not to write
-        // around it.
-        self.compose.cursor = "```suggestion\n".len;
-        self.preset_index = null;
-        self.mode = .note_input;
-
-        // A selection can shrink for a good reason - a removed line has
-        // nothing to replace - but shrinking silently looks broken.
-        if (at.skipped > 0) {
-            self.notice.set("suggesting {d} of {d} selected rows: {d} are not lines in the new file", .{
-                at.span, at.rows, at.skipped,
-            });
-        }
-    }
-
-    /// The same box, seeded with what the comment already says.
-    fn commentEdit(self: *App) Allocator.Error!void {
-        const n = self.commentUnderCursor() orelse {
-            self.notice.set("no comment here", .{});
-            return;
-        };
-        self.compose_is_comment = true;
-        self.compose_comment = n.id;
-        self.compose_to = .copy;
-        self.compose.start(n.body);
-        self.preset_index = null;
-        self.mode = .note_input;
-    }
-
-    /// The note the cursor is pointing at: the one on this line, or the one
-    /// whose own row the cursor is sitting on. Both are "this note" to a
-    /// reader looking at it, and only one of them was reachable before.
-    fn commentUnderCursor(self: *App) ?*comments_mod.Comment {
-        const f = self.current() orelse return null;
-        if (self.vp.cursor < self.rows.len()) {
-            if (self.rows.items[self.vp.cursor] == .note) {
-                const ni = self.rows.items[self.vp.cursor].note;
-                var i: u32 = 0;
-                for (self.comments.list.items) |*n| {
-                    if (!std.mem.eql(u8, n.path, f.path())) continue;
-                    if (i == ni) return n;
-                    i += 1;
-                }
-                return null;
-            }
-        }
-        const at = self.commentLine() orelse return null;
-        return self.comments.at(at.path, at.line);
-    }
-
-    /// `<Space>vc`: the nearest note, opened to read and edit.
-    ///
-    /// Nearest rather than "the one under the cursor", because the reader
-    /// asking to see a note is usually near it rather than on it - the marker
-    /// caught their eye a few lines away. The one under the cursor still wins
-    /// when there is one.
-    fn commentView(self: *App, body: u16) !void {
-        if (self.commentUnderCursor() != null) return self.commentEdit();
-
-        const f = self.current() orelse {
-            self.noComments();
-            return;
-        };
-        const here = if (self.commentLine()) |at| at.line else 0;
-
-        var best: ?u32 = null;
-        for (self.comments.items()) |n| {
-            if (!std.mem.eql(u8, n.path, f.path())) continue;
-            if (best == null or dist(n.line, here) < dist(best.?, here)) best = n.line;
-        }
-        const line = best orelse {
-            // None in this file. The review-wide walk is what reaches the
-            // rest, and saying so beats silently jumping the reader elsewhere.
-            if (self.comments.len() == 0)
-                self.noComments()
-            else
-                self.notice.set("no comments in this file - `]c` finds the next one", .{});
-            return;
-        };
-        _ = self.gotoNewLine(line);
-        self.clampScroll(body);
-        try self.commentEdit();
-    }
-
-    /// The comment the overlay is highlighting, or null when it is not the
-    /// comment overlay that is open.
-    fn listSelected(self: *App) ?*comments_mod.Comment {
-        if (self.files_purpose != .comments) return null;
-        const i = self.file_list.selected(self.pick_list.items) orelse return null;
-        const list = self.comments.list.items;
-        return if (i < list.len) &list[i] else null;
-    }
-
-    /// Send the highlighted comment straight from the list, without a detour
-    /// through the box: the list is where a reader decides what still needs
-    /// saying, so it is where saying it should be possible.
-    fn listSendOne(self: *App) !void {
-        const n = self.listSelected() orelse return;
-        var buf: [compose_mod.max_bytes]u8 = undefined;
-        var flat: [compose_mod.max_bytes]u8 = undefined;
-        const one = compose_mod.flatten(&flat, n.body);
-        // The pull request comes first for the same reason the review file
-        // names it: `path:line` on somebody else's tree is a different line
-        // here.
-        const line = if (self.pr_number == 0)
-            std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one
-        else
-            std.fmt.bufPrint(&buf, "PR #{d} {s}:{d} - {s}", .{ self.pr_number, n.path, n.line, one }) catch one;
-        n.state = .sent;
-        self.comments.dirty = true;
-
-        self.closeFiles();
-        self.outgoing.clearRetainingCapacity();
-        try self.outgoing.appendSlice(self.gpa, line);
-        self.want_send = .send;
-        self.saveComments();
-        self.rebuildRows(.line) catch {};
-    }
-
-    fn listDrop(self: *App) void {
-        const n = self.listSelected() orelse return;
-        self.comments.remove(n.id);
-        self.saveComments();
-        self.buildPickList();
-        self.rebuildRows(.line) catch {};
-        if (self.comments.len() == 0) {
-            self.closeFiles();
-            self.notice.set("comment deleted - none left", .{});
-            return;
-        }
-        self.notice.set("comment deleted", .{});
-    }
-
-    /// `<Space>sc`: this one comment, into the compose box, ready to send.
-    ///
-    /// `<C-s>` is the other direction - every open comment as one file, which
-    /// is the batch the tool is built around. This is for the remark that
-    /// cannot wait for the batch: one line, the reference and the text, into
-    /// the box where it can be edited before it goes.
-    fn commentSend(self: *App) !void {
-        const n = self.commentUnderCursor() orelse {
-            self.notice.set("no comment here", .{});
-            return;
-        };
-        var buf: [compose_mod.max_bytes]u8 = undefined;
-        var flat: [compose_mod.max_bytes]u8 = undefined;
-        const body = compose_mod.flatten(&flat, n.body);
-        const seed = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, body }) catch n.body;
-
-        self.compose_is_comment = false;
-        self.compose_comment = null;
-        self.compose_to = .send;
-        self.compose.start(seed);
-        self.preset_index = null;
-        self.mode = .note_input;
-    }
-
-    fn commentDelete(self: *App) void {
-        const n = self.commentUnderCursor() orelse {
-            self.notice.set("no comment here", .{});
-            return;
-        };
-        self.comments.remove(n.id);
-        self.saveComments();
-        self.rebuildRows(.line) catch {};
-        self.notice.set("comment deleted", .{});
-    }
-
-    fn dist(a: u32, b: u32) u32 {
-        return if (a > b) a - b else b - a;
-    }
-
-    /// Puts the cursor on the row carrying a given new-file line, and says
-    /// whether there was one.
-    ///
-    /// There often is not. The diff draws hunks, not files, so a line the
-    /// reader commented on can stop being drawn when the change around it is
-    /// reverted or re-shaped - the comment is still perfectly valid, and the
-    /// row it used to sit on is gone.
-    fn gotoNewLine(self: *App, line: u32) bool {
-        const f = self.current() orelse return false;
-        var row: u32 = 0;
-        while (row < self.rows.len()) : (row += 1) {
-            const li = self.lineAt(row) orelse continue;
-            if (li < f.lines.len() and f.lines.new_no[li] == line) {
-                self.moveTo(row);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /// Shows a comment wherever it is: on its row in the diff when the line is
-    /// still drawn, and in the file itself when it is not.
-    ///
-    /// Falling back to the whole file rather than reporting failure, because
-    /// the reader picked a comment out of a list and "nothing happened" is the
-    /// one answer that tells them nothing. `<Space>d` already reads a file
-    /// outside the review; this is the same view, opened at a line.
-    fn showComment(self: *App, path: []const u8, line: u32, body: u16) !void {
-        for (self.review.files(), 0..) |f, fi| {
-            if (!std.mem.eql(u8, f.path(), path)) continue;
-            self.clearPreview();
-            if (fi != self.file_index) {
-                self.file_index = @intCast(fi);
-                try self.rebuildRows(.reset);
-            }
-            if (self.gotoNewLine(line)) {
-                self.clampScroll(body);
-                return;
-            }
-            break;
-        }
-        // Not in the review, or in it but no longer drawn: read the file.
-        var buf: [4096]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}", .{path}) catch path;
-        try self.openPreview(p);
-        if (self.preview == null) {
-            // The file itself has gone - renamed, deleted, or never on this
-            // branch. That is exactly what stale means, so the comment says so
-            // rather than being lost or silently pointing at nothing. It stays
-            // in the list, where `<C-d>` can clear it out (rule 7: the reader
-            // decides when a remark stops mattering, not the tool).
-            if (self.comments.at(path, line)) |n| {
-                if (n.state != .stale) {
-                    n.state = .stale;
-                    self.comments.dirty = true;
-                    self.saveComments();
-                }
-            }
-            var key: [32]u8 = undefined;
-            self.notice.set("{s} is gone - comment marked stale, {s} in the list deletes it", .{
-                path, self.keyFor(.comment_drop, .finder, &key),
-            });
-            return;
-        }
-        _ = self.gotoNewLine(line);
-        self.clampScroll(body);
-        self.notice.set("{s}:{d} - not in the diff, showing the file", .{ path, line });
-    }
-
-    /// `]c` / `[c`: the next note anywhere in the review, the way `]h` walks
-    /// hunks. Notes are why the tool exists; stopping at a file boundary would
-    /// leave the key unable to reach most of them.
-    fn commentStep(self: *App, delta: i32, body: u16) void {
-        if (self.comments.len() == 0) {
-            self.noComments();
-            return;
-        }
-
-        // Every comment, not only the ones on files the review contains. A
-        // comment outlives the change it was written against - the agent
-        // reverts something, the hunk goes, the remark stays - and a walk that
-        // could not reach those was a walk that hid them.
-        const here = self.spotHere();
-        var best: ?Spot = null;
-        for (self.comments.items()) |n| {
-            const at = self.spotOf(n);
-            const after = lessSpot(here, at);
-            const before_it = lessSpot(at, here);
-            if (delta > 0 and !after) continue;
-            if (delta < 0 and !before_it) continue;
-            if (best) |b| {
-                const closer = if (delta > 0) lessSpot(at, b) else lessSpot(b, at);
-                if (!closer) continue;
-            }
-            best = at;
-        }
-
-        // Nothing further that way, so come round - a review is a ring, and
-        // `]h` and `]f` already read that way.
-        const target = best orelse blk: {
-            var edge: ?Spot = null;
-            for (self.comments.items()) |n| {
-                const at = self.spotOf(n);
-                if (edge) |e| {
-                    const further = if (delta > 0) lessSpot(at, e) else lessSpot(e, at);
-                    if (!further) continue;
-                }
-                edge = at;
-            }
-            const e = edge orelse return;
-            self.notice.set("wrapped to the {s} comment", .{if (delta > 0) "first" else "last"});
-            break :blk e;
-        };
-
-        var path_buf: [4096]u8 = undefined;
-        @memcpy(path_buf[0..target.path.len], target.path);
-        self.showComment(path_buf[0..target.path.len], target.line, body) catch return;
-    }
-
-    /// Where a comment sits in the order `]c` walks: the review's files first,
-    /// in review order, then everything else by path. `line` breaks the tie.
-    const Spot = struct { bucket: u8, fi: u32, path: []const u8, line: u32 };
-
-    fn spotOf(self: *App, n: comments_mod.Comment) Spot {
-        for (self.review.files(), 0..) |f, i| {
-            if (std.mem.eql(u8, f.path(), n.path)) {
-                return .{ .bucket = 0, .fi = @intCast(i), .path = n.path, .line = n.line };
-            }
-        }
-        return .{ .bucket = 1, .fi = 0, .path = n.path, .line = n.line };
-    }
-
-    /// Where the cursor is, in the same order, so "next" means next from here.
-    fn spotHere(self: *App) Spot {
-        const f = self.current() orelse return .{ .bucket = 0, .fi = 0, .path = "", .line = 0 };
-        const line = if (self.commentLine()) |at| at.line else 0;
-        if (self.preview != null) return .{ .bucket = 1, .fi = 0, .path = f.path(), .line = line };
-        return .{ .bucket = 0, .fi = self.file_index, .path = f.path(), .line = line };
-    }
-
-    fn lessSpot(a: Spot, b: Spot) bool {
-        if (a.bucket != b.bucket) return a.bucket < b.bucket;
-        if (a.bucket == 0 and a.fi != b.fi) return a.fi < b.fi;
-        if (a.bucket == 1) {
-            const c = std.mem.order(u8, a.path, b.path);
-            if (c != .eq) return c == .lt;
-        }
-        return a.line < b.line;
-    }
-
-    /// `Ctrl-s`: the review as one file, and one line telling the agent where
-    /// it is. The point of collecting notes rather than sending each: a dozen
-    /// remarks is a dozen interruptions, or it is one file.
-    fn submitReview(self: *App) !void {
-        if (self.comments.openCount() == 0) {
-            self.notice.set("no open comments to submit", .{});
-            return;
-        }
-        self.review_n += 1;
-
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        var scope_buf: [256]u8 = undefined;
-        const written = try review_file.render(&out, self.gpa, &self.comments, self.review_n, self.reviewScope(&scope_buf));
-
-        var buf: [64]u8 = undefined;
-        const rel = review_file.path(&buf, self.review_n);
-        fs_mod.writeStateFile(self.io, rel, out.items) catch {
-            self.notice.set("could not write {s}", .{rel});
-            self.review_n -= 1;
-            return;
-        };
-        self.comments.markSent();
-        self.saveComments();
-
-        // Handing the review over is the one moment the reader has
-        // demonstrably read all of it, so it is where the mark belongs: what
-        // the agent does next is exactly what `]n` should walk. Taken after
-        // the file is written, so a failed write does not mark a review that
-        // was never sent - and not on `<Space>sc`, which sends one remark and
-        // claims nothing about the rest.
-        if (self.nav.mark_on_submit) self.review.mark() catch {};
-
-        // One line, no newline in it: hard rule 1, and the reason the notes
-        // themselves may be as long as they like.
-        //
-        // Through the template table like every other outgoing string. It was
-        // a `bufPrint` here for a long time, which made the sentence the agent
-        // receives most the only one a reader could not change.
-        var count_buf: [16]u8 = undefined;
-        const count = std.fmt.bufPrint(&count_buf, "{d}", .{written}) catch "?";
-        self.outgoing.clearRetainingCapacity();
-        try template.render(self.gpa, &self.outgoing, self.templates.submit_review, &.{
-            .{ .name = "path", .value = rel },
-            .{ .name = "count", .value = count },
-            .{ .name = "s", .value = if (written == 1) "" else "s" },
-        });
-        self.want_send = .send;
-    }
-
-    pub fn lineCount(text: []const u8) u16 {
-        var n: u16 = 1;
-        for (std.mem.trimEnd(u8, text, "\n")) |c| {
-            if (c == '\n') n += 1;
-        }
-        return n;
-    }
-
-    /// A comment's panel: the remark as written, then the hunk it sits in.
-    fn commentPanel(self: *const App, arena: Allocator, n: comments_mod.Comment) []const u8 {
-        const code = self.commentCode(arena, n.path, n.line);
-        if (code.len == 0) return arena.dupe(u8, n.body) catch "";
-        return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ n.body, code }) catch code;
-    }
-
-    /// The hunk a comment sits in, as diff text for its panel.
-    fn commentCode(self: *const App, arena: Allocator, path: []const u8, line: u32) []const u8 {
-        for (self.review.files()) |f| {
-            if (!std.mem.eql(u8, f.path(), path)) continue;
-            return diffText(arena, f, line);
-        }
-        return "";
-    }
-
-    /// Where this review's remarks live. One file per scope rather than a
-    /// field on each comment: nothing has to filter, and "my remarks on this
-    /// pull request" is a file read.
-    fn commentsPath(self: *const App, buf: []u8) []const u8 {
-        if (self.pr_number == 0) return ".lgtm/comments.jsonl";
-        return std.fmt.bufPrint(buf, ".lgtm/pr-{d}.jsonl", .{self.pr_number}) catch
-            ".lgtm/comments.jsonl";
-    }
-
-    pub fn saveComments(self: *App) void {
-        if (!self.comments.dirty) return;
-        var out: std.ArrayList(u8) = .empty;
-        defer out.deinit(self.gpa);
-        comments_mod.write(&out, self.gpa, &self.comments) catch return;
-        var buf: [64]u8 = undefined;
-        fs_mod.writeStateFile(self.io, self.commentsPath(&buf), out.items) catch return;
-        self.comments.dirty = false;
-    }
-
-    /// Puts the current scope's remarks away and brings the new scope's out.
-    fn swapComments(self: *App, number: u32) void {
-        if (self.pr_number == number) return;
-        self.saveComments();
-        self.comments.deinit();
-        self.comments = .init(self.gpa);
-        self.pr_number = number;
-        self.loadComments();
-    }
-
-    pub fn loadComments(self: *App) void {
-        // `.lgtm/notes.jsonl` is the name this file had before the feature was
-        // called comments. Read once and it is written back under the new
-        // name: renaming a concept should not lose a reader's remarks.
-        var buf: [64]u8 = undefined;
-        const path = self.commentsPath(&buf);
-        // The rename predates the scopes, so only the working tree ever wore
-        // the old name. Offering it to every scope handed one file's remarks
-        // to whichever pull request was opened first.
-        const text = fs_mod.readFile(self.io, self.gpa, path, 1 << 20) catch
-            if (self.pr_number == 0)
-                fs_mod.readFile(self.io, self.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return
-            else
-                return;
-        defer self.gpa.free(text);
-        comments_mod.read(&self.comments, text) catch {};
-        if (self.comments.len() > 0 and !fs_mod.fileExists(self.io, path)) {
-            self.comments.dirty = true;
-            self.saveComments();
-        }
-    }
-
-    fn closeCompose(self: *App) void {
-        self.compose.close();
-        self.preset_index = null;
-        self.compose_spot = null;
-        self.mode = .normal;
-    }
-
-    /// One keystroke inside the box, or inside the preset list floating over
-    /// it. Text, not actions, so it never reaches the keymap.
-    fn feedCompose(self: *App, key: event.Key, body: u16) !void {
-        if (self.preset_index) |idx| return self.feedPresets(key, idx);
-
-        // The box's own keys come from the keymap, like every other key in the
-        // tool. Text and the motions over it do not, and cannot: in a box every
-        // printable key is data, so a keymap able to bind `x` would be a keymap
-        // able to take `x` away from typing.
-        //
-        // A pending operator outranks all of it. With `d` waiting, the next key
-        // is that operator's motion and `<Esc>` cancels the operator - a
-        // binding firing there would make `d<Esc>` throw away a half-written
-        // message, which is the opposite of what `<Esc>` means in vim.
-        if (!self.compose.hasPending()) {
-            if (self.composeCommand(key)) |cmd| return self.composeDo(cmd, key, body);
-        }
-        _ = self.compose.feed(key);
-    }
-
-    /// The single-chord binding for `key` inside the box, if there is one.
-    ///
-    /// Single chords only, deliberately: a box cannot hold a prefix waiting to
-    /// see whether a sequence completes, because the key after it is usually a
-    /// letter someone is typing. A multi-chord binding in `compose` mode is
-    /// therefore ignored rather than half-honoured.
-    fn composeCommand(self: *App, key: event.Key) ?keymap.Command {
-        for (self.km.bindings) |b| {
-            if (!b.modes.has(.note_input) or b.chords.len != 1) continue;
-            const ch = b.chords[0];
-            if (ch.cp == key.codepoint and ch.ctrl == key.mods.ctrl) return b.command;
-        }
-        return null;
-    }
-
-    fn composeDo(self: *App, cmd: keymap.Command, key: event.Key, body: u16) !void {
-        switch (cmd) {
-            .compose_cancel => {
-                // One level at a time: out of insert, then out of the box.
-                if (self.compose.mode == .insert) {
-                    self.compose.toNormal();
-                    return;
-                }
-                self.compose_is_comment = false;
-                self.compose_comment = null;
-                self.closeCompose();
-            },
-            .compose_presets => self.preset_index = 0,
-            .compose_newline => self.compose.insert("\n"),
-            .compose_mention => {
-                // Only while typing: in normal mode the key is a motion's, and
-                // the picker would be a surprise rather than an offer.
-                if (self.compose.mode != .insert) return;
-                // The character goes in first, when it is one: a picker that is
-                // cancelled leaves the `@` that was typed, because it was
-                // typed. A binding moved onto a control key inserts nothing,
-                // because there is nothing to insert.
-                if (!key.mods.ctrl and key.codepoint >= 0x20) {
-                    var utf8: [4]u8 = undefined;
-                    const n = std.unicode.utf8Encode(key.codepoint, &utf8) catch 0;
-                    if (n > 0) self.compose.insert(utf8[0..n]);
-                }
-                // The compose box stays open underneath: the picker is a
-                // layer over it, not a place the reader has gone instead.
-                self.files_purpose = .mention;
-                self.buildPickList();
-                self.file_list.title = " mention a file ";
-                self.file_list.totals = null;
-                self.file_list.extra_keys = &.{};
-                self.file_list.open(0);
-                self.file_list.max_share = picker_share;
-                self.mode = .finder;
-            },
-            .compose_send_now => try self.composeSendNow(body),
-            .compose_post_now => try self.composePostNow(body),
-            .compose_submit => try self.composeSubmit(body),
-            else => {},
-        }
-    }
-
-    /// `<C-s>` from inside a comment: save it *and* send it, so a remark
-    /// that cannot wait for the batch does not have to be typed, saved,
-    /// found again and sent. It is the same key that submits the whole
-    /// review from normal mode, which reads as "hand this over" either way.
-    /// What the box holds, saved as a comment. Null when there was nothing to
-    /// save, or when the box is not holding one.
-    ///
-    /// Shared by the two keys that save and then do something with it, which
-    /// otherwise differ only in where the result goes.
-    fn saveComposedComment(self: *App, body: u16) !?u32 {
-        if (!self.compose_is_comment) return null;
-
-        var raw_buf: [compose_mod.max_bytes]u8 = undefined;
-        const typed = self.compose.text();
-        @memcpy(raw_buf[0..typed.len], typed);
-        const raw = raw_buf[0..typed.len];
-        if (raw.len == 0) {
-            self.notice.set("nothing to save", .{});
-            return null;
-        }
-        const editing = self.compose_comment;
-        const at = self.compose_spot orelse self.commentLine();
-        self.compose_is_comment = false;
-        self.compose_comment = null;
-        self.compose_spot = null;
-        self.closeCompose();
-
-        var id: u32 = 0;
-        if (editing) |eid| {
-            try self.comments.edit(eid, raw);
-            id = eid;
-        } else if (at) |spot| {
-            id = try self.comments.addFull(spot.path, spot.line, raw, self.textOfNewLine(spot.line), spot.deleted, spot.span);
-        }
-        self.saveComments();
-        self.rebuildRows(.line) catch {};
-        self.clampScroll(body);
-        return if (id == 0) null else id;
-    }
-
-    fn composeSendNow(self: *App, body: u16) !void {
-        if (!self.compose_is_comment) {
-            // Not a comment: the key means the same thing the plain send does.
-            try self.composeSubmit(body);
-            return;
-        }
-        const id = try self.saveComposedComment(body) orelse return;
-        const n = self.comments.find(id) orelse return;
-
-        // Handed over, so it is sent: it drops out of the next `review-N.md`
-        // rather than asking twice, and editing it reopens it the way editing
-        // any sent comment does.
-        n.state = .sent;
-        self.comments.dirty = true;
-        self.saveComments();
-
-        var buf: [compose_mod.max_bytes]u8 = undefined;
-        var flat: [compose_mod.max_bytes]u8 = undefined;
-        const one = compose_mod.flatten(&flat, n.body);
-        var where: [64]u8 = undefined;
-        const at = if (n.span > 1)
-            std.fmt.bufPrint(&where, "{s}:{d}-{d}", .{ n.path, n.line, n.end() }) catch n.path
-        else
-            std.fmt.bufPrint(&where, "{s}:{d}", .{ n.path, n.line }) catch n.path;
-        const line = if (self.pr_number == 0)
-            std.fmt.bufPrint(&buf, "{s} - {s}", .{ at, one }) catch one
-        else
-            std.fmt.bufPrint(&buf, "PR #{d} {s} - {s}", .{ self.pr_number, at, one }) catch one;
-        self.outgoing.clearRetainingCapacity();
-        try self.outgoing.appendSlice(self.gpa, line);
-        self.want_send = .send;
-    }
-
-    /// `<C-p>` in the box: save and post, without the detour through the list.
-    /// The same arm-then-perform the list's key uses, so the notice saying it
-    /// is happening reaches the screen before the call blocks.
-    fn composePostNow(self: *App, body: u16) !void {
-        if (!self.compose_is_comment) return;
-        if (self.postRepo() == null) {
-            self.notice.set("not reviewing a pull request", .{});
-            return;
-        }
-        const id = try self.saveComposedComment(body) orelse return;
-        const n = self.comments.find(id) orelse return;
-        self.note_len = 0;
-        self.want_post = .{ .event = .comment, .one = id };
-        self.notice.set("posting {s}:{d}...", .{ n.path, n.line });
-    }
-
-    fn composeSubmit(self: *App, body: u16) !void {
-        {
-            {
-                // Flattened here and nowhere else: hard rule 1 is about what
-                // `send-keys` does with a newline, and this is the last point
-                // where one can still exist.
-                var flat: [compose_mod.max_bytes]u8 = undefined;
-                const line = compose_mod.flatten(&flat, self.compose.text());
-                // Copied out before closing, for the same reason the prompt
-                // does it above: `closeCompose` declares the buffer empty, and
-                // a slice of it read afterwards is a slice of nothing. A note
-                // keeps its line breaks, so it needs the text rather than the
-                // flattened line.
-                var raw_buf: [compose_mod.max_bytes]u8 = undefined;
-                const typed = self.compose.text();
-                @memcpy(raw_buf[0..typed.len], typed);
-                const raw = raw_buf[0..typed.len];
-                const how = self.compose_to;
-                // Before the close, which clears it.
-                const spot = self.compose_spot;
-                self.closeCompose();
-                if (line.len == 0) {
-                    self.notice.set("nothing to send", .{});
-                    return;
-                }
-                if (self.compose_is_comment) {
-                    self.compose_is_comment = false;
-                    if (self.compose_comment) |id| {
-                        try self.comments.edit(id, raw);
-                        self.notice.set("comment updated", .{});
-                    } else if (spot orelse self.commentLine()) |at| {
-                        // The line's text goes with the note, so a restart can
-                        // find it again when the file moved underneath.
-                        _ = try self.comments.addFull(at.path, at.line, raw, self.textOfNewLine(at.line), at.deleted, at.span);
-                        {
-                            var kb: [32]u8 = undefined;
-                            self.notice.set("comment added - {s} submits the review", .{
-                                self.keyFor(.submit_review, .normal, &kb),
-                            });
-                        }
-                    }
-                    self.compose_comment = null;
-                    self.saveComments();
-                    // The note is a row now, so the layout has changed - and
-                    // the reader should still be on the line they noted, not
-                    // pushed off it by the row that just appeared under it.
-                    const on = self.commentLine();
-                    self.rebuildRows(.reset) catch {};
-                    if (on) |at| _ = self.gotoNewLine(at.line);
-                    self.clampScroll(body);
-                    return;
-                }
-                self.outgoing.clearRetainingCapacity();
-                try self.outgoing.appendSlice(self.gpa, line);
-                self.want_send = how;
-                self.clampScroll(body);
-            }
-        }
-    }
-
-    /// The `Ctrl-i` list. Escape closes it and gives the box back; Enter drops
-    /// the question in at the caret and deletes nothing.
-    fn feedPresets(self: *App, key: event.Key, idx: usize) void {
-        const list = self.presets();
-        const n = list.len;
-        switch (key.codepoint) {
-            event.code.escape => self.preset_index = null,
-            event.code.enter => {
-                if (idx < n) {
-                    // A space in front unless the caret is already after one,
-                    // so a preset dropped mid-sentence does not weld itself to
-                    // the previous word.
-                    const before = self.compose.text();
-                    const at = self.compose.cursor;
-                    if (at > 0 and before[at - 1] != ' ') self.compose.insert(" ");
-                    self.compose.insert(list[idx].text);
-                }
-                self.preset_index = null;
-            },
-            event.code.up => self.preset_index = if (idx == 0) n -| 1 else idx - 1,
-            event.code.down => self.preset_index = if (idx + 1 >= n) 0 else idx + 1,
-            'k' => self.preset_index = if (idx == 0) n -| 1 else idx - 1,
-            'j' => self.preset_index = if (idx + 1 >= n) 0 else idx + 1,
-            else => {
-                if (key.mods.ctrl and (key.codepoint == 'p')) {
-                    self.preset_index = if (idx == 0) n -| 1 else idx - 1;
-                } else if (key.mods.ctrl and (key.codepoint == 'n')) {
-                    self.preset_index = if (idx + 1 >= n) 0 else idx + 1;
-                }
-            },
-        }
-    }
-
-    fn buildPayload(self: *App, how: Delivery, what: What) Allocator.Error!void {
-        const r = self.refAt() orelse {
-            self.notice.set("nothing here to point at", .{});
-            return;
-        };
-
-        self.outgoing.clearRetainingCapacity();
-        switch (what) {
-            .ref => try self.refText(&self.outgoing, r),
-            .ref_lines => {
-                try self.refText(&self.outgoing, r);
-                try self.appendLines(&self.outgoing);
-            },
-            .ask => |tmpl| {
-                var ref: std.ArrayList(u8) = .empty;
-                defer ref.deinit(self.gpa);
-                try self.refText(&ref, r);
-                try template.render(self.gpa, &self.outgoing, tmpl, &.{
-                    .{ .name = "ref", .value = ref.items },
-                });
-            },
-        }
-        self.want_send = how;
-
-        // An operation on a selection ends it, the way an operator does in
-        // vim: the range has been used, and leaving it highlighted invites a
-        // second send of the same thing.
-        if (self.mode == .visual) self.leaveVisual();
-    }
-
-    /// The composed payload, valid until the next `compose`.
-    pub fn payload(self: *const App) []const u8 {
-        return self.outgoing.items;
-    }
+    pub const Spot = struct { bucket: u8, fi: u32, path: []const u8, line: u32 };
 
     // -- $EDITOR -------------------------------------------------------------
 
@@ -4822,7 +1587,7 @@ pub const App = struct {
         return .{ .path = f.path(), .line = f.hunks[hi].new_start };
     }
 
-    fn moveTo(self: *App, row: u32) void {
+    pub fn moveTo(self: *App, row: u32) void {
         const n = self.rows.len();
         if (n == 0) {
             self.vp.cursor = 0;
@@ -4841,11 +1606,11 @@ pub const App = struct {
     /// The text under the cursor, or empty on a row that is chrome. Every
     /// motion reads through this, so a header is a line of no characters
     /// rather than a special case at each call site.
-    fn cursorText(self: *App) []const u8 {
+    pub fn cursorText(self: *App) []const u8 {
         return self.textOfRow(self.vp.cursor);
     }
 
-    fn textOfRow(self: *App, row: u32) []const u8 {
+    pub fn textOfRow(self: *App, row: u32) []const u8 {
         const f = self.current() orelse return "";
         const li = self.lineAt(row) orelse return "";
         if (li >= f.lines.len()) return "";
@@ -4855,7 +1620,7 @@ pub const App = struct {
     /// Moves the cursor within its line. Both columns, because this is the
     /// reader saying where they want to be - the vertical motions are what
     /// keep `want_col` and let `col` give way.
-    fn setCol(self: *App, at: u32) void {
+    pub fn setCol(self: *App, at: u32) void {
         self.vp.col = at;
         self.want_col = at;
     }
@@ -4937,7 +1702,7 @@ pub const App = struct {
     /// whatever now occupies that line number, which is worse. Hard rule 7 is
     /// about not losing a reader's remark, and the honest way to keep it is to
     /// not take it.
-    fn readOnly(self: *App) bool {
+    pub fn readOnly(self: *App) bool {
         const turn = self.review.viewing orelse return false;
         var k: [32]u8 = undefined;
         self.notice.set("turn {d} is read only - {s} returns to the working tree", .{
@@ -4946,1070 +1711,8 @@ pub const App = struct {
         return true;
     }
 
-    /// The turn list: what the agent has written, one row per turn.
-    ///
-    /// Built from the commit chain rather than from parsed diffs
-    ///, which is what keeps it two subprocesses whatever
-    /// the length of the session. `Enter` shows that turn, so the list is a
-    /// selector and the diff view is the viewer - there is no second display
-    /// of files and hunks anywhere in this feature.
-    fn openTurnList(self: *App) !void {
-        if (self.snap == null) {
-            self.notice.set("snapshots are off here - no turns to list", .{});
-            return;
-        }
-        // Folded again each time it is opened. A fold the reader expanded once
-        // to find something should not still be expanded tomorrow morning,
-        // which is the state the fold exists for.
-        self.turns_expanded = false;
-        if (!self.fillTurnRows()) return;
-
-        self.files_purpose = .turns;
-        self.file_list.title = " turns ";
-        self.file_list.totals = null;
-        self.file_list.extra_keys = &.{};
-        // Opened on the row the reader is already looking at, rather than at an
-        // arbitrary top.
-        var at: u32 = 0;
-        for (self.pick_list.items, 0..) |row, i| {
-            if (row.current) at = @intCast(i);
-        }
-        self.file_list.open(at);
-        self.mode = .finder;
-    }
-
-    /// The same rows again, with the fold in whatever state it is now.
-    ///
-    /// Separate from opening because expanding is not opening: the overlay
-    /// stays where it is, the filter keeps what has been typed, and only the
-    /// rows underneath change. The selection is clamped rather than reset -
-    /// the list only ever grows here, so the row the reader was on is still
-    /// there and usually still under the cursor.
-    fn rebuildTurns(self: *App) void {
-        _ = self.fillTurnRows();
-        // The list only ever grows here, so the row the reader was on is still
-        // there; `move(0)` re-narrows the selection against the new rows
-        // without moving it.
-        self.file_list.move(self.pick_list.items, 0);
-    }
-
-    /// Reads the timeline and lays the rows out. False when there is nothing
-    /// to show and the caller has already been told why.
-    fn fillTurnRows(self: *App) bool {
-        const store = if (self.snap) |*s| s else return false;
-        if (store.state.latest_turn == 0 and !store.state.has_baseline) {
-            self.notice.set("no turns yet - one is taken when the agent stops writing", .{});
-            return false;
-        }
-
-        // The files carrying a comment the reader has already sent. A turn
-        // that touched one of them is the agent answering them, as against
-        // doing something else - which is the distinction `FEATURES.md` 1.4 is
-        // entirely about, and half of `SPEC.md` open question 5.
-        //
-        // Distinct paths, because ten comments on one file is one file. Held
-        // in the pick arena, which is reset just below and then rebuilt - so
-        // this is gathered before the reset rather than after it.
-        var watching: std.ArrayList([]const u8) = .empty;
-        defer watching.deinit(self.gpa);
-        for (self.comments.items()) |n| {
-            if (n.state != .sent) continue;
-            var seen = false;
-            for (watching.items) |w| {
-                if (std.mem.eql(u8, w, n.path)) seen = true;
-            }
-            if (!seen) watching.append(self.gpa, n.path) catch {};
-        }
-
-        const read = timeline.read(self.gpa, self.io, store.state.name(), store.state.latest_turn, watching.items) catch {
-            self.notice.set("could not read the timeline", .{});
-            return false;
-        };
-        defer self.gpa.free(read.text);
-        defer self.gpa.free(read.turns);
-
-        self.pick_list.clearRetainingCapacity();
-        self.pick_turns.clearRetainingCapacity();
-        _ = self.pick_arena.reset(.retain_capacity);
-        const arena = self.pick_arena.allocator();
-        const now_s: i64 = @intCast(@divFloor(
-            std.Io.Timestamp.now(self.io, .real).toNanoseconds(),
-            std.time.ns_per_s,
-        ));
-
-        // The working tree, pinned at the top. The way back has to be in the
-        // same list as the way out, or the reader is somewhere with no visible
-        // exit - the one thing a history view must never be.
-        var here: u32 = 0;
-        if (self.review.viewing == null) here = 0;
-        self.pick_list.append(self.gpa, .{
-            .path = arena.dupe(u8, "│ working tree  now") catch "working tree",
-            .added = 0,
-            .removed = 0,
-            .in_review = false,
-            .plain = true,
-            .current = self.review.viewing == null,
-        }) catch return false;
-        self.pick_turns.append(self.gpa, std.math.maxInt(u32)) catch return false;
-
-        var age_buf: [24]u8 = undefined;
-        // One row per run of folded turns, not one per turn: the count is the
-        // whole point, and a `⋮` between every pair would be longer than the
-        // list it replaced.
-        const marked = store.state.reviewed_turn;
-        var folded: u32 = 0;
-        var i: usize = 0;
-        while (i < read.turns.len) : (i += 1) {
-            const turn = read.turns[i];
-            if (!self.turnKept(turn.number, i, store.state.latest_turn, marked)) {
-                folded += 1;
-                continue;
-            }
-            if (folded > 0) {
-                self.pick_list.append(self.gpa, .{
-                    .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
-                        folded,
-                        if (folded == 1) "" else "s",
-                    }) catch "⋮",
-                    .added = 0,
-                    .removed = 0,
-                    .in_review = false,
-                    .plain = true,
-                }) catch return false;
-                self.pick_turns.append(self.gpa, elided_row) catch return false;
-                folded = 0;
-            }
-            // A run of turns over the same file, drawn as one row. `git log`
-            // gives them newest first, so the run runs forwards from here and
-            // `turn` is its newest member - which is the age worth showing and
-            // the state the work ended at.
-            var run_end = i;
-            var run_added = turn.added;
-            var run_removed = turn.removed;
-            while (run_end + 1 < read.turns.len and
-                self.turnKept(read.turns[run_end + 1].number, run_end + 1, store.state.latest_turn, marked) and
-                self.runsWith(turn, read.turns[run_end + 1], marked))
-            {
-                run_end += 1;
-                run_added +|= read.turns[run_end].added;
-                run_removed +|= read.turns[run_end].removed;
-            }
-            if (run_end > i) {
-                self.pick_list.append(self.gpa, .{
-                    .path = std.fmt.allocPrint(arena, "{s} {d}-{d}  {s}  {s}  ×{d}", .{
-                        self.glyphs.run_mark,
-                        read.turns[run_end].number,
-                        turn.number,
-                        turn.path,
-                        timeline.age(&age_buf, turn.when_s, now_s),
-                        run_end - i + 1,
-                    }) catch "run",
-                    .added = run_added,
-                    .removed = run_removed,
-                    // The counts are the run's, summed, and they are real -
-                    // unlike the `⋮` row's, which stands for turns whose
-                    // numbers it is not adding up.
-                    .in_review = true,
-                    .icon_path = arena.dupe(u8, turn.path) catch "",
-                }) catch return false;
-                self.pick_turns.append(self.gpa, run_row) catch return false;
-                i = run_end;
-                continue;
-            }
-
-            const shown = turnLabel(arena, turn, store, &age_buf, now_s, self.glyphs);
-            self.pick_list.append(self.gpa, .{
-                .path = shown,
-                // The baseline is not a change - it is what was there before
-                // any were made - so it gets no counts. `+4 -0` beside it
-                // would dress up "this is the starting state" as "the agent
-                // added four lines", which is the same mistake `+0 -0` on an
-                // unchanged file was.
-                .added = if (turn.number == 0) 0 else turn.added,
-                .removed = if (turn.number == 0) 0 else turn.removed,
-                .in_review = turn.number != 0,
-                // The icon comes from the file the turn mostly touched, not
-                // from the composed label. A turn that changed nothing, and
-                // the baseline, name no file and get none.
-                // Copied, not borrowed. `turn.path` points into the `git log`
-                // output that this function frees on the way out, and the row
-                // outlives the call - the label survived only because
-                // `allocPrint` had already copied it. A dangling path read as
-                // a generic file icon instead of a Zig one, which is how it
-                // was noticed rather than how it would usually show.
-                .icon_path = if (turn.number == 0) "" else arena.dupe(u8, turn.path) catch "",
-                // Typing a number in this list means a turn, not a digit that
-                // happens to appear in an age or a count.
-                .key = turn.number,
-                .plain = turn.number == 0 or turn.files == 0,
-                .current = if (self.review.viewing) |v| v == turn.number else false,
-            }) catch return false;
-            self.pick_turns.append(self.gpa, turn.number) catch return false;
-        }
-        // A session whose oldest turns are folded and whose baseline is gone -
-        // pruned by `[snapshot] keep` - ends on the fold rather than dropping
-        // the count that says how much is missing.
-        if (folded > 0) {
-            self.pick_list.append(self.gpa, .{
-                .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
-                    folded,
-                    if (folded == 1) "" else "s",
-                }) catch "⋮",
-                .added = 0,
-                .removed = 0,
-                .in_review = false,
-                .plain = true,
-            }) catch return false;
-            self.pick_turns.append(self.gpa, elided_row) catch return false;
-        }
-        return true;
-    }
-
-    /// Asks whether to overwrite a file with the version in the turn on screen.
-    ///
-    /// Every refusal here is a case where writing would be wrong rather than
-    /// merely unwanted: no turn to restore from, no file under the cursor, a
-    /// turn that never contained it, a file already identical, a path that
-    /// could reach outside the repository, or a store that cannot take the
-    /// snapshot this is only safe because of.
-    fn restoreAsk(self: *App) !void {
-        const turn = self.review.viewing orelse {
-            var k: [32]u8 = undefined;
-            self.notice.set("nothing to restore from - {s} walks back to a turn", .{
-                self.keyFor(.prev_turn, .normal, &k),
-            });
-            return;
-        };
-        const f = self.current() orelse return;
-        const path = f.path();
-        if (!snapshot.writablePath(path)) {
-            self.notice.set("refusing to write {s}", .{path});
-            return;
-        }
-
-        const ref = self.review.viewRef() orelse return;
-        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{path}) catch {
-            self.notice.set("could not read {s} from turn {d}", .{ path, turn });
-            return;
-        };
-        defer {
-            for (blobs) |b| self.gpa.free(b);
-            self.gpa.free(blobs);
-        }
-        if (blobs.len == 0 or blobs[0].len == 0) {
-            self.notice.set("turn {d} had no {s}", .{ turn, path });
-            return;
-        }
-
-        // Already identical is not a no-op worth performing: it would take a
-        // snapshot and rewrite a file to the bytes already in it, and then
-        // report success for having done nothing.
-        const on_disk = fs_mod.readFile(self.io, self.gpa, path, 1 << 24) catch &.{};
-        defer if (on_disk.len > 0) self.gpa.free(on_disk);
-        if (std.mem.eql(u8, on_disk, blobs[0])) {
-            self.notice.set("{s} is already what turn {d} had", .{ path, turn });
-            return;
-        }
-
-        var pending: @TypeOf(self.pending_restore.?) = .{ .turn = turn };
-        const n = @min(path.len, pending.path.len);
-        @memcpy(pending.path[0..n], path[0..n]);
-        pending.path_len = @intCast(n);
-        self.pending_restore = pending;
-        self.notice.set("overwrite {s} with turn {d}? y to confirm, any other key cancels", .{ path, turn });
-    }
-
-    /// The answer. Anything but `y` is no, because the safe reading of an
-    /// ambiguous keystroke is the one that does not write.
-    fn restoreAnswer(self: *App, key: event.Key, body: u16) !void {
-        const ask = self.pending_restore.?;
-        self.pending_restore = null;
-        if (key.codepoint != 'y' or key.mods.ctrl) {
-            self.notice.set("restore cancelled - nothing was written", .{});
-            return;
-        }
-
-        // Snapshot first, always. Without one this would be
-        // the only unrecoverable action in the tool, so a store that cannot
-        // take it is a reason to refuse rather than to proceed carefully.
-        if (!self.snapshotTurn()) {
-            self.notice.set("refusing: could not snapshot first, so this could not be undone", .{});
-            return;
-        }
-        const undo_turn = if (self.snap) |s| s.state.latest_turn else 0;
-
-        const ref_turn = ask.turn;
-        var ref_buf: [128]u8 = undefined;
-        const store = if (self.snap) |*s| s else return;
-        const ref = gitobj.refFor(&ref_buf, store.state.name(), ref_turn) catch return;
-
-        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{ask.name()}) catch {
-            self.notice.set("could not read turn {d}", .{ref_turn});
-            return;
-        };
-        defer {
-            for (blobs) |b| self.gpa.free(b);
-            self.gpa.free(blobs);
-        }
-        if (blobs.len == 0) return;
-
-        fs_mod.writeFile(self.io, ask.name(), blobs[0]) catch {
-            self.notice.set("could not write {s}", .{ask.name()});
-            return;
-        };
-
-        // What `u` will need: the turn holding the state this just replaced,
-        // and a hash of what was written, so undoing can tell "put back what
-        // I replaced" from "overwrite whatever has happened since".
-        var mem: @TypeOf(self.last_restore.?) = .{
-            .turn = undo_turn,
-            .wrote = std.hash.Wyhash.hash(0, blobs[0]),
-        };
-        const nm = @min(ask.path_len, mem.path.len);
-        @memcpy(mem.path[0..nm], ask.name()[0..nm]);
-        mem.path_len = @intCast(nm);
-        self.last_restore = mem;
-
-        // Back to the working tree, because that is what just changed and it
-        // is the only place the reader can act on it.
-        self.review.showWorking();
-        try self.rediff();
-        self.clampScroll(body);
-        var k: [32]u8 = undefined;
-        self.notice.set("restored {s} from turn {d} - {s} to turn {d} undoes it", .{
-            ask.name(), ref_turn, self.keyFor(.prev_turn, .normal, &k), undo_turn,
-        });
-    }
-
-    /// Puts back what the last restore replaced.
-    ///
-    /// No confirmation, unlike `R`: the reader is undoing something they chose
-    /// a moment ago, and this snapshots first like every other write, so it is
-    /// as reversible as the thing it reverses. What it does check is that the
-    /// file is still what the restore left there - if something has changed it
-    /// since, this would not be an undo, and the reader should be told rather
-    /// than have the change taken from under them.
-    fn undoRestore(self: *App, body: u16) !void {
-        const last = self.last_restore orelse {
-            var k: [32]u8 = undefined;
-            self.notice.set("nothing to undo - {s} restores a file from a turn", .{
-                self.keyFor(.restore_file, .normal, &k),
-            });
-            return;
-        };
-        if (self.readOnly()) return;
-
-        const on_disk = fs_mod.readFile(self.io, self.gpa, last.name(), 1 << 24) catch &.{};
-        defer if (on_disk.len > 0) self.gpa.free(on_disk);
-        if (std.hash.Wyhash.hash(0, on_disk) != last.wrote) {
-            self.last_restore = null;
-            self.notice.set("{s} has changed since - undoing would overwrite that, not the restore", .{last.name()});
-            return;
-        }
-
-        const store = if (self.snap) |*s| s else return;
-        var ref_buf: [128]u8 = undefined;
-        const ref = gitobj.refFor(&ref_buf, store.state.name(), last.turn) catch return;
-        const blobs = snapshot.readPaths(self.gpa, self.io, ref, &.{last.name()}) catch {
-            self.notice.set("turn {d} is gone - nothing to put back", .{last.turn});
-            self.last_restore = null;
-            return;
-        };
-        defer {
-            for (blobs) |b| self.gpa.free(b);
-            self.gpa.free(blobs);
-        }
-        if (blobs.len == 0) {
-            self.last_restore = null;
-            return;
-        }
-
-        // Snapshot first, the same rule every write here obeys - which is also
-        // what makes the *other* direction available afterwards.
-        if (!self.snapshotTurn()) {
-            self.notice.set("refusing: could not snapshot first, so this could not be undone", .{});
-            return;
-        }
-        const back_turn = store.state.latest_turn;
-
-        fs_mod.writeFile(self.io, last.name(), blobs[0]) catch {
-            self.notice.set("could not write {s}", .{last.name()});
-            return;
-        };
-        const name = last.name();
-        var name_buf: [4096]u8 = undefined;
-        @memcpy(name_buf[0..name.len], name);
-        const shown = name_buf[0..name.len];
-
-        // One step. A second `u` has nothing to undo; going forward again is
-        // the move the notice names, which is the mechanism this shortcuts.
-        self.last_restore = null;
-        try self.rediff();
-        self.clampScroll(body);
-        var k: [32]u8 = undefined;
-        self.notice.set("undid the restore of {s} - {s} to turn {d} puts it back", .{
-            shown, self.keyFor(.prev_turn, .normal, &k), back_turn,
-        });
-    }
-
-    /// The comment list's own footer keys, read from the keymap so a remap
-    /// moves the footer with the binding.
-    fn commentListKeys(self: *App, arena: Allocator) []const keytext.HelpEntry {
-        var out: std.ArrayList(keytext.HelpEntry) = .empty;
-        // A footer naming a key that does nothing is worse than a shorter one,
-        // and posting needs a pull request to post to.
-        const want = [_]struct { cmd: keymap.Command, desc: []const u8, pr_only: bool = false }{
-            .{ .cmd = .comment_send_one, .desc = "send" },
-            .{ .cmd = .comment_send_all, .desc = "send all" },
-            .{ .cmd = .comment_post_one, .desc = "post", .pr_only = true },
-            .{ .cmd = .comment_drop, .desc = "del" },
-        };
-        for (want) |w| {
-            if (w.pr_only and self.pr_number == 0) continue;
-            var buf: [32]u8 = undefined;
-            const keys = keytext.firstKeyFor(self.km.bindings, w.cmd, .finder, &buf);
-            if (keys.len == 0) continue;
-            out.append(arena, .{
-                .keys = arena.dupe(u8, keys) catch continue,
-                .desc = w.desc,
-            }) catch continue;
-        }
-        return out.toOwnedSlice(arena) catch &.{};
-    }
-
-    /// The ref a turn is diffed against: the turn before it, or HEAD for the
-    /// baseline, which has nothing before it and whose meaning is exactly "what
-    /// was uncommitted before the agent ran".
-    fn baseRefFor(self: *App, turn: u32, buf: []u8) []const u8 {
-        if (turn == 0) return "HEAD";
-        const store = if (self.snap) |*s| s else return "HEAD";
-        const ref = gitobj.refFor(buf[0 .. buf.len - 1], store.state.name(), turn) catch return "HEAD";
-        // `^` rather than turn - 1: git knows what this commit's parent is, and
-        // asking it avoids assuming the numbering is dense. A session whose
-        // first turn has no baseline before it has no parent at all, and
-        // `regenerate` falls back to HEAD when the diff refuses.
-        buf[ref.len] = '^';
-        return buf[0 .. ref.len + 1];
-    }
-
-    /// Shows one turn by number, or the working tree for the sentinel.
-    ///
-    /// The same two states `]t` walks between, reached by choosing rather than
-    /// by stepping - which is the whole of what the list adds. Nothing here is
-    /// a third way to be looking at something.
-    fn showTurnNumber(self: *App, turn: u32, body: u16) !void {
-        const store = if (self.snap) |*s| s else return;
-        if (turn == std.math.maxInt(u32)) {
-            if (self.review.viewing == null) return;
-            self.review.showWorking();
-            try self.rediff();
-            self.clampScroll(body);
-            self.notice.set("back to the working tree", .{});
-            return;
-        }
-
-        var buf: [128]u8 = undefined;
-        const ref = gitobj.refFor(&buf, store.state.name(), turn) catch return;
-        var base_buf: [128]u8 = undefined;
-        self.review.showTurn(turn, ref, self.baseRefFor(turn, &base_buf));
-        try self.rediff();
-        self.clampScroll(body);
-        if (self.review.viewing == null) {
-            self.notice.set("turn {d} is gone", .{turn});
-            return;
-        }
-        var k: [32]u8 = undefined;
-        const back = self.keyFor(.next_turn, .normal, &k);
-        if (turn == 0) {
-            self.notice.set("the baseline - before the agent ran, {s} returns", .{back});
-            return;
-        }
-        self.notice.set("turn {d} - read only, {s} returns", .{ turn, back });
-    }
-
-    /// One turn's row. The rail, then which turn, what it touched, when, and
-    /// how big - four columns and no more.
-    /// What `pick_turns` holds for the `⋮` row: not a turn, and not the
-    /// working tree's `maxInt` either, so opening it can be told from opening
-    /// anything else.
-    const elided_row: u32 = std.math.maxInt(u32) - 1;
-
-    /// What `pick_turns` holds for a folded *run*. Distinct from `elided_row`
-    /// only so the two can say different things if they ever need to; both
-    /// open by expanding.
-    const run_row: u32 = std.math.maxInt(u32) - 2;
-
-    /// Whether two adjacent turns are one piece of work.
-    ///
-    /// Four turns in a row on `app.zig` is one thing that took four tries, and
-    /// drawing it as four rows spends four lines saying one thing. smartlog
-    /// does not fold adjacent commits because a commit is individually
-    /// meaningful; an agent's turn is not, which is the whole difference this
-    /// list has to work with.
-    ///
-    /// Never across a turn that has something of its own to say: the mark, the
-    /// turn on screen, the baseline, a self-revert, a reply, or a turn that
-    /// changed nothing. Folding one of those away would hide the very thing
-    /// the row was worth drawing for.
-    fn runsWith(self: *const App, a: timeline.Turn, b: timeline.Turn, marked: u32) bool {
-        if (self.turns_expanded) return false;
-        if (a.files == 0 or b.files == 0) return false;
-        if (a.number == 0 or b.number == 0) return false;
-        if (a.reverted or b.reverted or a.answered or b.answered) return false;
-        if (marked > 0 and (a.number == marked or b.number == marked)) return false;
-        if (self.review.viewing) |v| {
-            if (v == a.number or v == b.number) return false;
-        }
-        return a.path.len > 0 and std.mem.eql(u8, a.path, b.path);
-    }
-
-    /// How many of the newest turns are always drawn.
-    ///
-    /// Enough to answer "what did it just do" without scrolling, which is what
-    /// the list is opened for nine times in ten. Small enough that the two
-    /// pinned ends and the mark are on the same screen as it.
-    const turns_shown: usize = 8;
-
-    /// Whether turn `n` survives the fold.
-    ///
-    /// Four kinds of row do. The **newest few**, because that is the question
-    /// being asked. The **mark**, because it is where the reader stopped and
-    /// `✓` is meaningless if the row it sits on is gone. The **baseline**,
-    /// because it is one of the two ends and the one snapshot nothing else can
-    /// reconstruct. And the **turn on screen**, because eliding the row the
-    /// reader is standing on is the one thing a history view must never do.
-    ///
-    /// Everything else is the middle of a long session, which is what the
-    /// count replaces.
-    ///
-    /// This is elision by *distance*, not by read state. `SNAPSHOTS.md` 5.3b
-    /// folds the turns before the mark on the grounds that they have been
-    /// dealt with, and that is right for the nineteen-turn session it draws
-    /// and wrong for a real one: a mark that has stood since the morning
-    /// leaves every turn unread, and the fold fires on nothing at all. The two
-    /// ends are what a reader navigates from, which is what smartlog actually
-    /// elides around.
-    fn turnKept(self: *const App, n: u32, index: usize, newest: u32, marked: u32) bool {
-        _ = newest;
-        if (self.turns_expanded) return true;
-        if (index < turns_shown) return true;
-        if (n == 0) return true;
-        if (marked > 0 and n == marked) return true;
-        if (self.review.viewing) |v| {
-            if (v == n) return true;
-        }
-        return false;
-    }
-
-    fn turnLabel(
-        arena: Allocator,
-        turn: timeline.Turn,
-        store: *const snapshot.Store,
-        age_buf: []u8,
-        now_s: i64,
-        glyphs: theme_mod.Glyphs,
-    ) []const u8 {
-        // The rail smartlog and undotree both draw, one column wide, straight
-        // until a restore forks it (§5.3a). `✓` is the mark: read up to here.
-        //
-        // No `@` for the turn on screen, though 5.3b asked for one. The list
-        // widget already marks the row the reader is on, in every list in the
-        // tool, and a second indicator saying the same thing in the next column
-        // is worse than either alone. Borrowing smartlog's spelling was not
-        // worth contradicting the tool's own.
-        const rail: []const u8 = if (turn.number == store.state.reviewed_turn and turn.number > 0) "✓" else "│";
-        const when = timeline.age(age_buf, turn.when_s, now_s);
-
-        if (turn.number == 0) {
-            return std.fmt.allocPrint(arena, "{s} baseline   before the agent ran  {s}", .{ rail, when }) catch "baseline";
-        }
-        // A turn that changed nothing still happened - the snapshot restore
-        // takes before it writes is one, and so is any quiet period the agent
-        // spent thinking. It gets a word rather than a blank path and "0
-        // files", which reads as a row that failed to load.
-        if (turn.files == 0) {
-            return std.fmt.allocPrint(arena, "{s} {d: <3} no change  {s}", .{ rail, turn.number, when }) catch "turn";
-        }
-        // Appended rather than given a column of its own. A column would cost
-        // one everywhere to say something on the rare row, and this is rare by
-        // nature - an agent walking its own work back is the exception the
-        // marker exists to catch, not the rule.
-        const undone = if (turn.reverted)
-            std.fmt.allocPrint(arena, "  {s} {d}", .{ glyphs.revert_mark, turn.reverted_to }) catch ""
-        else
-            "";
-        // The pair `SNAPSHOTS.md` 5.3c asks for: one says the agent went
-        // backwards, the other says it was listening.
-        const replied = if (turn.answered) glyphs.answer_mark else "";
-        return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}{s}{s}", .{
-            rail,
-            turn.number,
-            turn.path,
-            when,
-            turn.files,
-            if (turn.files == 1) "" else "s",
-            undone,
-            replied,
-        }) catch "turn";
-    }
-
-    /// Walks the timeline: one turn back, or forward to the working tree.
-    ///
-    /// The working tree is a position in the walk rather than a place outside
-    /// it, so `]t` from the newest turn lands there and there is always a way
-    /// forward. Nothing here is a jump into a different mode: it is the same
-    /// review with a different right-hand side.
-    fn turnStep(self: *App, delta: i32, body: u16) !void {
-        const store = if (self.snap) |*s| s else {
-            self.notice.set("snapshots are off here - no turns to walk", .{});
-            return;
-        };
-        const latest = store.state.latest_turn;
-        if (latest == 0) {
-            self.notice.set("no turns yet - one is taken when the agent stops writing", .{});
-            return;
-        }
-
-        // Null is the working tree, and it sits one past the newest turn.
-        const here: i64 = if (self.review.viewing) |t| @intCast(t) else @as(i64, latest) + 1;
-        const want = here + delta;
-
-        if (want > latest) {
-            if (self.review.viewing == null) {
-                self.notice.set("already on the working tree", .{});
-                return;
-            }
-            self.review.showWorking();
-            try self.rediff();
-            self.clampScroll(body);
-            self.notice.set("back to the working tree", .{});
-            return;
-        }
-        // The floor is the baseline when there is one and turn 1 when there is
-        // not - a session that started on a clean tree has nothing before its
-        // first turn, and walking to a ref that was never written would report
-        // it as missing rather than as absent by design.
-        const oldest = store.oldestTurn();
-        if (want < oldest) {
-            if (oldest == 0)
-                self.notice.set("the baseline is as far back as it goes", .{})
-            else
-                self.notice.set("turn 1 is the oldest recorded - no baseline for this session", .{});
-            return;
-        }
-
-        const turn: u32 = @intCast(want);
-        var buf: [128]u8 = undefined;
-        const ref = gitobj.refFor(&buf, store.state.name(), turn) catch {
-            self.notice.set("cannot name that turn", .{});
-            return;
-        };
-        var base_buf: [128]u8 = undefined;
-        self.review.showTurn(turn, ref, self.baseRefFor(turn, &base_buf));
-        try self.rediff();
-        self.clampScroll(body);
-        if (self.review.viewing == null) {
-            // `regenerate` gave up on the ref - pruned, or never written.
-            self.notice.set("turn {d} is gone", .{turn});
-            return;
-        }
-        var k: [32]u8 = undefined;
-        const back = self.keyFor(.next_turn, .normal, &k);
-        // "returns" only when there is nothing between here and the present. A
-        // turn taken while the reader was parked puts one there, and the
-        // message then promised something the key would not do.
-        const forward: []const u8 = if (turn >= latest) "returns to the working tree" else "goes forward";
-        if (turn == 0) {
-            // Not "turn 0". It is the tree as it was before the agent ran, and
-            // that is the only thing about it worth saying.
-            self.notice.set("the baseline - before the agent ran, {s} {s}", .{ back, forward });
-            return;
-        }
-        self.notice.set("turn {d} of {d} - read only, {s} {s}", .{ turn, latest, back, forward });
-    }
-
-    /// Records the working tree as a turn, because the agent has stopped.
-    ///
-    /// The same call `m` makes, with a different reason and without touching
-    /// `reviewed_turn`: a turn nobody has read must not mark itself read, or
-    /// the gutter would go blank exactly when it had something to say.
-    /// Every path the snapshot has to carry, which is not the review's list.
-    ///
-    /// `[review] ignore` keeps a file off the screen; it must never keep one
-    /// out of the safety net. Staging only what the review shows wrote HEAD's
-    /// copy of an ignored file into the turn - or nothing at all, for an
-    /// untracked one - so a restore silently reverted or deleted work the
-    /// reader had never been shown. Ask git, which cannot drift from the
-    /// filter because it has never heard of it.
-    ///
-    /// Caller frees with `git.freePaths`.
-    fn snapshotPaths(self: *App) ?[][]const u8 {
-        return git.snapshotPaths(self.gpa, self.io) catch null;
-    }
-
-    fn snapshotTurn(self: *App) bool {
-        var store = &(if (self.snap) |*s| s else return false).*;
-        const paths = self.snapshotPaths() orelse return false;
-        defer git.freePaths(self.gpa, paths);
-        if (paths.len == 0) return false;
-
-        return store.take(paths, "turn") != null;
-    }
-
-    /// Writes the mark to a ref, so it outlives the process. Returns whether it
-    /// stuck: snapshots are off in a directory git does not own, and the mark
-    /// is still perfectly good for this session without them.
-    fn snapshotMark(self: *App) bool {
-        var store = &(if (self.snap) |*s| s else return false).*;
-        const paths = self.snapshotPaths() orelse return false;
-        defer git.freePaths(self.gpa, paths);
-        if (paths.len == 0) return false;
-
-        if (store.take(paths, "mark") == null) return false;
-        store.markReviewed();
-        return true;
-    }
-
-    /// Records what was already uncommitted before the agent ran.
-    ///
-    /// After the first diff, because that is when the path list exists, and
-    /// once - `Store.baseline` refuses a session that already has one. Silent:
-    /// it is insurance, and insurance that announces itself is noise until the
-    /// day it is not.
-    pub fn takeBaseline(self: *App) void {
-        var store = &(if (self.snap) |*s| s else return).*;
-        // No early return on a clean tree. The baseline is what gives the
-        // first turn a parent to be diffed from, and without one it opens
-        // empty - which is what a clean start used to do.
-        const paths = self.snapshotPaths() orelse return;
-        defer git.freePaths(self.gpa, paths);
-        _ = store.baseline(paths);
-    }
-
-    /// Picks the mark up again after a restart, once there are files to attach
-    /// it to. Silent either way: a mark that could not be restored leaves the
-    /// session in the state it would have started in regardless.
-    pub fn restoreMark(self: *App) void {
-        if (self.mark_restored) return;
-        self.mark_restored = true;
-        const store = if (self.snap) |*s| s else return;
-        var buf: [128]u8 = undefined;
-        const ref = store.reviewedRef(&buf) orelse return;
-        self.review.restoreMark(ref, store.state.reviewed_turn);
-    }
-
-    /// What a command is bound to right now, for a message that has to name a
-    /// key. Written into `buf` by the caller so this allocates nothing, and
-    /// read from the keymap so `[keys]` cannot leave a notice telling the
-    /// reader to press something they have remapped away.
-    fn noComments(self: *App) void {
-        var key: [32]u8 = undefined;
-        self.notice.set("no comments yet - {s} writes one", .{
-            self.keyFor(.comment_add, .normal, &key),
-        });
-    }
-
-    fn keyFor(self: *App, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
+    pub fn keyFor(self: *App, cmd: keymap.Command, mode: event.Mode, buf: []u8) []const u8 {
         return keytext.firstKeyFor(self.km.bindings, cmd, mode, buf);
-    }
-
-    /// Walks the changes that arrived since the mark, across the whole review.
-    ///
-    /// By row rather than by hunk. What the reader came back for is the twelve
-    /// lines that answer the last comment, and a hunk that happens to contain
-    /// one of them is a coarser answer than the line itself - which is the
-    /// same reason `]h` exists separately rather than this replacing it.
-    fn freshStep(self: *App, delta: i32) !void {
-        if (!self.review.mark_at.taken()) {
-            var key: [32]u8 = undefined;
-            self.notice.set("no mark yet - {s} sets one", .{
-                keytext.firstKeyFor(self.km.bindings, .mark_here, .normal, &key),
-            });
-            return;
-        }
-        if (self.review.freshCount() == 0) {
-            self.notice.set("nothing new since the mark", .{});
-            return;
-        }
-
-        if (self.freshFrom(self.vp.cursor, delta)) |row| {
-            self.moveTo(row);
-            return;
-        }
-
-        // Nothing further this way in this file. A review is a ring, and the
-        // ring is the whole review: the change the reader is looking for is
-        // as likely to be in the next file as in this one.
-        const count = self.files().len;
-        if (count > 1) {
-            var tries: usize = 0;
-            while (tries < count) : (tries += 1) {
-                try self.stepFile(delta);
-                if (self.freshEdge(delta)) |row| {
-                    self.moveTo(row);
-                    return;
-                }
-            }
-            return;
-        }
-        if (self.freshEdge(delta)) |row| {
-            self.noteWrap(delta, "change");
-            self.moveTo(row);
-        }
-    }
-
-    /// Remembers what `;` should repeat.
-    ///
-    /// Set here, on the key the reader actually pressed, and not inside `run`:
-    /// `,` dispatches the opposite command, and updating the memory there would
-    /// make a second `,` turn round and come back. `,` means "again, the other
-    /// way", not "reverse each time".
-    ///
-    /// A fresh `f` or `t` clears it, so `;` goes back to meaning what vim
-    /// readers expect the moment they use the motion vim attaches it to.
-    fn rememberWalk(self: *App, cmd: keymap.Command) void {
-        switch (cmd) {
-            .find_repeat, .find_reverse => {},
-            // `*` establishes a search; what `;` repeats is stepping it, not
-            // picking up whatever word the cursor has since landed on.
-            .search_word => self.last_walk = .search_next,
-            .search_word_back => self.last_walk = .search_prev,
-            .find_char, .till_char, .find_char_back, .till_char_back => self.last_walk = null,
-            else => if (cmd.opposite() != null) {
-                self.last_walk = cmd;
-            },
-        }
-    }
-
-    /// Walks the weakened tests, across the whole review.
-    ///
-    /// The same walk `]m` does over a different set of rows. It exists because
-    /// the status line can say "1 test removed" and then leave the reader to
-    /// find it, which on a large change is the difference between a warning
-    /// and a rumour.
-    fn riskStep(self: *App, delta: i32) !void {
-        if (!self.review.risk_total.any()) {
-            self.notice.set("no weakened tests in this change", .{});
-            return;
-        }
-        if (!self.review.risk_total.certain()) {
-            // Only `fewer_asserts`, which is a property of a file rather than
-            // a place: there is no row that *is* the finding.
-            self.notice.set("fewer assertions than before, but no test removed or skipped", .{});
-            return;
-        }
-
-        if (self.riskFrom(self.vp.cursor, delta)) |row| {
-            self.moveTo(row);
-            return;
-        }
-        const count = self.files().len;
-        if (count > 1) {
-            var tries: usize = 0;
-            while (tries < count) : (tries += 1) {
-                try self.stepFile(delta);
-                if (self.riskEdge(delta)) |row| {
-                    self.moveTo(row);
-                    return;
-                }
-            }
-            return;
-        }
-        if (self.riskEdge(delta)) |row| {
-            self.noteWrap(delta, "weakened test");
-            self.moveTo(row);
-        }
-    }
-
-    fn riskFrom(self: *App, from: u32, delta: i32) ?u32 {
-        return self.scanRiskRows(@as(i64, from) + delta, delta);
-    }
-
-    fn riskEdge(self: *App, delta: i32) ?u32 {
-        return self.scanRiskRows(if (delta > 0) 0 else @as(i64, self.rows.len()) - 1, delta);
-    }
-
-    fn scanRiskRows(self: *App, start: i64, delta: i32) ?u32 {
-        const marks = self.review.riskRowsFor(self.file_index);
-        if (marks.len == 0) return null;
-        var i = start;
-        while (i >= 0 and i < self.rows.len()) : (i += delta) {
-            const row: u32 = @intCast(i);
-            const li = self.lineAt(row) orelse continue;
-            if (li < marks.len and marks[li]) return row;
-        }
-        return null;
-    }
-
-    /// The next row after `from` whose line changed since the mark.
-    fn freshFrom(self: *App, from: u32, delta: i32) ?u32 {
-        return self.scanFresh(@as(i64, from) + delta, delta);
-    }
-
-    /// The first such row from whichever end `delta` enters the file by.
-    fn freshEdge(self: *App, delta: i32) ?u32 {
-        return self.scanFresh(if (delta > 0) 0 else @as(i64, self.rows.len()) - 1, delta);
-    }
-
-    fn scanFresh(self: *App, start: i64, delta: i32) ?u32 {
-        const fresh = self.review.freshFor(self.file_index);
-        if (fresh.len == 0) return null;
-        var i = start;
-        while (i >= 0 and i < self.rows.len()) : (i += delta) {
-            const row: u32 = @intCast(i);
-            const li = self.lineAt(row) orelse continue;
-            if (li < fresh.len and fresh[li]) return row;
-        }
-        return null;
-    }
-
-    /// Whether a row is a break: `{` and `}` land on these.
-    ///
-    /// Two kinds, and the pair is the point. A **blank line of code**, which is
-    /// what `{` and `}` mean everywhere else and what a reader reaches for
-    /// without thinking. And **chrome** - a hunk header, the rule between two
-    /// hunks, a summarised file - because those are gaps the eye already stops
-    /// at, and a paragraph motion that walked straight past a visible break in
-    /// the page would read as broken.
-    ///
-    /// A note is not one. It hangs *under* the line it belongs to and is part
-    /// of reading that line, not a gap between two.
-    fn isBreak(self: *App, row: u32) bool {
-        if (row >= self.rows.len()) return false;
-        if (self.rows.items[row] == .note) return false;
-        const li = self.lineAt(row) orelse return true;
-        const f = self.current() orelse return false;
-        if (li >= f.lines.text.len) return false;
-        return std.mem.trim(u8, f.lines.text[li], " \t\r").len == 0;
-    }
-
-    /// `}` and `{`.
-    ///
-    /// **A run of breaks is one break.** Two blank lines between functions is
-    /// one gap, not two, and a hunk header sitting against the rule above it
-    /// is one edge - vim separates paragraphs by "one or more" blank lines for
-    /// the same reason, and a motion that stopped twice in the same gap would
-    /// need pressing twice to cross it.
-    ///
-    /// No wrap, unlike `]h` and `]f`. vim's paragraph motions stop at the ends
-    /// of the buffer and a reader who knows them knows that; one that silently
-    /// returned to the top would be a different key wearing the same glyph.
-    /// Stopping means landing on the last row rather than refusing, which is
-    /// also what vim does.
-    fn stepBreak(self: *App, delta: i32) void {
-        const n = self.rows.len();
-        if (n == 0) return;
-        const last = n - 1;
-        const back = delta < 0;
-
-        var row = self.vp.cursor;
-        // Out of the gap the cursor is already standing in, so `}` pressed
-        // twice crosses two gaps rather than the two halves of one.
-        while (self.isBreak(row)) {
-            if (back) {
-                if (row == 0) return self.landOn(self.rows.firstLineRow());
-                row -= 1;
-            } else {
-                if (row >= last) return self.landOn(last);
-                row += 1;
-            }
-        }
-        // Then to the near edge of the next one.
-        while (true) {
-            if (back) {
-                if (row == 0) return self.landOn(self.rows.firstLineRow());
-                row -= 1;
-            } else {
-                if (row >= last) return self.landOn(last);
-                row += 1;
-            }
-            if (self.isBreak(row)) return self.landOn(row);
-        }
-    }
-
-    /// Arrive at a row the way a jump does: the column resets to the start of
-    /// the line, which is what every paragraph motion does and what makes two
-    /// `}` in a row read as one movement rather than two.
-    fn landOn(self: *App, row: u32) void {
-        self.want_col = 0;
-        self.moveTo(row);
-    }
-
-    fn stepHunk(self: *App, delta: i32) !void {
-        const hs = self.rows.hunk_rows;
-        if (hs.len == 0) return;
-
-        // By hunk *index*, not by row. Stepping by row cannot go backwards at
-        // all: the cursor always lands on `header + 1`, and the nearest header
-        // strictly above that row is the very one it just landed on, so `[h`
-        // returned to where it already was and the backward wrap was
-        // unreachable.
-        const n: i64 = @intCast(hs.len);
-        const here: ?u32 = self.rows.hunkAt(self.vp.cursor);
-        const raw: i64 = if (here) |h|
-            @as(i64, @intCast(h)) + delta
-        else
-            // Above the first header, `]h` means the first hunk rather than
-            // the second, and `[h` means the last.
-            (if (delta > 0) 0 else n - 1);
-
-        // Still inside this file: the common case, and no file work at all.
-        if (raw >= 0 and raw < n) {
-            self.moveTo(hs[@intCast(raw)] + 1);
-            return;
-        }
-
-        // Off the end of the file's hunks.
-        if (self.nav.hunk_crosses_files and try self.crossToHunk(delta)) return;
-
-        const target = hs[wrapIndex(raw, hs.len).index] + 1;
-        // One hunk wraps onto itself; saying so every time would be noise.
-        if (target != self.vp.cursor) self.noteWrap(delta, "hunk");
-        self.moveTo(target);
-    }
-
-    /// Carries `]h` into the next file's first hunk, or `[h` into the previous
-    /// file's last one. Returns false when there is nowhere to go, leaving the
-    /// caller to wrap inside this file instead.
-    ///
-    /// Skips files that contribute no hunk rows - a summarised file has none -
-    /// rather than parking the cursor somewhere `]h` cannot leave. Bounded by
-    /// the file count, so a review of nothing but such files terminates.
-    fn crossToHunk(self: *App, delta: i32) !bool {
-        const count = self.files().len;
-        if (count <= 1) return false;
-
-        var tries: usize = 0;
-        while (tries < count) : (tries += 1) {
-            // `stepFile` wraps across the review and announces it, which is
-            // exactly the right message at the true end of the last file.
-            try self.stepFile(delta);
-            const hs = self.rows.hunk_rows;
-            if (hs.len == 0) continue;
-            self.moveTo(if (delta > 0) hs[0] + 1 else hs[hs.len - 1] + 1);
-            return true;
-        }
-        return false;
-    }
-
-    /// Wraps: `]f` from the last file lands on the first, `[f` from the first
-    /// lands on the last. A review is a ring, and stopping dead at the end
-    /// reads as a dropped keystroke. Announced for the same reason the search
-    /// announces its wrap - the file under you changed further than one step.
-    fn stepFile(self: *App, delta: i32) !void {
-        const n = self.files().len;
-        if (n == 0) return;
-        const step = wrapIndex(@as(i64, self.file_index) + delta, n);
-        if (step.index == self.file_index) return;
-        if (step.wrapped) self.noteWrap(delta, "file");
-        self.file_index = step.index;
-        try self.rebuildRows(.reset);
-    }
-
-    /// Both ring motions say the same thing when they come round: the cursor
-    /// moved further than one step and nothing else on screen would show it.
-    fn noteWrap(self: *App, delta: i32, what: []const u8) void {
-        self.notice.set("wrapped to {s} {s}", .{ if (delta > 0) "first" else "last", what });
     }
 
     // -- screen rows ---------------------------------------------------------
@@ -6080,7 +1783,7 @@ pub const App = struct {
 
     fn commentHeight(self: *App, row: u32, cap: u16) u16 {
         const ni = self.rows.items[row].note;
-        const marks = self.commentMarks();
+        const marks = notes.commentMarks(self);
         if (ni >= marks.len) return 1;
         const col: u16 = if (self.vp.cols > 8) 6 else 0;
         const width = self.vp.cols -| col -| 2;
@@ -6125,7 +1828,7 @@ pub const App = struct {
         self.vp.centre(self.bodyOf(body));
     }
 
-    fn animateFrom(self: *App, was_at: u32, body: u16) void {
+    pub fn animateFrom(self: *App, was_at: u32, body: u16) void {
         self.vp.animateFrom(self.bodyOf(body), was_at);
     }
 
@@ -6269,10 +1972,10 @@ pub const App = struct {
             .key => |k| {
                 // While a prompt is open the keys are text, not actions, so
                 // they never reach the keymap.
-                if (self.mode == .command) return self.feedPrompt(k, body);
+                if (self.mode == .command) return cmdline.feedPrompt(self, k, body);
                 if (self.mode == .help) return self.feedHelp(k, body);
-                if (self.mode == .finder) return self.feedFiles(k, body);
-                if (self.mode == .note_input) return self.feedCompose(k, body);
+                if (self.mode == .finder) return finder_mod.feedFiles(self, k, body);
+                if (self.mode == .note_input) return outgoing.feedCompose(self, k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
@@ -6283,8 +1986,8 @@ pub const App = struct {
                 // A restore waiting on its answer takes the next key, and
                 // takes it before anything else can claim it: while this is
                 // pending there is no command the reader could mean.
-                if (self.pending_restore != null) {
-                    try self.restoreAnswer(k, body);
+                if (self.turns.pending != null) {
+                    try turns_mod.restoreAnswer(self, k, body);
                     self.clampScroll(body);
                     return;
                 }
@@ -6298,7 +2001,7 @@ pub const App = struct {
                 }
                 switch (self.km.feed(k, self.mode)) {
                     .command => |cmd| {
-                        self.rememberWalk(cmd);
+                        turns_mod.rememberWalk(self, cmd);
                         try self.run(cmd, body);
                     },
                     .pending, .none => {},
@@ -6349,7 +2052,7 @@ pub const App = struct {
             // itself. What it buys them is that `refs/lgtm/<session>/<n>` now
             // holds the work the agent has just done, whether or not they ever
             // press anything.
-            .agent_quiescent => _ = self.snapshotTurn(),
+            .agent_quiescent => _ = turns_mod.snapshotTurn(self),
             .snapshot_taken => {},
         }
     }
@@ -6390,7 +2093,14 @@ const testing = std.testing;
 // in are listed in `loop.zig`, and `main.zig` covers the rest.
 test {
     _ = template;
+    _ = cmdline;
     _ = devicon;
+    _ = finder_mod;
+    _ = notes;
+    _ = outgoing;
+    _ = pr_mod;
+    _ = turns_mod;
+    _ = walks;
     _ = files_mod;
     _ = help_mod;
     _ = keymap;
@@ -6408,31 +2118,13 @@ test {
 
 // -- pure arithmetic: no fixture, no rows, no terminal -------------------
 
-test "a ring step wraps at both ends and reports only the wrap" {
-    // The shared arithmetic behind `]f`, `]h` and the search's walk across
-    // files. Each of the three had its own copy, and the backward one is the
-    // half that is easy to get wrong: `@rem` leaves it negative.
-    try testing.expectEqual(@as(u32, 1), wrapIndex(1, 3).index);
-    try testing.expect(!wrapIndex(1, 3).wrapped);
-
-    try testing.expectEqual(@as(u32, 0), wrapIndex(3, 3).index);
-    try testing.expect(wrapIndex(3, 3).wrapped);
-
-    try testing.expectEqual(@as(u32, 2), wrapIndex(-1, 3).index);
-    try testing.expect(wrapIndex(-1, 3).wrapped);
-
-    // An empty ring has nowhere to step to, and must not divide by zero.
-    try testing.expectEqual(@as(u32, 0), wrapIndex(-1, 0).index);
-    try testing.expect(!wrapIndex(-1, 0).wrapped);
-}
-
 // -- the fixture ---------------------------------------------------------
 
 /// A two-file review built in memory: enough for the command layer without a
 /// repository, a terminal or a subprocess. The lines are chosen so each token
 /// appears in exactly one file, which is what makes the cross-file search
 /// assertions unambiguous.
-const Fixture = struct {
+pub const Fixture = struct {
     threaded: std.Io.Threaded,
     queue: event.Queue,
     app: App,
@@ -6442,7 +2134,7 @@ const Fixture = struct {
     const a_text = [_][]const u8{ "fn alpha() {", "    const x = 1;", "}" };
     const b_text = [_][]const u8{ "fn beta() {", "    const token = 2;", "}" };
 
-    fn linesOf(gpa: Allocator, texts: []const []const u8, deleted_at: ?usize) !hunk.DiffLines {
+    pub fn linesOf(gpa: Allocator, texts: []const []const u8, deleted_at: ?usize) !hunk.DiffLines {
         var l: hunk.DiffLines = .{
             .kind = try gpa.alloc(hunk.LineKind, texts.len),
             .old_no = try gpa.alloc(u32, texts.len),
@@ -6462,13 +2154,13 @@ const Fixture = struct {
     }
 
     /// The ordinary review: two files, three lines each, nothing deleted.
-    fn init(gpa: Allocator) !*Fixture {
+    pub fn init(gpa: Allocator) !*Fixture {
         return build(gpa, null);
     }
 
     /// A review with no files in it. The state a pane sits in whenever the
     /// tree is clean, which is most of the day.
-    fn emptyReview(gpa: Allocator) !*Fixture {
+    pub fn emptyReview(gpa: Allocator) !*Fixture {
         const self = try build(gpa, null);
         self.app.review.parsed.?.diff.files = self.files[0..0];
         try self.app.rebuildRows(.reset);
@@ -6478,11 +2170,11 @@ const Fixture = struct {
     /// The same, with one line of the first file deleted - the case `e` and
     /// the bridge both have to handle, because a deleted line has no line in
     /// the new file to point at.
-    fn withDeletion(gpa: Allocator, at: usize) !*Fixture {
+    pub fn withDeletion(gpa: Allocator, at: usize) !*Fixture {
         return build(gpa, at);
     }
 
-    fn build(gpa: Allocator, deleted_at: ?usize) !*Fixture {
+    pub fn build(gpa: Allocator, deleted_at: ?usize) !*Fixture {
         const self = try gpa.create(Fixture);
         self.* = .{
             .threaded = .init(gpa, .{}),
@@ -6522,7 +2214,7 @@ const Fixture = struct {
     /// A review whose one file is over `large_file_lines`, parsed from real
     /// diff text: `zo` opens the bytes git actually produced, so a fixture
     /// that faked the byte range would test nothing.
-    fn summarised(gpa: Allocator) !*Fixture {
+    pub fn summarised(gpa: Allocator) !*Fixture {
         const self = try build(gpa, null);
         errdefer self.deinit();
 
@@ -6549,7 +2241,7 @@ const Fixture = struct {
         return self;
     }
 
-    fn deinit(self: *Fixture) void {
+    pub fn deinit(self: *Fixture) void {
         const gpa = self.gpa;
         for (self.files) |*f| {
             gpa.free(f.hunks);
@@ -6568,7 +2260,7 @@ const Fixture = struct {
     /// `press("<C-d>")`. Going through the same parser as `[keys]` is the
     /// point - a test and a user's config cannot disagree about what `<Esc>`
     /// means.
-    fn press(self: *Fixture, sequence: []const u8) !void {
+    pub fn press(self: *Fixture, sequence: []const u8) !void {
         var buf: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
         for (try keytext.parseChords(sequence, &buf)) |ch| {
             // Shift as well as ctrl: without it `<S-Tab>` arrives as `<Tab>`
@@ -6583,27 +2275,27 @@ const Fixture = struct {
     /// Literal text, for a prompt that is collecting some. Spelled out rather
     /// than routed through `press`, because inside a prompt these are letters
     /// and not keys - which is the distinction half of these tests are about.
-    fn typeIn(self: *Fixture, text: []const u8) !void {
+    pub fn typeIn(self: *Fixture, text: []const u8) !void {
         for (text) |ch| {
             try self.app.handle(.{ .key = .{ .codepoint = ch, .mods = .{} } }, body_rows);
         }
     }
 
-    fn expectCursor(self: *Fixture, row: u32) !void {
+    pub fn expectCursor(self: *Fixture, row: u32) !void {
         try testing.expectEqual(row, self.app.vp.cursor);
     }
 
-    fn expectFile(self: *Fixture, index: u32) !void {
+    pub fn expectFile(self: *Fixture, index: u32) !void {
         try testing.expectEqual(index, self.app.file_index);
     }
 
-    fn expectMode(self: *Fixture, mode: event.Mode) !void {
+    pub fn expectMode(self: *Fixture, mode: event.Mode) !void {
         try testing.expectEqual(mode, self.app.mode);
     }
 
     /// The notice says what it should, without pinning the exact wording: the
     /// assertion is that the reader was told, not how it was phrased.
-    fn expectNotice(self: *Fixture, needle: []const u8) !void {
+    pub fn expectNotice(self: *Fixture, needle: []const u8) !void {
         const text = self.app.notice.text();
         if (std.mem.indexOf(u8, text, needle) == null) {
             std.debug.print("notice was \"{s}\", expected it to mention \"{s}\"\n", .{ text, needle });
@@ -6611,13 +2303,13 @@ const Fixture = struct {
         }
     }
 
-    fn expectNoNotice(self: *Fixture) !void {
+    pub fn expectNoNotice(self: *Fixture) !void {
         try testing.expectEqual(@as(usize, 0), self.app.notice.text().len);
     }
 };
 
 /// The body height every fixture test drives with: a 26-row pane, less chrome.
-const body_rows: u16 = 22;
+pub const body_rows: u16 = 22;
 
 // -- the column ------------------------------------------------------------
 
@@ -6834,28 +2526,6 @@ test "v selects characters, V selects lines, and each toggles the other" {
     try testing.expectEqual(@as(u32, 12), sel.hi_col);
 }
 
-test "a charwise selection points the agent at the words, not at a column" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Select `alpha` on `fn alpha() {`.
-    try fx.press("w");
-    try fx.press("v");
-    try fx.press("e");
-    try fx.press("<CR>");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1 `alpha`", fx.app.payload());
-
-    // Grown past one line, the text would have to carry the newline between
-    // them - so it becomes the line range it always was.
-    try fx.press("w");
-    try fx.press("v");
-    try fx.press("j");
-    try fx.press("<CR>");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
-}
-
 // -- the viewport catching up ---------------------------------------------
 
 test "a jump animates and a single row does not" {
@@ -6998,24 +2668,6 @@ test "a second jump joins the first rather than cancelling it" {
     // Anything that is not a jump arrives at once instead.
     try fx.app.run(.line_down, 4);
     try testing.expect(!fx.app.animating(body_rows));
-}
-
-test "only the commands that take you somewhere count as jumps" {
-    // Stepping never does, whatever it moves underneath.
-    try testing.expect(!keymap.Command.line_down.jumps());
-    try testing.expect(!keymap.Command.line_up.jumps());
-    try testing.expect(!keymap.Command.word_next.jumps());
-    try testing.expect(!keymap.Command.char_right.jumps());
-    // Nor does anything that is not a motion at all.
-    try testing.expect(!keymap.Command.send_ref.jumps());
-    try testing.expect(!keymap.Command.toggle_wrap.jumps());
-
-    // Asking to be somewhere does.
-    try testing.expect(keymap.Command.page_down.jumps());
-    try testing.expect(keymap.Command.bottom.jumps());
-    try testing.expect(keymap.Command.next_hunk.jumps());
-    try testing.expect(keymap.Command.center.jumps());
-    try testing.expect(keymap.Command.search_next.jumps());
 }
 
 test "the drawn viewport is where the settled one is, once it arrives" {
@@ -7228,134 +2880,6 @@ test "moving to another file drops the selection instead of re-pointing it" {
 
 // -- motions across the review -------------------------------------------
 
-test "hunk stepping crosses into the next file by default" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try testing.expect(fx.app.nav.hunk_crosses_files);
-    try testing.expect(fx.app.files().len > 1);
-
-    // To the last hunk of the first file.
-    while (fx.app.rows.hunkAt(fx.app.vp.cursor).? + 1 < fx.app.rows.hunk_rows.len) {
-        try fx.press("]h");
-    }
-    try fx.expectFile(0);
-
-    // One more leaves the file rather than looping inside it.
-    try fx.press("]h");
-    try fx.expectFile(1);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
-    // Crossing a boundary mid-review is not a wrap and must not claim to be.
-    try fx.expectNoNotice();
-
-    // Backwards over the same boundary returns to the *last* hunk of file 0.
-    try fx.press("[h");
-    try fx.expectFile(0);
-    const hs = fx.app.rows.hunk_rows;
-    try testing.expectEqual(hs[hs.len - 1] + 1, fx.app.vp.cursor);
-}
-
-test "the whole review wraps at its far end, and says so" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // `[h` from the very first hunk of the first file has nowhere earlier to
-    // go, so it wraps round to the last file - which `stepFile` announces.
-    try fx.expectFile(0);
-    try fx.press("[h");
-    try testing.expectEqual(@as(u32, @intCast(fx.app.files().len - 1)), fx.app.file_index);
-    try fx.expectNotice("wrapped to last file");
-}
-
-test "hunk stepping stays in the file when config says so" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // The flag a config file will set once `config.zig` lands.
-    fx.app.nav.hunk_crosses_files = false;
-
-    const in_file = fx.app.rows.hunk_rows.len;
-    while (fx.app.rows.hunkAt(fx.app.vp.cursor).? + 1 < in_file) {
-        try fx.press("]h");
-    }
-
-    try fx.press("]h");
-    // Same file, back at its first hunk.
-    try fx.expectFile(0);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
-    if (in_file > 1) {
-        try fx.expectNotice("wrapped to first hunk");
-    }
-}
-
-test "prev hunk steps back a hunk rather than to the top of this one" {
-    // The regression this guards: stepping by *row* could never go backwards.
-    // The cursor always lands on `header + 1`, and the nearest header strictly
-    // above that row is the one it just landed on, so `[h` returned to where
-    // it already was - and the backward wrap could never be reached.
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    const hunks = fx.app.rows.hunk_rows.len;
-    if (hunks < 2) return; // nothing to step between
-
-    try fx.press("]h");
-    const second = fx.app.vp.cursor;
-    try testing.expectEqual(fx.app.rows.hunk_rows[1] + 1, second);
-
-    try fx.press("[h");
-    try testing.expect(fx.app.vp.cursor != second);
-    try testing.expectEqual(fx.app.rows.hunk_rows[0] + 1, fx.app.vp.cursor);
-}
-
-test "file stepping wraps at both ends, and says so" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Two files in the fixture, so one step leaves us on the last. Landing on
-    // the last file is not itself a wrap.
-    try fx.press("]f");
-    try fx.expectFile(1);
-    try fx.expectNoNotice();
-
-    // A review is a ring: stopping dead at either end reads as a dropped
-    // keystroke, and moving further than one step has to be announced,
-    // because nothing else on screen says the file changed twice.
-    try fx.press("]f");
-    try fx.expectFile(0);
-    try fx.expectNotice("wrapped to first");
-
-    try fx.press("[f");
-    try fx.expectFile(1);
-    try fx.expectNotice("wrapped to last");
-}
-
-test "the leader forms reach the same commands as the bracket forms" {
-    // `<Space>nh` and `]h` are two rows in the table pointing at one command,
-    // which is what lets a remapping user rebind either independently. The
-    // assertion is that they land in the same place, not merely that they do
-    // something.
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    const start = fx.app.vp.cursor;
-    for ([_][2][]const u8{
-        .{ "<Space>nh", "]h" },
-        .{ "<Space>ph", "[h" },
-    }) |pair| {
-        fx.app.vp.cursor = start;
-        try fx.press(pair[0]);
-        const by_leader = fx.app.vp.cursor;
-
-        fx.app.vp.cursor = start;
-        try fx.press(pair[1]);
-        try testing.expectEqual(by_leader, fx.app.vp.cursor);
-    }
-
-    try fx.press("<Space>nf");
-    try fx.expectFile(1);
-    try fx.press("<Space>pf");
-    try fx.expectFile(0);
-}
-
 // -- the `?` overlay, as the app drives it -------------------------------
 
 test "? opens the overlay and returns to the mode it came from" {
@@ -7494,186 +3018,7 @@ test "the popup is available when there is nothing to review" {
 
 // -- the file list, as the app drives it ---------------------------------
 
-test "F opens the file list on the file the review is showing" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("]f");
-    try fx.expectFile(1);
-    try fx.press("<Space>f");
-    try fx.expectMode(.finder);
-    // Opened on the current file, so the list says where the reader is before
-    // it offers to move them.
-    try testing.expectEqual(@as(u32, 1), fx.app.file_list.selected(fx.app.pick_list.items).?);
-
-    // The key that opened it does *not* close it: inside the overlay a
-    // keystroke is filter text, letters included. Escape closes, the way it
-    // does in the `?` overlay and in every prompt.
-    try fx.press("b");
-    try fx.expectMode(.finder);
-    try testing.expectEqualStrings("b", fx.app.file_list.filter.text());
-    try fx.press("<Esc>");
-    try fx.expectMode(.normal);
-    try fx.expectFile(1);
-}
-
-test "Enter jumps to the selected file, Escape leaves the review alone" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<Space>f");
-    try fx.press("J");
-    try fx.press("<CR>");
-    try fx.expectMode(.normal);
-    try fx.expectFile(1);
-    // A jump is a move to a different file, so the cursor starts at the top of
-    // it rather than wherever the last file's cursor happened to be.
-    try fx.expectCursor(fx.app.rows.firstLineRow());
-
-    // Escape closes without moving.
-    try fx.press("<Space>f");
-    try fx.press("K");
-    try fx.press("<Esc>");
-    try fx.expectMode(.normal);
-    try fx.expectFile(1);
-}
-
-test "keys under the file list filter it rather than reaching the review" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    const moved = fx.app.vp.cursor;
-    try fx.press("<Space>f");
-
-    // `j` and `q` are a motion and a quit in the review; in here they are
-    // letters, and the review must not move behind the overlay.
-    try fx.typeIn("jq");
-    try fx.expectCursor(moved);
-    try testing.expect(!fx.app.quit);
-    try testing.expectEqualStrings("jq", fx.app.file_list.filter.text());
-
-    // The filter narrows what Enter would open, and a filter matching nothing
-    // opens nothing rather than the wrong file.
-    try fx.press("<CR>");
-    try fx.expectFile(0);
-    try fx.expectMode(.normal);
-}
-
-test "the file list filters by path and opens what it is showing" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<Space>f");
-    try fx.typeIn("b.z");
-    try testing.expectEqual(@as(usize, 1), files_mod.count(fx.app.pick_list.items, fx.app.file_list.filter.text()));
-    try fx.press("<CR>");
-    try fx.expectFile(1);
-
-    // Closing cleared the query, so `F` never reopens onto a stale filter.
-    try fx.press("<Space>f");
-    try testing.expectEqual(@as(usize, 0), fx.app.file_list.filter.text().len);
-}
-
 // -- search and the prompt -----------------------------------------------
-
-test "search crosses into the next file and lands on the matching row" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("/");
-    try fx.expectMode(.command);
-    // Inside the prompt these are letters, not motions: `j` must not move.
-    try fx.typeIn("token");
-    try fx.expectCursor(1);
-    try fx.press("<CR>");
-
-    try fx.expectMode(.normal);
-    try fx.expectFile(1);
-    // Row 2 of b.zig: header, line 0, line 1.
-    try fx.expectCursor(2);
-    // Reaching the next file in order is not a wrap.
-    try testing.expect(!fx.app.finder.wrapped);
-}
-
-test "search wraps past the end of the review and says so" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    fx.app.file_index = 1;
-    try fx.app.rebuildRows(.reset);
-
-    try fx.press("/");
-    try fx.typeIn("alpha");
-    try fx.press("<CR>");
-
-    try fx.expectFile(0);
-    try fx.expectCursor(1);
-    try testing.expect(fx.app.finder.wrapped);
-    try fx.expectNotice("wrapped");
-}
-
-test "n repeats the search and N reverses it" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // `const` appears once per file, so stepping is observable.
-    try fx.press("/");
-    try fx.typeIn("const");
-    try fx.press("<CR>");
-    try fx.expectFile(0);
-    try fx.expectCursor(2);
-
-    try fx.press("n");
-    try fx.expectFile(1);
-
-    try fx.press("N");
-    try fx.expectFile(0);
-    try fx.expectCursor(2);
-}
-
-test "a search that finds nothing leaves the cursor put and says why" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    const before = fx.app.vp.cursor;
-    try fx.press("/");
-    try fx.typeIn("nowhere");
-    try fx.press("<CR>");
-
-    try testing.expectEqual(before, fx.app.vp.cursor);
-    try testing.expect(fx.app.finder.failed);
-    try fx.expectNotice("not found");
-}
-
-test "escaping a prompt returns to the mode it was opened from" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("V");
-    try fx.press("/");
-    try fx.typeIn("x");
-    try fx.press("<Esc>");
-    // A search abandoned mid-selection must not also abandon the selection.
-    try fx.expectMode(.visual);
-    try testing.expect(fx.app.selection() != null);
-}
-
-test ":q quits and anything else reports itself rather than vanishing" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("wq");
-    try fx.press("<CR>");
-    try testing.expect(!fx.app.quit);
-    try fx.expectNotice(":wq");
-
-    try fx.press(":");
-    try fx.typeIn("q");
-    try fx.press("<CR>");
-    try testing.expect(fx.app.quit);
-}
 
 // -- zen, $EDITOR and notices --------------------------------------------
 
@@ -7787,88 +3132,6 @@ test "a resize re-lays out rather than leaving the old scroll behind" {
 
 // -- the bridge ----------------------------------------------------------
 
-test "Enter composes a reference to the line under the cursor" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Enter opens the box seeded with the reference; nothing is sent yet.
-    try fx.press("<CR>");
-    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
-    try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
-    try testing.expect(fx.app.want_send == null);
-
-    // The second Enter is the send. A request, not an action: the loop owns
-    // the terminal and the subprocess.
-    try fx.press("<CR>");
-    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
-    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
-}
-
-test "@ picks a file out of the review and puts its path at the caret" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<CR>");
-    try fx.press(" see");
-    try fx.press(" @");
-    // The `@` is typed, and the picker is over the box rather than instead of
-    // it - the box is still open underneath.
-    try testing.expectEqual(event.Mode.finder, fx.app.mode);
-    try testing.expect(fx.app.compose.open);
-    try testing.expectEqualStrings("#1 a.zig:1 see @", fx.app.compose.text());
-
-    // Enter takes the highlighted file; the keyboard goes back to the box.
-    try fx.press("<CR>");
-    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
-    try testing.expectEqualStrings("#1 a.zig:1 see @a.zig", fx.app.compose.text());
-
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1 see @a.zig", fx.app.payload());
-}
-
-test "cancelling the file picker leaves the @ that was typed" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<CR>");
-    try fx.press("@");
-    try fx.press("<Esc>");
-    // Back in the box, not out of it, and the character stands: it was typed.
-    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
-    try testing.expectEqualStrings("#1 a.zig:1@", fx.app.compose.text());
-}
-
-test "the file overlay still jumps when it was not opened from the box" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Same list, same filter, same drawing - only Enter differs, and that is
-    // what `files_purpose` is for.
-    try fx.press("<Space>f");
-    try testing.expectEqual(event.Mode.finder, fx.app.mode);
-    try fx.press("<CR>");
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
-    try testing.expect(!fx.app.compose.open);
-}
-
-test "with nothing to review the box still opens, empty" {
-    var fx = try Fixture.emptyReview(testing.allocator);
-    defer fx.deinit();
-
-    // A clean tree is where a review pane spends most of its day, and "talk to
-    // the agent" is a thing to want there. Refusing until the reader makes a
-    // change first would be the tail wagging the dog.
-    try fx.press("<CR>");
-    try testing.expectEqual(event.Mode.note_input, fx.app.mode);
-    try testing.expectEqualStrings("", fx.app.compose.text());
-
-    try fx.press("hi");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("hi", fx.app.payload());
-    try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
-}
-
 test "an empty message sends nothing rather than a blank line" {
     var fx = try Fixture.emptyReview(testing.allocator);
     defer fx.deinit();
@@ -7877,23 +3140,6 @@ test "an empty message sends nothing rather than a blank line" {
     try fx.press("<CR>");
     try testing.expect(fx.app.want_send == null);
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
-}
-
-test "the box opens on the reference and nothing else" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // No question is typed in for the reader. A canned sentence that arrives
-    // uninvited is one they have to read and mostly delete; the presets have
-    // their own key for when they are actually wanted.
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
-
-    try fx.press(" it");
-    try fx.press("s wr");
-    try fx.press("ong");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1 its wrong", fx.app.payload());
 }
 
 test "escape abandons the message and sends nothing" {
@@ -7907,208 +3153,6 @@ test "escape abandons the message and sends nothing" {
     try testing.expectEqual(event.Mode.normal, fx.app.mode);
     try testing.expect(fx.app.want_send == null);
     try testing.expect(!fx.app.compose.open);
-}
-
-test "a selection sends a range, and using it ends the selection" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("Vj");
-    try testing.expectEqual(@as(u32, 2), fx.app.selection().?.count());
-    try fx.press("<CR>");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1-2", fx.app.payload());
-
-    // An operator consumes its range, the way it does in vim. Leaving the
-    // rows highlighted invites sending the same lines twice.
-    try testing.expect(fx.app.selection() == null);
-    try testing.expectEqual(event.Mode.normal, fx.app.mode);
-}
-
-test "a one-row selection is a single line, not a range of one" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("V<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
-}
-
-test "matches light up while the query is still being typed" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Nothing to paint before a search exists.
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
-
-    // Mid-type, with no Enter yet: this is the whole feature.
-    try fx.press("/co");
-    try testing.expectEqualStrings("co", fx.app.view(body_rows).?.query.text);
-    try fx.press("n");
-    try testing.expectEqualStrings("con", fx.app.view(body_rows).?.query.text);
-
-    // Cancelling puts the screen back the way it was, rather than leaving the
-    // abandoned query painted across the diff.
-    try fx.press("<Esc>");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
-
-    // Submitting hands over to the stored query, and `:noh` still clears it.
-    try fx.press("/co");
-    try fx.press("ns");
-    try fx.press("t");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("const", fx.app.view(body_rows).?.query.text);
-    try fx.press(":noh");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
-}
-
-test "a command being typed is not painted across the diff" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // `:` text is a command, not a pattern. Highlighting it would paint `noh`
-    // over the review while the reader types the thing that turns painting off.
-    try fx.press(":noh");
-    try testing.expectEqualStrings("", fx.app.view(body_rows).?.query.text);
-    try fx.press("<Esc>");
-}
-
-test "y yanks the text, the way the key means in vim" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // No selection: the cursor line, and without the diff's sign column -
-    // yanked code should paste into an editor and still compile.
-    try fx.press("y");
-    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
-    try testing.expectEqualStrings("fn alpha() {", fx.app.payload());
-
-    // Charwise: exactly the characters under the selection, which is the case
-    // that sent people a reference when they wanted a word.
-    try fx.press("vll");
-    try fx.press("y");
-    try testing.expectEqualStrings("fn ", fx.app.payload());
-
-    // Linewise across two rows, joined by the newline the clipboard allows.
-    try fx.press("Vj");
-    try fx.press("y");
-    try testing.expectEqualStrings("fn alpha() {\n    const x = 1;", fx.app.payload());
-}
-
-test "Y yanks whole lines even from a charwise selection" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // vim's `Y` is linewise whatever `v` selected.
-    try fx.press("vll");
-    try fx.press("Y");
-    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
-    try testing.expectEqualStrings("fn alpha() {", fx.app.payload());
-}
-
-test "the reference moved to <leader>y rather than being lost" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<Space>y");
-    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
-    try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
-}
-
-test "<leader>Y puts the lines under the reference, markers kept" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // The marker is what says which side of the change a line is on; a mixed
-    // range pasted without them reads as nonsense.
-    try fx.press("Vj");
-    try fx.press("<Space>Y");
-    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
-    try testing.expectEqualStrings(
-        "#1 a.zig:1-2\n fn alpha() {\n     const x = 1;",
-        fx.app.payload(),
-    );
-}
-
-test "a deleted line points at its hunk and says why" {
-    var fx = try Fixture.withDeletion(testing.allocator, 1);
-    defer fx.deinit();
-
-    // References resolve against the new file. This line is not
-    // in it, so the enclosing hunk is the closest honest answer - and the
-    // agent is told that is what happened.
-    fx.app.vp.cursor = 2;
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1 (deleted lines in this hunk)", fx.app.payload());
-}
-
-test "a selection spanning a deletion keeps the lines that still exist" {
-    var fx = try Fixture.withDeletion(testing.allocator, 1);
-    defer fx.deinit();
-
-    // Rows 1-3 are lines 1, deleted, 3. The range is what survives.
-    fx.app.vp.cursor = 1;
-    try fx.press("Vjj");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:1-3", fx.app.payload());
-}
-
-test "every opener seeds the same thing: the reference" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // One opener, because there is only one thing to open. The four ask keys
-    // that used to sit beside it are gone: once the box stopped typing a
-    // question in for you, they did exactly what Enter does.
-    for ([_][]const u8{"<CR>"}) |keys| {
-        try fx.press(keys);
-        try testing.expectEqual(event.Mode.note_input, fx.app.mode);
-        try testing.expectEqualStrings("#1 a.zig:1", fx.app.compose.text());
-        try fx.press("<CR>");
-        try testing.expectEqualStrings("#1 a.zig:1", fx.app.payload());
-        try testing.expectEqual(App.Delivery.send, fx.app.want_send.?);
-    }
-}
-
-test "nothing sent to the agent ever contains a newline" {
-    // Hard rule 1, checked where the payload is built as well as where it is
-    // sent: in `tmux send-keys` a newline is Enter, and Enter submits the
-    // user's half-written message. The yanks and `<leader>Y` are exempt by
-    // design - they are the clipboard, which no send-keys ever sees.
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    for ([_][]const u8{ "<CR>", "<Space>y" }) |keys| {
-        try fx.press("Vj");
-        try fx.press(keys);
-        // Everything but the yank now goes through the compose box, and the
-        // flattening on submit is the last place a newline could survive.
-        if (fx.app.mode == .note_input) try fx.press("<CR>");
-        try testing.expect(std.mem.indexOfScalar(u8, fx.app.payload(), '\n') == null);
-    }
-}
-
-test "a change id follows the hunk, not the row" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // The second file's hunk is #2, and its reference has to say so - the id
-    // is what the user and the agent say to each other.
-    try fx.press("]f");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#2 b.zig:1", fx.app.payload());
-}
-
-test "composing again replaces the payload rather than appending to it" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("<CR>");
-    try fx.press("<CR>");
-    try fx.press("j");
-    try fx.press("<CR>");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("#1 a.zig:2", fx.app.payload());
 }
 
 // -- large files -----------------------------------------------------------
@@ -8193,195 +3237,7 @@ test "zc on a file that was never folded says so instead of re-diffing" {
 
 // -- since I last looked ---------------------------------------------------
 
-/// Marks rows of the fixture's two files as changed since the mark, the way a
-/// re-diff would. Set directly rather than through `Review.mark`, which needs
-/// git and real buffers: what these tests own is the walking, and
-/// `core/checkpoint.zig` owns deciding what is fresh.
-fn markFresh(fx: *Fixture, first: []const bool, second: []const bool) !void {
-    const arena = fx.app.review.allocator();
-    const out = try arena.alloc([]bool, 2);
-    out[0] = try arena.dupe(bool, first);
-    out[1] = try arena.dupe(bool, second);
-    fx.app.review.fresh = out;
-    fx.app.review.mark_at.turn = 1;
-}
-
-test "walking the changes since the mark needs a mark first" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("]m");
-    try fx.expectNotice("no mark");
-    try fx.expectCursor(1);
-}
-
-test "a mark with nothing after it says so rather than moving" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("m");
-    try fx.expectNotice("marked");
-    try fx.press("]m");
-    try fx.expectNotice("nothing new");
-}
-
-test "]n walks to the changed line, not to its hunk" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // Row 0 is the hunk header; rows 1..3 are the three lines.
-    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
-
-    try fx.expectCursor(1);
-    try fx.press("]m");
-    try fx.expectCursor(2);
-}
-
-test "]n crosses into the next file when this one has nothing left" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try markFresh(fx, &.{ false, false, false }, &.{ true, false, false });
-
-    try fx.expectFile(0);
-    try fx.press("]m");
-    try fx.expectFile(1);
-    try fx.expectCursor(1);
-}
-
-test "[n walks backwards and reaches the same rows" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try markFresh(fx, &.{ true, false, false }, &.{ false, false, true });
-
-    // From the top of the first file, backwards crosses into the last file.
-    try fx.press("[m");
-    try fx.expectFile(1);
-    try fx.expectCursor(3);
-    try fx.press("[m");
-    try fx.expectFile(0);
-    try fx.expectCursor(1);
-}
-
-test "the mark clears what came before it" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
-    try testing.expectEqual(@as(u32, 1), fx.app.review.freshCount());
-
-    // Marking again with no buffers behind the fixture's files records them as
-    // empty, which is the honest answer: nothing is newer than now.
-    try fx.press("m");
-    try testing.expectEqual(@as(u32, 0), fx.app.review.freshCount());
-}
-
-test "M drops the mark and the whole change reads as one again" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
-    try testing.expectEqual(@as(u32, 1), fx.app.review.freshCount());
-
-    try fx.press("M");
-    try fx.expectNotice("dropped");
-    try testing.expectEqual(@as(u32, 0), fx.app.review.freshCount());
-    try testing.expect(!fx.app.review.mark_at.taken());
-
-    // And walking says there is no mark rather than "nothing new", which are
-    // different answers to different situations.
-    try fx.press("]m");
-    try fx.expectNotice("no mark");
-}
-
-test "M with no mark says so instead of pretending to do something" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try fx.press("M");
-    try fx.expectNotice("no mark to drop");
-}
-
-test ":nomark drops it too, the way :noh drops the search" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try markFresh(fx, &.{ false, true, false }, &.{ false, false, false });
-
-    try fx.press(":");
-    try fx.typeIn("nomark");
-    try fx.press("<CR>");
-    try testing.expect(!fx.app.review.mark_at.taken());
-}
-
-test "every mark command can be remapped, and the screen says the new key" {
-    // `[keys]` resolves command names straight off the enum, so a new command
-    // is remappable the moment it exists. What is worth testing is the other
-    // half: that the messages naming a key read the keymap rather than a
-    // string literal, or a remap turns them into instructions for a key the
-    // reader does not have.
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    var chords: [keymap.Keymap.max_sequence]keymap.Chord = undefined;
-    const moved = [_]keymap.Binding{
-        .{ .chords = try keytext.parseChords("gm", &chords), .command = .mark_here },
-    };
-    fx.app.km.bindings = &moved;
-
-    var buf: [32]u8 = undefined;
-    try testing.expectEqualStrings("gm", keytext.firstKeyFor(fx.app.km.bindings, .mark_here, .normal, &buf));
-
-    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{} } }, body_rows);
-    try fx.app.handle(.{ .key = .{ .codepoint = 'm', .mods = .{} } }, body_rows);
-    try fx.expectNotice("marked");
-}
-
 // -- the compose box takes its keys from the keymap ------------------------
-
-test "the box's feature keys are bindings, and a remap moves them" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    var a: [4]keymap.Chord = undefined;
-    var b: [4]keymap.Chord = undefined;
-    const moved = [_]keymap.Binding{
-        .{ .chords = try keytext.parseChords("<C-g>", &a), .command = .compose_cancel, .modes = keymap.Modes.compose_only },
-        .{ .chords = try keytext.parseChords("<CR>", &b), .command = .compose_submit, .modes = keymap.Modes.compose_only },
-    };
-    fx.app.km.bindings = &moved;
-
-    try fx.app.openCompose(.send, .ref);
-    try fx.expectMode(.note_input);
-    try fx.typeIn("hello");
-
-    // `<Esc>` is no longer bound, so in the box it is just a key that types
-    // nothing - it must not close what the reader is writing.
-    try fx.app.handle(.{ .key = .{ .codepoint = event.code.escape, .mods = .{} } }, body_rows);
-    try fx.expectMode(.note_input);
-
-    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, body_rows);
-    try fx.expectMode(.note_input);
-    // First press leaves insert, second leaves the box - the two levels are
-    // the command's, not the key's.
-    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, body_rows);
-    try fx.expectMode(.normal);
-}
-
-test "a pending operator outranks the keymap, so d<Esc> cancels the operator" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.app.openCompose(.send, .ref);
-    try fx.typeIn("one two");
-    try fx.press("<Esc>"); // leave insert, stay in the box
-    try fx.expectMode(.note_input);
-    try testing.expect(fx.app.compose.mode == .normal);
-
-    try fx.typeIn("d");
-    try testing.expect(fx.app.compose.hasPending());
-    try fx.press("<Esc>");
-    // The operator went, the box stayed, and the text is untouched.
-    try testing.expect(!fx.app.compose.hasPending());
-    try fx.expectMode(.note_input);
-    // The box was seeded with the reference; what matters is that the typed
-    // half survived the operator being cancelled.
-    try testing.expect(std.mem.endsWith(u8, fx.app.compose.text(), "one two"));
-}
 
 test "an unbound compose command drops out of the footer rather than lying" {
     var a: [4]keymap.Chord = undefined;
@@ -8394,172 +3250,6 @@ test "an unbound compose command drops out of the footer rather than lying" {
 }
 
 // -- the timeline ----------------------------------------------------------
-
-test "walking turns says why when there are none to walk" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // No store: the fixture has no environment to run git in, which is the
-    // same state a directory git does not own is in.
-    try fx.press("[t");
-    try fx.expectNotice("snapshots are off");
-    try testing.expect(fx.app.review.viewing == null);
-}
-
-test "a turn is read only, and the refusal names the way back" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    fx.app.review.showTurn(4, "refs/lgtm/s1/4", "refs/lgtm/s1/3");
-
-    // A comment written against a historical turn would anchor to a line that
-    // may not be there any more, or silently retarget to whatever now occupies
-    // that line number. Hard rule 7 says do not lose a remark; the honest way
-    // to keep it is to not take it.
-    try fx.press("<Space>c");
-    try fx.expectNotice("read only");
-    try fx.expectNotice("]t");
-    try testing.expectEqual(@as(usize, 0), fx.app.comments.len());
-
-    // Marking would record a tree the reader is looking at rather than the one
-    // they are answerable for.
-    try fx.press("m");
-    try fx.expectNotice("read only");
-    try testing.expect(!fx.app.review.mark_at.taken());
-}
-
-test "the watcher cannot drag a reader out of the past" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    fx.app.review.showTurn(2, "refs/lgtm/s1/2", "refs/lgtm/s1/1");
-
-    // A re-diff here would throw the reader back to the present mid-sentence.
-    // The event still has to free what it owns, which is why this is a return
-    // rather than a branch around the whole arm.
-    const paths = try testing.allocator.alloc([]const u8, 1);
-    paths[0] = try testing.allocator.dupe(u8, "a.zig");
-    try fx.app.handle(.{ .files_changed = paths }, body_rows);
-    try testing.expectEqual(@as(u32, 2), fx.app.review.viewing.?);
-}
-
-test "showing a turn and returning are the two states, and nothing between" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try testing.expect(fx.app.review.viewRef() == null);
-    fx.app.review.showTurn(7, "refs/lgtm/s1/7", "refs/lgtm/s1/6");
-    try testing.expectEqualStrings("refs/lgtm/s1/7", fx.app.review.viewRef().?);
-    try testing.expectEqual(@as(u32, 7), fx.app.review.viewing.?);
-
-    fx.app.review.showWorking();
-    try testing.expect(fx.app.review.viewRef() == null);
-    try testing.expect(fx.app.review.viewing == null);
-}
-
-test "the turn list says why when there is nothing to list" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // No store, which is the state a directory git does not own is in.
-    try fx.press("<Space>lt");
-    try fx.expectNotice("snapshots are off");
-    try fx.expectMode(.normal);
-}
-
-test "restore refuses when there is no turn to restore from" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // The working tree is not a version of anything: there is nothing to
-    // restore *from*, and the message says which key finds one.
-    try fx.press("R");
-    try fx.expectNotice("nothing to restore from");
-    try testing.expect(fx.app.pending_restore == null);
-}
-
-test "an unconfirmed restore writes nothing, and any key but y is no" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    // Set up the question directly: reaching it needs a snapshot store, and
-    // what is asserted here is the answer, not how it was asked.
-    var ask: @TypeOf(fx.app.pending_restore.?) = .{ .turn = 2 };
-    const path = "a.zig";
-    @memcpy(ask.path[0..path.len], path);
-    ask.path_len = path.len;
-    fx.app.pending_restore = ask;
-
-    // `n`, but the rule is broader: the safe reading of an ambiguous key is
-    // the one that does not write, so only `y` proceeds.
-    try fx.app.handle(.{ .key = .{ .codepoint = 'n', .mods = .{} } }, body_rows);
-    try fx.expectNotice("cancelled");
-    try testing.expect(fx.app.pending_restore == null);
-
-    // And a pending question owns the next key outright - `j` answers it
-    // rather than moving the cursor.
-    fx.app.pending_restore = ask;
-    const before = fx.app.vp.cursor;
-    try fx.app.handle(.{ .key = .{ .codepoint = 'j', .mods = .{} } }, body_rows);
-    try testing.expectEqual(before, fx.app.vp.cursor);
-    try testing.expect(fx.app.pending_restore == null);
-}
-
-test "confirming without a store refuses rather than writing unrecoverably" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    var ask: @TypeOf(fx.app.pending_restore.?) = .{ .turn = 1 };
-    const path = "a.zig";
-    @memcpy(ask.path[0..path.len], path);
-    ask.path_len = path.len;
-    fx.app.pending_restore = ask;
-
-    // No snapshot store, so the pre-restore state could not be recorded. That
-    // is a reason to refuse: without it this would be the only unrecoverable
-    // action in the tool.
-    try fx.app.handle(.{ .key = .{ .codepoint = 'y', .mods = .{} } }, body_rows);
-    try fx.expectNotice("could not snapshot first");
-    try testing.expect(fx.app.pending_restore == null);
-}
-
-test "undo has nothing to undo until a restore happens" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-    try fx.press("u");
-    try fx.expectNotice("nothing to undo");
-}
-
-test "undo refuses once something else has changed the file" {
-    // The guard that makes `u` an undo rather than an overwrite. If the agent
-    // wrote to the file after the restore, putting the old bytes back is not
-    // undoing the reader's action - it is discarding the agent's.
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    var last: @TypeOf(fx.app.last_restore.?) = .{ .turn = 2 };
-    const path = "docs/GUIDE.md"; // a file that exists, with content we know
-    @memcpy(last.path[0..path.len], path);
-    last.path_len = path.len;
-    // A hash the file cannot have: whatever is on disk, it is not this.
-    last.wrote = 0xdead_beef_dead_beef;
-    fx.app.last_restore = last;
-
-    try fx.press("u");
-    try fx.expectNotice("has changed since");
-    // And it forgets, rather than leaving a key armed that will refuse again.
-    try testing.expect(fx.app.last_restore == null);
-}
-
-test "undo is one step: after it there is nothing left to undo" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    var last: @TypeOf(fx.app.last_restore.?) = .{ .turn = 1 };
-    const path = "a.zig";
-    @memcpy(last.path[0..path.len], path);
-    last.path_len = path.len;
-    fx.app.last_restore = last;
-
-    // No store, so this cannot get as far as writing - but it must still
-    // clear or keep the memory deliberately rather than by accident. Here the
-    // file does not exist, so the hash check is what stops it.
-    try fx.press("u");
-    try testing.expect(fx.app.last_restore == null);
-}
 
 // -- `;` repeats the last walk ---------------------------------------------
 
@@ -8610,413 +3300,8 @@ test "; with nothing behind it does nothing rather than guessing" {
     try testing.expectEqual(before, fx.app.vp.cursor);
 }
 
-test "every walk has an opposite, or ',' would be a dead key on it" {
-    // A family that answers `opposite` is one `;` will repeat, so it must also
-    // be one `,` can reverse. A new `]x` added without its pair would repeat
-    // forwards and do nothing backwards, which is the kind of half-binding
-    // nobody notices until they press it.
-    const walks = [_]keymap.Command{
-        .next_hunk,    .prev_hunk,    .next_file,  .prev_file,
-        .next_comment, .prev_comment, .next_fresh, .prev_fresh,
-        .next_risk,    .prev_risk,    .next_turn,  .prev_turn,
-        .search_next,  .search_prev,
-    };
-    for (walks) |w| {
-        const back = w.opposite() orelse return error.TestExpectedOpposite;
-        try testing.expectEqual(w, back.opposite().?);
-    }
-}
-
 // -- `*` and `#` -----------------------------------------------------------
-
-test "* searches the review for the word under the cursor" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j"); // onto `    const x = 1;`
-    try fx.press("^"); // onto `const` itself
-    try fx.press("*");
-
-    try testing.expectEqualStrings("const", fx.app.finder.query());
-    // Strict, which is the difference between `*` and typing the word into `/`.
-    try testing.expect(fx.app.finder.whole);
-
-    // And it went somewhere: the `const` in the other file.
-    try fx.expectFile(1);
-    try fx.expectCursor(2);
-}
-
-test "* from punctuation takes the next word rather than refusing" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    // Column 0 of `    const x = 1;` is a blank, not a word.
-    try fx.press("0");
-    try fx.press("*");
-    try testing.expectEqualStrings("const", fx.app.finder.query());
-}
-
-test "* on a line with no word says so instead of moving" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    try fx.press("j"); // `}`, which has nothing to search for
-    const before = fx.app.vp.cursor;
-    try fx.press("*");
-
-    try fx.expectNotice("no word");
-    try testing.expectEqual(before, fx.app.vp.cursor);
-    // And it left the previous search alone rather than clearing it.
-    try testing.expect(!fx.app.finder.active());
-}
-
-test "; after * steps the matches, not the word under the new cursor" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    try fx.press("^");
-    try fx.press("*");
-    try fx.expectFile(1);
-
-    // The trap this guards: repeating `*` itself would pick up whatever word
-    // the cursor has since landed on, and the search would wander.
-    try testing.expectEqual(keymap.Command.search_next, fx.app.last_walk.?);
-    try fx.press(";");
-    try testing.expectEqualStrings("const", fx.app.finder.query());
-    try fx.expectFile(0);
-}
-
-test "# searches backwards, and n keeps going that way" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    try fx.press("^");
-    try fx.press("#");
-
-    try testing.expectEqualStrings("const", fx.app.finder.query());
-    try testing.expectEqual(search.Direction.backward, fx.app.finder.dir);
-    try fx.expectFile(1);
-}
-
-test "a / after a * loosens the pattern again" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press("j");
-    try fx.press("^");
-    try fx.press("*");
-    try testing.expect(fx.app.finder.whole);
-
-    // Strictness belongs to the search that set it. Left behind, it would
-    // silently narrow the next `/` the reader typed.
-    try fx.press("/");
-    try fx.typeIn("token");
-    try fx.press("<CR>");
-    try testing.expect(!fx.app.finder.whole);
-}
 
 // -- the command line ------------------------------------------------------
 
-test ": runs a command by the name [keys] binds it by" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.expectFile(0);
-    try fx.press(":");
-    try fx.typeIn("next_file");
-    try fx.press("<CR>");
-    try fx.expectFile(1);
-}
-
-test "vim's spellings are aliases onto the same commands, not a second path" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // `:noh` is `clear_search`, so the pattern survives and only the paint
-    // stops - which is the whole of what `:noh` means.
-    try fx.press("/");
-    try fx.typeIn("token");
-    try fx.press("<CR>");
-    try fx.press(":");
-    try fx.typeIn("noh");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("", fx.app.finder.shown());
-    try testing.expectEqualStrings("token", fx.app.finder.query());
-
-    // And the alias inherits what the command already got right: `:nomark`
-    // used to drop a mark that was not there without saying so.
-    try fx.press(":");
-    try fx.typeIn("nomark");
-    try fx.press("<CR>");
-    try fx.expectNotice("no mark to drop");
-}
-
-test ":q still quits, though quit has no key of its own" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("q");
-    try fx.press("<CR>");
-    try testing.expect(fx.app.quit);
-}
-
-test ":quit works too, because the name is the command" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("quit");
-    try fx.press("<CR>");
-    try testing.expect(fx.app.quit);
-}
-
-test "a typo names the nearest command rather than only refusing" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("nextfile");
-    try fx.press("<CR>");
-    try fx.expectNotice("did you mean :next_file?");
-    // And it did not run anything on a guess.
-    try fx.expectFile(0);
-}
-
-test "a name that resembles nothing says so without inventing a suggestion" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("zzzzqqqq");
-    try fx.press("<CR>");
-    try fx.expectNotice("not a command");
-}
-
-test ": refuses a command that only lives inside the compose box" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // Running this from the review would submit a box that is not open.
-    try fx.press(":");
-    try fx.typeIn("compose_submit");
-    try fx.press("<CR>");
-    try fx.expectNotice("works only in the compose box");
-}
-
-test "a bare colon does nothing rather than complaining about the empty name" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.press("<CR>");
-    try fx.expectNoNotice();
-}
-
-test "every typeable command is reachable by its own name" {
-    // The property that makes `?` and `:` two halves of one table: if a
-    // command can be typed, `stringToEnum` must find it under exactly the
-    // name CONFIG.md prints. A command renamed in the enum and not in the
-    // docs fails here rather than in a user's config file.
-    for (std.enums.values(keymap.Command)) |cmd| {
-        if (!keymap.typeable(keymap.default_bindings, cmd)) continue;
-        const back = std.meta.stringToEnum(keymap.Command, @tagName(cmd));
-        try testing.expectEqual(cmd, back.?);
-    }
-}
-
-test "quit is the command with no key, which is why : has to reach names" {
-    // If this ever gains a binding the comment in `submitCommand` is stale,
-    // and if another command loses its binding this is where that shows up.
-    try testing.expect(keymap.typeable(keymap.default_bindings, .quit));
-    for (keymap.default_bindings) |b| {
-        try testing.expect(b.command != .quit);
-    }
-}
-
-test "every command-line message fits the slot at 80 columns" {
-    // Hard rule 9's home environment. The refusals are the long ones, and the
-    // longest command name is what decides whether they fit, so this measures
-    // the worst case rather than a representative one.
-    var longest: usize = 0;
-    for (std.enums.values(keymap.Command)) |cmd| {
-        longest = @max(longest, @tagName(cmd).len);
-    }
-    // " NORMAL " and the right-hand hint strip take the rest of the row.
-    const slot = 54;
-    try testing.expect("not a command - did you mean :".len + longest + "?".len <= slot);
-    try testing.expect(":".len + longest + " works only in the compose box".len <= slot);
-}
-
 // -- <Tab> in the command line ---------------------------------------------
-
-test "Tab extends to what every candidate shares before choosing for you" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("n");
-    try fx.press("<Tab>");
-
-    // `next_` is the part the reader would have typed anyway. Committing to
-    // one of the six here would be the key guessing.
-    try testing.expectEqualStrings("next_", fx.app.prompt.text());
-    try testing.expect(fx.app.comp_at == null);
-    try testing.expect(fx.app.comp.len > 1);
-}
-
-test "the next Tab cycles, and Shift-Tab comes back" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("n");
-    try fx.press("<Tab>"); // extends to next_
-    try fx.press("<Tab>"); // first candidate
-    // Duped: `text()` is a view into the prompt's buffer, which the next
-    // completion overwrites in place.
-    const first = try testing.allocator.dupe(u8, fx.app.prompt.text());
-    defer testing.allocator.free(first);
-    try testing.expect(std.mem.startsWith(u8, first, "next_"));
-
-    try fx.press("<Tab>");
-    try testing.expect(!std.mem.eql(u8, first, fx.app.prompt.text()));
-
-    try fx.press("<S-Tab>");
-    try testing.expectEqualStrings(first, fx.app.prompt.text());
-}
-
-test "cycling wraps rather than stopping at the end" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("next_");
-    try fx.press("<Tab>");
-    const first = try testing.allocator.dupe(u8, fx.app.prompt.text());
-    defer testing.allocator.free(first);
-
-    // Round the whole list once and land back where it started.
-    for (0..fx.app.comp.len) |_| try fx.press("<Tab>");
-    try testing.expectEqualStrings(first, fx.app.prompt.text());
-
-    // And backwards off the start goes to the end, not to nothing.
-    try fx.press("<S-Tab>");
-    try testing.expect(!std.mem.eql(u8, first, fx.app.prompt.text()));
-}
-
-test "one candidate is completed outright" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("toggle_z");
-    try fx.press("<Tab>");
-    try testing.expectEqualStrings("toggle_zen", fx.app.prompt.text());
-}
-
-test "typing after a Tab starts the next one from the new text" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("n");
-    try fx.press("<Tab>");
-    try fx.typeIn("h");
-    // The list must not still be the one built for `n`, or the reader would
-    // be cycling through candidates their own text has ruled out.
-    try testing.expect(fx.app.comp.empty());
-
-    try fx.press("<Tab>");
-    try testing.expectEqualStrings("next_hunk", fx.app.prompt.text());
-}
-
-test "Tab completes a name that Enter then runs" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.expectFile(0);
-    try fx.press(":");
-    try fx.typeIn("next_f");
-    // `next_file` and `next_fresh` already share all of `next_f`, so there is
-    // nothing left to extend to and the first Tab picks.
-    try fx.press("<Tab>");
-    try testing.expectEqualStrings("next_file", fx.app.prompt.text());
-    try fx.press("<CR>");
-    try fx.expectFile(1);
-}
-
-test "Tab in the search prompt is not completion" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    // `/` collects a pattern, not a command name. Offering command names
-    // there would be worse than the key doing nothing.
-    try fx.press("/");
-    try fx.typeIn("n");
-    try fx.press("<Tab>");
-    try testing.expectEqualStrings("n", fx.app.prompt.text());
-    try testing.expect(fx.app.comp.empty());
-}
-
-test "Tab on something resembling no command leaves the line alone" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("zzzqqq");
-    try fx.press("<Tab>");
-    try testing.expectEqualStrings("zzzqqq", fx.app.prompt.text());
-    try testing.expect(fx.app.comp.empty());
-}
-
-test "Tab past the verb completes the value, and Enter applies it" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("theme kana");
-    try fx.press("<Tab>");
-    // The verb is kept and only the value is rewritten, which is the whole
-    // difference from completing a command name.
-    try testing.expectEqualStrings("theme kanagawa", fx.app.prompt.text());
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("kanagawa", fx.app.theme_name);
-    try testing.expect(!std.meta.eql(theme_mod.default, fx.app.theme));
-
-    // A name that is not one leaves the theme alone rather than falling back
-    // to a default the reader did not ask for.
-    try fx.press(":");
-    try fx.typeIn("theme nope");
-    try fx.press("<CR>");
-    try testing.expectEqualStrings("kanagawa", fx.app.theme_name);
-}
-
-test "a verb the line only starts with is not a setting" {
-    // `:themes` is a typo for a command, not `:theme` with an argument, and
-    // treating it as one would set the theme to nothing and say so oddly.
-    try testing.expect(App.settingOf("themes") == null);
-    try testing.expect(App.settingOf("theme") != null);
-    try testing.expectEqualStrings("", App.settingOf("theme").?.arg);
-    try testing.expectEqualStrings("gruvbox", App.settingOf("theme  gruvbox ").?.arg);
-    // vim's spelling reaches the same list.
-    try testing.expectEqualStrings("dracula", App.settingOf("colo dracula").?.arg);
-}
-
-test "closing the prompt forgets the candidates" {
-    var fx = try Fixture.init(testing.allocator);
-    defer fx.deinit();
-
-    try fx.press(":");
-    try fx.typeIn("n");
-    try fx.press("<Tab>");
-    try testing.expect(!fx.app.comp.empty());
-    try fx.press("<Esc>");
-    // Left behind, they would be drawn over the rule the next time any
-    // prompt opened.
-    try testing.expect(fx.app.comp.empty());
-}
