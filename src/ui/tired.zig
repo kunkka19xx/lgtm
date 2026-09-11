@@ -260,8 +260,9 @@ pub const Fall = struct {
         return shortest;
     }
 
-    /// The line and the clock, in the border the `?` overlay uses. Over a pile
-    /// of glyphs a bare row of text reads as more of the wreckage.
+    /// The line and the clock, boxed. The border takes the rule's grey rather
+    /// than the `?` overlay's accent, which every theme puts near `notice` -
+    /// a box the same colour as the sentence inside it reads as one blob.
     pub fn plaque(self: *const Fall, win: vaxis.Window, theme: theme_mod.Theme, glyphs: theme_mod.Glyphs) void {
         var buf: [16]u8 = undefined;
         const ticking = self.clock(&buf);
@@ -276,14 +277,14 @@ pub const Fall = struct {
 
         const col = (win.width -| width) / 2;
         const top = @min((win.height / 3) -| 1, win.height - height);
-        box(win, col, top, width, height, theme.popup_border, glyphs);
+        box(win, col, top, width, height, theme.rule, glyphs);
 
         var row = top + 1 + pad;
         if (line.len > 0) {
             centred(win, row, line, theme.notice);
             row += 1;
         }
-        centred(win, row, ticking, theme.dim);
+        centred(win, row, ticking, theme.text);
     }
 
     pub fn draw(self: *const Fall, win: vaxis.Window) void {
