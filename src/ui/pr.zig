@@ -39,6 +39,9 @@ pub const State = struct {
     note_buf: [256]u8 = undefined,
     note_len: u16 = 0,
     want_post: ?Post = null,
+    /// A forge call the loop is to make off the main thread: `gh` costs the
+    /// better part of a second, and a frozen pane reads as a key that missed.
+    want: ?Want = null,
     /// Whole rows, not numbers: a row already carries the two refs, so picking
     /// one asks GitHub nothing more.
     rows: std.ArrayList(gh.Pr) = .empty,
@@ -47,6 +50,164 @@ pub const State = struct {
         self.rows.deinit(gpa);
     }
 };
+
+/// What the forge is being asked for. Arguments only: the call happens on the
+/// loop's worker and answers with a `Got`.
+pub const Want = union(enum) {
+    /// `:pr [n]`, `--pr`. Null is the current branch's.
+    open: ?u32,
+    /// `<Space>lp`. True takes in merged and closed ones.
+    list: bool,
+    /// A row of the picker, copied out of the pick arena because that is reset
+    /// the moment the list closes.
+    pick: Pr,
+    /// A review, already built: the body is made from the comment store, which
+    /// only the main thread may read.
+    post: Sending,
+
+    /// The sentence the spinner sits beside.
+    pub fn says(self: Want, buf: []u8) []const u8 {
+        return switch (self) {
+            .open => |n| if (n) |x|
+                std.fmt.bufPrint(buf, "opening #{d}", .{x}) catch "opening"
+            else
+                "opening this branch's request",
+            .list => "listing pull requests",
+            .pick => |pr| std.fmt.bufPrint(buf, "opening #{d}", .{pr.number}) catch "opening",
+            .post => |p| std.fmt.bufPrint(buf, "posting to #{d}", .{p.number}) catch "posting",
+        };
+    }
+};
+
+/// A review on its way out, and the remarks to mark when it lands.
+pub const Sending = struct {
+    repo: []const u8,
+    number: u32,
+    payload: []const u8,
+    ids: []const u32,
+    one: ?u32,
+    event: gh.Event,
+};
+
+/// A copy of `gh.Pr` owning its own bytes, so a row survives the arena its
+/// label was built in.
+pub const Pr = struct {
+    number: u32,
+    state: [16]u8 = undefined,
+    state_len: u8 = 0,
+    base_ref: [128]u8 = undefined,
+    base_ref_len: u8 = 0,
+    base_oid: [64]u8 = undefined,
+    base_oid_len: u8 = 0,
+    head_oid: [64]u8 = undefined,
+    head_oid_len: u8 = 0,
+    url: [256]u8 = undefined,
+    url_len: u16 = 0,
+    title: [256]u8 = undefined,
+    title_len: u16 = 0,
+
+    pub fn of(pr: gh.Pr) Pr {
+        var out: Pr = .{ .number = pr.number };
+        inline for (.{ "state", "base_ref", "base_oid", "head_oid", "url", "title" }) |f| {
+            const src = @field(pr, f);
+            const buf = &@field(out, f);
+            const n = @min(src.len, buf.len);
+            @memcpy(buf[0..n], src[0..n]);
+            @field(out, f ++ "_len") = @intCast(n);
+        }
+        return out;
+    }
+
+    pub fn back(self: *const Pr) gh.Pr {
+        return .{
+            .number = self.number,
+            .state = self.state[0..self.state_len],
+            .base_ref = self.base_ref[0..self.base_ref_len],
+            .base_oid = self.base_oid[0..self.base_oid_len],
+            .head_oid = self.head_oid[0..self.head_oid_len],
+            .url = self.url[0..self.url_len],
+            .title = self.title[0..self.title_len],
+        };
+    }
+};
+
+/// What came back, in the job's arena.
+pub const Got = union(enum) {
+    refs: gh.Refs,
+    rows: []gh.Pr,
+    posted: void,
+    failed: void,
+};
+
+/// Arms a call and says so. The loop draws this frame before anything blocks.
+pub fn ask(app: *App, want: Want) void {
+    var buf: [64]u8 = undefined;
+    app.startBusy("{s}", .{want.says(&buf)});
+    app.pr.want = want;
+}
+
+/// The blocking half. Arguments in, an arena and a `Got` out.
+pub fn fetch(gpa: Allocator, arena: Allocator, io: std.Io, want: Want) Got {
+    return switch (want) {
+        .open => |n| .{ .refs = gh.resolve(gpa, arena, io, n) catch return .failed },
+        .pick => |pr| .{ .refs = gh.refsOf(gpa, arena, io, pr.back()) catch return .failed },
+        .list => |all| .{ .rows = gh.list(gpa, arena, io, all) catch return .failed },
+        .post => |p| {
+            gh.post(gpa, arena, io, p.repo, p.number, p.payload) catch return .failed;
+            return .posted;
+        },
+    };
+}
+
+/// What the main thread does with it, once the spinner stops.
+pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
+    app.busy = null;
+    switch (got) {
+        .failed => switch (want) {
+            .list => app.notice.set("could not list pull requests - is gh set up?", .{}),
+            .post => |p| app.notice.set("could not post to #{d}", .{p.number}),
+            else => app.notice.set("could not open that pull request", .{}),
+        },
+        .posted => {
+            const p = want.post;
+            app.comments.markPosted(p.ids);
+            if (p.one == null) finder_mod.closeFiles(app);
+            if (p.one != null) {
+                app.notice.set("posted 1 to #{d}", .{p.number});
+            } else {
+                app.notice.set("posted {d} to #{d} as {s}", .{ p.ids.len, p.number, p.event.wire() });
+            }
+            notes.saveComments(app);
+        },
+        .refs => |refs| enterPr(app, refs),
+        .rows => |rows| {
+            if (rows.len == 0) {
+                app.notice.set("no {s}pull requests", .{if (want.list) "" else "open "});
+                return;
+            }
+            // Copied into the pick arena, because the job's dies with it.
+            app.pick_list.clearRetainingCapacity();
+            app.pr.rows.clearRetainingCapacity();
+            _ = app.pick_arena.reset(.retain_capacity);
+            const into = app.pick_arena.allocator();
+            const kept = try into.alloc(gh.Pr, rows.len);
+            for (rows, kept) |src, *dst| dst.* = .{
+                .number = src.number,
+                .state = try into.dupe(u8, src.state),
+                .base_ref = try into.dupe(u8, src.base_ref),
+                .base_oid = try into.dupe(u8, src.base_oid),
+                .head_oid = try into.dupe(u8, src.head_oid),
+                .url = try into.dupe(u8, src.url),
+                .draft = src.draft,
+                .author = try into.dupe(u8, src.author),
+                .added = src.added,
+                .removed = src.removed,
+                .title = try into.dupe(u8, src.title),
+            };
+            try showPrs(app, into, kept, want.list);
+        },
+    }
+}
 
 /// The author column's ceiling. A login is short; a bot's is not, and one of
 /// them should not push every title off an eighty-column pane.
@@ -92,7 +253,7 @@ pub fn postReview(app: *App, want: gh.Event, note: []const u8) void {
     app.pr.note_len = @intCast(@min(note.len, app.pr.note_buf.len));
     @memcpy(app.pr.note_buf[0..app.pr.note_len], note[0..app.pr.note_len]);
     app.pr.want_post = .{ .event = want };
-    app.notice.set("posting to #{d}...", .{app.pr.number});
+    app.startBusy("posting to #{d}", .{app.pr.number});
 }
 
 pub fn unposted(app: *const App) usize {
@@ -105,19 +266,18 @@ pub fn unposted(app: *const App) usize {
 
 /// The call itself, from the loop, one frame after the notice that says it
 /// is happening.
-pub fn performPost(app: *App, req: Post) void {
-    const repo = postRepo(app) orelse return;
-
-    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
-    defer scratch.deinit();
-    const arena = scratch.allocator();
+/// The half of a post only the main thread may do: read the comment store,
+/// build the body, and list the remarks it covers. Into the job's arena, which
+/// the worker and then the frame reporting it both outlive this call to read.
+pub fn preparePost(app: *App, arena: Allocator, req: Post) ?Want {
+    const repo = postRepo(app) orelse return null;
 
     var one: comments_mod.Store = .init(app.gpa);
     defer one.deinit();
     var store = &app.comments;
     if (req.one) |id| {
-        const n = app.comments.find(id) orelse return;
-        _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed, n.span) catch return;
+        const n = app.comments.find(id) orelse return null;
+        _ = one.addFull(n.path, n.line, n.body, n.anchor, n.about_removed, n.span) catch return null;
         one.list.items[0].state = n.state;
         store = &one;
     }
@@ -127,23 +287,17 @@ pub fn performPost(app: *App, req: Post) void {
     const note = app.pr.note_buf[0..app.pr.note_len];
     gh.reviewBody(&out, arena, store, app.review.files(), req.event, note, &ids) catch {
         app.notice.set("could not build the review", .{});
-        return;
+        return null;
     };
 
-    gh.post(app.gpa, arena, app.io, repo, app.pr.number, out.items) catch {
-        app.notice.set("could not post to #{d}", .{app.pr.number});
-        return;
-    };
-
-    if (req.one) |id| {
-        app.comments.markPosted(&.{id});
-        app.notice.set("posted 1 to #{d}", .{app.pr.number});
-    } else {
-        app.comments.markPosted(ids.items);
-        finder_mod.closeFiles(app);
-        app.notice.set("posted {d} to #{d} as {s}", .{ ids.items.len, app.pr.number, req.event.wire() });
-    }
-    notes.saveComments(app);
+    return .{ .post = .{
+        .repo = arena.dupe(u8, repo) catch return null,
+        .number = app.pr.number,
+        .payload = out.items,
+        .ids = ids.items,
+        .one = req.one,
+        .event = req.event,
+    } };
 }
 
 /// `<C-p>` in the comment list: the one under the cursor, on its own.
@@ -161,7 +315,7 @@ pub fn postOne(app: *App) void {
     }
     app.pr.note_len = 0;
     app.pr.want_post = .{ .event = .comment, .one = n.id };
-    app.notice.set("posting {s}:{d}...", .{ n.path, n.line });
+    app.startBusy("posting {s}:{d}", .{ n.path, n.line });
 }
 
 /// `:pr [n]`, `:pr off` for the working tree, `:pr list [all]` to choose
@@ -180,16 +334,7 @@ pub fn openPr(app: *App, arg: []const u8) Allocator.Error!void {
         };
     }
 
-    // Dies with the call; what the review keeps is copied out. Nothing
-    // is touched before the resolve can fail, so a failure leaves the
-    // review where it was.
-    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
-    defer scratch.deinit();
-    const refs = gh.resolve(app.gpa, scratch.allocator(), app.io, number) catch {
-        app.notice.set("could not open that pull request", .{});
-        return;
-    };
-    enterPr(app, refs);
+    ask(app, .{ .open = number });
 }
 
 /// Point the review at a request and start reading it.
@@ -261,21 +406,7 @@ pub fn importRemarks(app: *App, repo: []const u8, number: u32) usize {
 /// single view returns, so choosing one is a merge-base and a re-diff.
 pub fn openPrList(app: *App, all: bool) Allocator.Error!void {
     if (app.mode == .finder) return finder_mod.closeFiles(app);
-
-    app.pick_list.clearRetainingCapacity();
-    app.pr.rows.clearRetainingCapacity();
-    _ = app.pick_arena.reset(.retain_capacity);
-    const arena = app.pick_arena.allocator();
-
-    const rows = gh.list(app.gpa, arena, app.io, all) catch {
-        app.notice.set("could not list pull requests - is gh set up?", .{});
-        return;
-    };
-    if (rows.len == 0) {
-        app.notice.set("no {s}pull requests", .{if (all) "" else "open "});
-        return;
-    }
-    try showPrs(app, arena, rows, all);
+    ask(app, .{ .list = all });
 }
 
 /// The rows as a list to choose from. Separate from fetching them so the
@@ -355,15 +486,10 @@ pub fn pickPr(app: *App, at: ?u32) void {
     const i = at orelse return finder_mod.closeFiles(app);
     if (i >= app.pr.rows.items.len) return finder_mod.closeFiles(app);
 
-    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
-    defer scratch.deinit();
-    const refs = gh.refsOf(app.gpa, scratch.allocator(), app.io, app.pr.rows.items[i]) catch {
-        finder_mod.closeFiles(app);
-        app.notice.set("could not open that pull request", .{});
-        return;
-    };
+    // Copied before the close, which lets the arena the row lives in go.
+    const pr: Pr = .of(app.pr.rows.items[i]);
     finder_mod.closeFiles(app);
-    enterPr(app, refs);
+    ask(app, .{ .pick = pr });
 }
 
 /// Copies a ref somewhere the review can hold it. Truncates rather than
@@ -402,6 +528,7 @@ pub fn reopen(app: *App) void {
 
 const testing = std.testing;
 const app_mod = @import("app.zig");
+const anim = @import("anim.zig");
 const event = @import("../core/event.zig");
 
 test "a pull request is opened by number and left by name" {
@@ -588,7 +715,68 @@ test "posting is armed, not done, so the frame saying so is drawn first" {
     const req = fx.app.pr.want_post.?;
     try testing.expectEqual(gh.Event.request_changes, req.event);
     try testing.expect(req.one == null);
-    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "posting") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.app.busy.?.label(), "posting") != null);
     // The note outlives the prompt buffer it was typed into.
     try testing.expectEqualStrings("have a look", fx.app.pr.note_buf[0..fx.app.pr.note_len]);
+}
+
+test "a forge call is armed with a sentence, not made on the keystroke" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // The key returns at once; the loop makes the call after the frame that
+    // says it is happening. Without that the pane sits frozen for a second
+    // and the keystroke looks like it missed.
+    ask(&fx.app, .{ .open = 16 });
+    try testing.expect(fx.app.pr.want != null);
+    try testing.expectEqualStrings("opening #16", fx.app.busy.?.label());
+    // Busy is an animation with nothing to arrive at, so the loop paces
+    // frames and the spinner turns.
+    try testing.expect(fx.app.animating(20));
+
+    fx.app.stepAnim(anim.Spinner.frame_ms * 3, 20);
+    try testing.expectEqual(@as(usize, 3), fx.app.busy.?.spin.frame(10));
+
+    try apply(&fx.app, fx.app.pr.want.?, .failed);
+    try testing.expect(fx.app.busy == null);
+    try fx.expectNotice("could not open");
+}
+
+test "a picked row outlives the arena its label was built in" {
+    // `pick` carries a copy: the picker closes before the call is made, and
+    // closing it is what lets the arena the row lived in be reset.
+    const pr: Pr = .of(.{
+        .number = 13,
+        .state = "MERGED",
+        .base_ref = "main",
+        .base_oid = "be94b77",
+        .head_oid = "c7143ba",
+        .url = "https://github.com/o/r/pull/13",
+        .title = "feat: syntax highlight for json",
+    });
+    const back = pr.back();
+    try testing.expectEqual(@as(u32, 13), back.number);
+    try testing.expectEqualStrings("c7143ba", back.head_oid);
+    try testing.expectEqualStrings("feat: syntax highlight for json", back.title);
+
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("opening #13", (Want{ .pick = pr }).says(&buf));
+    try testing.expectEqualStrings("listing pull requests", (Want{ .list = true }).says(&buf));
+}
+
+test "every path that posts arms the spinner, not a notice" {
+    // Three keys post: `:post` for the batch, `<C-p>` in the list for one,
+    // and `<C-p>` in the box for the one being written. The third was missed
+    // once, and a static notice is exactly what a frozen pane looks like.
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.pr.number = 16;
+    fx.app.pr.repo_len = @intCast("o/r".len);
+    @memcpy(fx.app.pr.repo[0..3], "o/r");
+    _ = try fx.app.comments.add("a.zig", 1, "a remark");
+
+    postReview(&fx.app, .comment, "");
+    try testing.expect(fx.app.pr.want_post != null);
+    try testing.expect(fx.app.busy != null);
+    try testing.expect(std.mem.indexOf(u8, fx.app.busy.?.label(), "...") == null);
 }

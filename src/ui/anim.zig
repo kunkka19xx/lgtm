@@ -43,6 +43,24 @@ const half_cell: f32 = 0.5;
 /// all draw the line somewhere, and this is where.
 pub const max_screens: i32 = 2;
 
+/// The "working on it" spinner. Elapsed time rather than a frame counter, so
+/// a slow terminal drops frames instead of stretching the spin out behind it.
+pub const Spinner = struct {
+    pub const frame_ms: f32 = 80;
+
+    elapsed: f32 = 0,
+
+    pub fn step(self: *Spinner, dt_ms: f32) void {
+        self.elapsed += dt_ms;
+    }
+
+    pub fn frame(self: Spinner, count: usize) usize {
+        if (count == 0) return 0;
+        const ticks: usize = @intFromFloat(@max(self.elapsed, 0) / frame_ms);
+        return ticks % count;
+    }
+};
+
 pub const Scroll = struct {
     /// Screen rows between where the viewport is drawn and where it has
     /// settled. Positive means it is drawn *above* the settled position, which
@@ -421,4 +439,18 @@ test "zero budget puts the cursor where it belongs at once" {
     c.step(.{ .row = 0, .col = 0 }, 16);
     c.step(.{ .row = 9, .col = 9 }, 16);
     try testing.expect(!c.travelling(.{ .row = 9, .col = 9 }));
+}
+
+test "a spinner advances a frame at a time and wraps" {
+    var sp: Spinner = .{};
+    try testing.expectEqual(@as(usize, 0), sp.frame(4));
+    sp.step(Spinner.frame_ms);
+    try testing.expectEqual(@as(usize, 1), sp.frame(4));
+    // A slow frame skips rather than stretching the spin out behind it.
+    sp.step(Spinner.frame_ms * 2);
+    try testing.expectEqual(@as(usize, 3), sp.frame(4));
+    sp.step(Spinner.frame_ms);
+    try testing.expectEqual(@as(usize, 0), sp.frame(4));
+    // No frames to draw is not a divide by zero.
+    try testing.expectEqual(@as(usize, 0), sp.frame(0));
 }
