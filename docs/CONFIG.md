@@ -295,9 +295,12 @@ A command with no entry keeps its defaults. An entry replaces them, so listing
 one spelling removes the others.
 
 Spellings: a bare character (`j`, `]`, `?`), `<C-x>` for control, `<Space>` for
-the leader, and `<CR>` `<Esc>` `<Tab>` `<S-Tab>` `<BS>` `<Up>` `<Down>` `<Left>`
-`<Right>` for the named keys. A sequence is those run together: `]h`,
-`<Space>nc`, `gg`.
+the leader, and `<CR>` `<Esc>` `<Tab>` `<BS>` `<Up>` `<Down>` `<Left>` `<Right>`
+for the named keys. `<Enter>` `<Escape>` `<Backspace>` are accepted for the
+first three. Shift only applies to a named key, so `<S-Tab>` and `<S-CR>` are
+the two; on a character the shift *is* the character, and `V` is how you write
+it. `<lt>` is a literal `<`, which a bare one cannot be. A sequence is those run
+together: `]h`, `<Space>nc`, `gg`.
 
 **Conflicts are reported, not resolved.** Binding something to `<Space>d` when
 `<Space>dc` exists makes one of them unreachable, and `lgtm` says so on the
@@ -309,36 +312,154 @@ way to check a spelling before committing it to a config file.
 
 ### Every command
 
-**Moving** `line_down` `line_up` `page_down` `page_up` `top` `bottom`
-`char_left` `char_right` `word_next` `word_prev` `word_end` `big_word_next`
-`big_word_prev` `big_word_end` `line_start` `line_end` `first_non_blank`
-`find_char` `till_char` `find_char_back` `till_char_back` `find_repeat`
-`find_reverse` `center`
+The default key is there so you can find a command by the key you already
+press. `<Space>nx` and `<Space>px` are left out: every `]x` has one, and the
+rule is easier to hold than fourteen more rows.
 
-**Jumping** `next_hunk` `prev_hunk` `next_file` `prev_file` `next_comment`
-`prev_comment` `next_risk` `prev_risk` `search_forward` `search_next`
-`search_prev` `search_word` `search_word_back` `clear_search`
+**Moving**
 
-**The agent** `send_ref` `compose_ask` `copy_text` `copy_text_lines` `copy_ref`
-`copy_ref_lines` `submit_review`
+| Command | Default |
+| --- | --- |
+| `line_down` | `j` `<Down>` |
+| `line_up` | `k` `<Up>` |
+| `page_down` | `<C-d>` |
+| `page_up` | `<C-u>` |
+| `top` | `gg` |
+| `bottom` | `G` |
+| `char_left` | `h` `<Left>` |
+| `char_right` | `l` `<Right>` |
+| `word_next` | `w` |
+| `word_prev` | `b` |
+| `word_end` | `e` |
+| `big_word_next` | `W` |
+| `big_word_prev` | `B` |
+| `big_word_end` | `E` |
+| `line_start` | `0` |
+| `line_end` | `$` |
+| `first_non_blank` | `^` |
+| `find_char` | `f` |
+| `till_char` | `t` |
+| `find_char_back` | `F` |
+| `till_char_back` | `T` |
+| `find_repeat` | `;` |
+| `find_reverse` | `,` |
+| `center` | `zz` |
+| `next_break` | `}` |
+| `prev_break` | `{` |
 
-**Comments** `comment_add` `comment_view` `comment_list` `comment_send`
-`comment_delete` `comment_suggest` `comment_send_one` `comment_send_all` `comment_drop`
-`comment_post_one` `compose_post_now`
+**Jumping**
 
-**Pull requests** `pr_list`
+| Command | Default |
+| --- | --- |
+| `next_hunk` | `]h` |
+| `prev_hunk` | `[h` |
+| `next_file` | `]f` |
+| `prev_file` | `[f` |
+| `next_comment` | `]c` |
+| `prev_comment` | `[c` |
+| `next_risk` | `]w` |
+| `prev_risk` | `[w` |
+| `search_forward` | `/` |
+| `search_next` | `n` |
+| `search_prev` | `N` |
+| `search_word` | `*` |
+| `search_word_back` | `#` |
+| `clear_search` | `<Esc>` |
 
-**Turns and the mark** `mark_here` `clear_mark` `next_fresh` `prev_fresh`
-`next_turn` `prev_turn` `turn_list` `restore_file` `undo_restore`
+**The agent**
 
-**View** `toggle_zen` `toggle_wrap` `toggle_split` `toggle_ignored` `expand_file`
-`collapse_file` `file_list` `file_browse` `help` `refresh` `open_editor`
-`visual_toggle` `visual_char_toggle` `visual_cancel` `command_line` `quit`
+| Command | Default |
+| --- | --- |
+| `send_ref` | `<CR>` |
+| `compose_ask` | `<Space>a` |
+| `copy_text` | `y` |
+| `copy_text_lines` | `Y` |
+| `copy_ref` | `<Space>y` |
+| `copy_ref_lines` | `<Space>Y` |
+| `submit_review` | `<C-s>` |
+| `pick_pane` | `<Space>t` |
 
-**Lists** `list_down` `list_up` `list_left` `list_right`
+**Comments**
 
-**The compose box** `compose_submit` `compose_cancel` `compose_send_now`
-`compose_presets` `compose_mention` `compose_newline`
+| Command | Default |
+| --- | --- |
+| `comment_add` | `<Space>c` |
+| `comment_view` | `<Space>vc` |
+| `comment_list` | `<Space>lc` |
+| `comment_send` | `<Space>sc` |
+| `comment_delete` | `<Space>dc` |
+| `comment_suggest` | `<Space>gc` |
+| `comment_send_one` | `<C-s>` |
+| `comment_send_all` | `<C-x>` |
+| `comment_drop` | `<C-d>` |
+| `comment_post_one` | `<C-p>` |
+| `compose_post_now` | `<C-p>` |
+
+**Pull requests**
+
+| Command | Default |
+| --- | --- |
+| `pr_list` | `<Space>lp` |
+
+**Turns and the mark**
+
+| Command | Default |
+| --- | --- |
+| `mark_here` | `m` |
+| `clear_mark` | `M` |
+| `next_fresh` | `]m` |
+| `prev_fresh` | `[m` |
+| `next_turn` | `]t` |
+| `prev_turn` | `[t` |
+| `turn_list` | `<Space>lt` |
+| `restore_file` | `R` |
+| `undo_restore` | `u` |
+
+**View**
+
+| Command | Default |
+| --- | --- |
+| `toggle_zen` | `<Tab>` |
+| `toggle_wrap` | `zw` |
+| `toggle_split` | `|` `-` |
+| `toggle_ignored` | `zi` |
+| `expand_file` | `zo` |
+| `collapse_file` | `zc` |
+| `collapse_context` | `zf` |
+| `expand_up` | `K` |
+| `expand_down` | `J` |
+| `focus_left` | `H` |
+| `focus_right` | `L` |
+| `file_list` | `<Space>f` |
+| `file_browse` | `<Space>F` |
+| `help` | `?` |
+| `refresh` | `<C-r>` |
+| `open_editor` | `<Space>e` |
+| `visual_toggle` | `V` |
+| `visual_char_toggle` | `v` |
+| `visual_cancel` | `<Esc>` |
+| `command_line` | `:` |
+| `quit` | none |
+
+**Lists**
+
+| Command | Default |
+| --- | --- |
+| `list_down` | `J` `<Down>` `<C-n>` `<Tab>` |
+| `list_up` | `K` `<Up>` `<C-p>` `<S-Tab>` |
+| `list_left` | `H` `H` `<Left>` |
+| `list_right` | `L` `L` `<Right>` |
+
+**The compose box**
+
+| Command | Default |
+| --- | --- |
+| `compose_submit` | `<CR>` |
+| `compose_cancel` | `<Esc>` |
+| `compose_send_now` | `<C-s>` |
+| `compose_presets` | `<C-i>` `<Tab>` |
+| `compose_mention` | `@` |
+| `compose_newline` | `<C-o>` `<C-j>` `<S-CR>` |
 
 The box's keys are bindings like any others, but with two rules of their own.
 They must be **single chords**: a text box cannot hold a prefix while waiting

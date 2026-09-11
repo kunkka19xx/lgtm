@@ -16,6 +16,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proc = @import("../io/proc.zig");
+const scrape = @import("scrape.zig");
 
 /// Pane ids are small integers; `18446744073709551615` is twenty digits and
 /// nothing real gets near it.
@@ -63,13 +64,7 @@ pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) Send
 /// document this program has no other use for does not justify a parser, and a
 /// field that moves shows as no panes found rather than as a wrong answer.
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io) Allocator.Error![][]const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    const argv = listArgv(arena) catch return out.toOwnedSlice(arena);
-    const res = proc.run(gpa, io, argv, list_output_max) catch return out.toOwnedSlice(arena);
-    defer res.deinit(gpa);
-    if (res.exit_code != 0) return out.toOwnedSlice(arena);
-    try parseList(arena, res.stdout, &out);
-    return out.toOwnedSlice(arena);
+    return scrape.ids(listArgv, parseList, list_output_max, gpa, arena, io);
 }
 
 /// Split from the subprocess so the scraping has a test that spawns nothing.

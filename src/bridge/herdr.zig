@@ -22,6 +22,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proc = @import("../io/proc.zig");
+const scrape = @import("scrape.zig");
 
 /// `w12:p34` and room to spare. Pane ids are workspace and pane, both small.
 pub const max_pane_id = 24;
@@ -87,13 +88,7 @@ pub fn classify(stderr: []const u8) SendError {
 /// other backends scrape a named field because their ids are bare integers
 /// with nothing to recognise; here the id recognises itself.
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io) Allocator.Error![][]const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    const argv = listArgv(arena) catch return out.toOwnedSlice(arena);
-    const res = proc.run(gpa, io, argv, list_output_max) catch return out.toOwnedSlice(arena);
-    defer res.deinit(gpa);
-    if (res.exit_code != 0) return out.toOwnedSlice(arena);
-    try parseList(arena, res.stdout, &out);
-    return out.toOwnedSlice(arena);
+    return scrape.ids(listArgv, parseList, list_output_max, gpa, arena, io);
 }
 
 pub fn parseList(arena: Allocator, text: []const u8, out: *std.ArrayList([]const u8)) Allocator.Error!void {

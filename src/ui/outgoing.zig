@@ -190,7 +190,7 @@ pub fn composePostNow(app: *App, body: u16) !void {
     const n = app.comments.find(id) orelse return;
     app.pr.note_len = 0;
     app.pr.want_post = .{ .event = .comment, .one = id };
-    app.notice.set("posting {s}:{d}...", .{ n.path, n.line });
+    app.startBusy("posting {s}:{d}", .{ n.path, n.line });
 }
 
 pub fn composeSubmit(app: *App, body: u16) !void {

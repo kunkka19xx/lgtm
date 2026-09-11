@@ -273,6 +273,8 @@ pub const App = struct {
     pick_arena: std.heap.ArenaAllocator = undefined,
     /// Everything true only while a pull request is on screen, in `ui/pr.zig`.
     pr: pr_mod.State = .{},
+    /// A network call the loop is making off this thread, with a spinner.
+    busy: ?Busy = null,
     /// Questions the box can insert, from `[presets]`. Empty falls back to the
     /// four built-in asks, so the list is never empty.
     presets_cfg: []const config.Preset = &.{},
@@ -757,6 +759,7 @@ pub const App = struct {
                 .completion_at = self.comp_at,
             } else null,
             .notice = self.notice.text(),
+            .busy = if (self.busy) |*b| .{ .label = b.label(), .frame = b.spin.frame(self.glyphs.spinner.len) } else null,
             .query = cmdline.liveQuery(self),
             .compose = if (self.compose.open) outgoing.composeView(self, self.frame_arena.allocator()) else null,
         };
@@ -1513,6 +1516,28 @@ pub const App = struct {
     /// request, because only the loop owns the terminal and the subprocess.
     pub const Delivery = enum { send, copy };
 
+    /// What the tool is waiting on. The label is owned inline: it outlives the
+    /// keystroke that set it by a second, which is long enough for whatever
+    /// arena it came from to have gone.
+    pub const Busy = struct {
+        buf: [64]u8 = undefined,
+        len: u8 = 0,
+        spin: anim.Spinner = .{},
+
+        pub fn label(self: *const Busy) []const u8 {
+            return self.buf[0..self.len];
+        }
+    };
+
+    /// Says what is happening and starts the spinner. The caller returns, and
+    /// the loop draws this frame before anything blocks.
+    pub fn startBusy(self: *App, comptime fmt: []const u8, args: anytype) void {
+        var b: Busy = .{};
+        const text = std.fmt.bufPrint(&b.buf, fmt, args) catch b.buf[0..0];
+        b.len = @intCast(text.len);
+        self.busy = b;
+    }
+
     /// What to compose. `ask` carries its own template rather than an enum the
     /// dispatch would have to translate back into one.
     pub const What = union(enum) {
@@ -1845,6 +1870,9 @@ pub const App = struct {
     }
 
     pub fn animating(self: *App, body: u16) bool {
+        // The one animation with nothing to arrive at: it paces frames so the
+        // spinner turns.
+        if (self.busy != null) return true;
         if (self.vp.scroll_anim.active()) return true;
         const target = self.cursorCell(body) orelse return false;
         return self.vp.cursor_anim.travelling(target);
@@ -1853,6 +1881,7 @@ pub const App = struct {
     /// One frame of both animations. The viewport moves first, because where
     /// the cursor belongs on screen depends on where the viewport has got to.
     pub fn stepAnim(self: *App, dt_ms: f32, body: u16) void {
+        if (self.busy) |*b| b.spin.step(dt_ms);
         self.vp.scroll_anim.step(dt_ms);
         if (self.cursorCell(body)) |target| self.vp.cursor_anim.step(target, dt_ms);
     }

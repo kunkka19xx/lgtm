@@ -28,6 +28,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const proc = @import("../io/proc.zig");
+const scrape = @import("scrape.zig");
 
 /// Terminal ids are small integers.
 pub const max_pane_id = 24;
@@ -123,13 +124,7 @@ pub fn classify(stderr: []const u8) SendError {
 /// Every terminal id Ghostty reports. `get id of every terminal` prints them
 /// comma-separated on one line, which is what AppleScript does with a list.
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io) Allocator.Error![][]const u8 {
-    var out: std.ArrayList([]const u8) = .empty;
-    const argv = listArgv(arena) catch return out.toOwnedSlice(arena);
-    const res = proc.run(gpa, io, argv, list_output_max) catch return out.toOwnedSlice(arena);
-    defer res.deinit(gpa);
-    if (res.exit_code != 0) return out.toOwnedSlice(arena);
-    try parseList(arena, res.stdout, &out);
-    return out.toOwnedSlice(arena);
+    return scrape.ids(listArgv, parseList, list_output_max, gpa, arena, io);
 }
 
 /// The focused terminal's id, copied into `buf`. Null when Ghostty will not

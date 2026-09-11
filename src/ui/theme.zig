@@ -98,6 +98,11 @@ pub const Glyphs = struct {
     /// set does, because only it can assume the font has them.
     file_icons: bool = false,
 
+    /// The frames of the "working on it" spinner, in order. Braille because
+    /// the dots move within one cell, so the text beside it never shifts -
+    /// a spinner whose glyphs differ in width makes the whole line jitter.
+    spinner: []const []const u8,
+
     /// The wordmark on the empty screen, one string per row, left edges
     /// aligned. It belongs to the icon set rather than to the theme for the
     /// same reason the box corners do: a terminal that cannot draw block
@@ -105,6 +110,11 @@ pub const Glyphs = struct {
     wordmark: []const []const u8,
 
     pub const unicode: Glyphs = .{
+        .spinner = &.{
+            "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}",
+            "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
+            "\u{2807}", "\u{280f}",
+        },
         .sep = "\u{258f}",
         .rule = "\u{2500}",
         .gap = "\u{2500}",
@@ -163,6 +173,8 @@ pub const Glyphs = struct {
     };
 
     pub const ascii: Glyphs = .{
+        // One cell wide like the braille set, for the same reason.
+        .spinner = &.{ "-", "\\", "|", "/" },
         .sep = "|",
         .rule = "-",
         .gap = "-",

@@ -158,6 +158,15 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // The reader services SIGWINCH on its own wake, because the handler is
     // only allowed to set a flag - see `io/input.zig`.
     reader.winsize = &winsize;
+    // One forge call at a time, with one arena for what it is handed and what
+    // it brings back.
+    var forge: ?*Forge = null;
+    var prep: std.heap.ArenaAllocator = .init(gpa);
+    defer {
+        if (forge) |job| job.finish();
+        prep.deinit();
+    }
+
     // The directories git tracks, for the doorbell. Asked once: a new one
     // appearing is caught by its parent, which is why the ancestors are in the
     // set too. A failure here is not one - `notify.open` is handed nothing and
@@ -262,13 +271,38 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         // about a second, and a reader who pressed a key and saw nothing
         // assumes the key missed. Armed by the command, performed here, so the
         // notice saying it is happening is already on screen.
-        if (app.pr.want_post) |req| {
-            app.pr.want_post = null;
-            pr_mod.performPost(&app, req);
-            // Straight back to the top rather than on to the wait: what the
-            // call decided has to reach the screen, and the loop blocks for
-            // input until something else happens.
-            continue;
+        // Started after the frame that says it is happening, on a worker so
+        // the spinner keeps turning, and collected on a later pass.
+        if (forge == null) {
+            // A read and a post go the same way: the same second, the same
+            // answer owed.
+            const want: ?pr_mod.Want = if (app.pr.want) |armed| blk: {
+                app.pr.want = null;
+                break :blk armed;
+            } else if (app.pr.want_post) |req| blk: {
+                app.pr.want_post = null;
+                break :blk pr_mod.preparePost(&app, prep.allocator(), req);
+            } else null;
+
+            if (want) |job| {
+                forge = Forge.start(gpa, io, prep.allocator(), job) catch blk: {
+                    app.busy = null;
+                    app.notice.set("could not start that", .{});
+                    break :blk null;
+                };
+            } else if (app.busy != null and app.pr.want == null and app.pr.want_post == null) {
+                // Preparing refused and said why, so the spinner must go.
+                app.busy = null;
+            }
+        }
+        if (forge) |job| {
+            if (job.done.load(.acquire)) {
+                try pr_mod.apply(&app, job.want, job.got);
+                job.finish();
+                forge = null;
+                _ = prep.reset(.retain_capacity);
+                continue;
+            }
         }
 
         // Two ways to wait. Settled, the loop blocks - a review pane is idle
@@ -460,6 +494,51 @@ fn deliver(
             app.notice.set("copied to the clipboard", .{}),
     }
 }
+
+/// A forge call in flight, one at a time.
+///
+/// The worker touches nothing the main thread can see: arguments by value, and
+/// the answer published with a release store the loop acquires. The same shape
+/// `io/watch.zig` has used to run `git status` off this thread since v0.2.
+const Forge = struct {
+    thread: std.Thread,
+    done: std.atomic.Value(bool),
+    want: pr_mod.Want,
+    got: pr_mod.Got,
+    gpa: Allocator,
+    /// The loop's, not this job's. One job at a time and the main thread
+    /// leaves it alone while that runs, which is what makes one arena enough.
+    arena: Allocator,
+    io: std.Io,
+
+    fn start(gpa: Allocator, io: std.Io, arena: Allocator, want: pr_mod.Want) !*Forge {
+        const self = try gpa.create(Forge);
+        self.* = .{
+            .thread = undefined,
+            .done = .init(false),
+            .want = want,
+            .got = .failed,
+            .gpa = gpa,
+            .arena = arena,
+            .io = io,
+        };
+        self.thread = std.Thread.spawn(.{}, work, .{self}) catch |err| {
+            gpa.destroy(self);
+            return err;
+        };
+        return self;
+    }
+
+    fn work(self: *Forge) void {
+        self.got = pr_mod.fetch(self.gpa, self.arena, self.io, self.want);
+        self.done.store(true, .release);
+    }
+
+    fn finish(self: *Forge) void {
+        self.thread.join();
+        self.gpa.destroy(self);
+    }
+};
 
 /// One animation frame's worth of waiting, and the real time it took.
 ///

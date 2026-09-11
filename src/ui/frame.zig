@@ -199,6 +199,8 @@ pub const View = struct {
     /// A message about the last keystroke: a search that found nothing, a
     /// command that is not one. Takes the mode row when present.
     notice: []const u8 = "",
+    /// A call in flight. Outranks a notice: it is the answer to the last key.
+    busy: ?Busy = null,
     /// The live search query, so hits stay highlighted after `/` closes -
     /// which is what makes `n` legible without re-reading the line.
     query: search.Pattern = .{},
@@ -517,6 +519,13 @@ pub const Placement = enum { bottom, top, centre };
 pub const Highlight = enum { gutter, line };
 
 /// One note, as the gutter needs it.
+pub const Busy = struct {
+    label: []const u8,
+    /// Index into `Glyphs.spinner`. Chosen by the app, so the renderer holds
+    /// no clock of its own.
+    frame: usize,
+};
+
 pub const CommentMark = struct {
     line: u32,
     /// What it says, drawn under the line. The gutter marker says a note is

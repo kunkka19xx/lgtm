@@ -360,6 +360,17 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // the working tree's, and a reader who has forgotten where they are will
     // read old code as current. This is the one thing on the row that is not
     // allowed to lose its place to something more urgent.
+    // Ahead of a notice, and of the torn-read warning: both describe
+    // something that has happened, and this describes what is happening now.
+    // Without it a keystroke that costs a network round trip looks like a
+    // keystroke that missed.
+    if (v.busy) |b| {
+        const g = f.glyphs.spinner;
+        const dot = if (g.len > 0) g[@min(b.frame, g.len - 1)] else "";
+        col += @intCast(try f.print(row, col, t.notice, "{s} {s}", .{ dot, b.label }));
+        return;
+    }
+
     const left: []const u8, const style = if (v.torn)
         .{ "file changed while reading, re-diffing", t.removed_count }
     else if (v.notice.len > 0)
