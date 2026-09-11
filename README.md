@@ -17,11 +17,11 @@ you reply.
 
 **You keep your editor, and review code with vim motions.**
 
-- _LGTM running in a pane with your agent and tmux panes inside a window_
 
-<img width="1400" height="900" alt="a-pane-with-agent" src="https://github.com/user-attachments/assets/416d924f-daf6-43cb-b906-68eb67f22e6e" />
 
----
+https://github.com/user-attachments/assets/0eb27774-9c64-43c2-ba22-b392fb58c734
+
+
 
 - _Side-by-side diff view_
 
