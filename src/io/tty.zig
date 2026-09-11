@@ -15,6 +15,23 @@ pub const default_buffer_bytes = 256 << 10;
 
 pub const Winsize = vaxis.Winsize;
 
+/// Press and release with SGR coordinates. Not `1002` or `1003`: motion
+/// reporting is a sequence per cell the pointer crosses, and nothing reads one.
+/// tmux forwards the wheel only to a pane that has asked for the mouse.
+const mouse_on = "\x1b[?1000;1006h";
+const mouse_off = "\x1b[?1000;1006l";
+
+pub fn enableMouse(w: *Io.Writer) !void {
+    try w.writeAll(mouse_on);
+}
+
+/// Pairs with every `enableMouse`, `$EDITOR` included: a terminal still
+/// reporting to a program that does not read it types the sequences into
+/// whatever is being edited.
+pub fn disableMouse(w: *Io.Writer) !void {
+    try w.writeAll(mouse_off);
+}
+
 /// Whether stdout is a terminal, for the output that should be plain once it
 /// is piped into a file or an issue.
 ///

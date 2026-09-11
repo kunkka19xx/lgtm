@@ -67,6 +67,8 @@ pub const Reader = struct {
     /// The descriptor readiness is actually asked about, which is not always
     /// the one we read from - see `pollableFd`.
     poll_fd: ?std.posix.fd_t = null,
+    /// Rows one notch of the wheel moves, from `[ui] scroll_lines`.
+    wheel_lines: u8 = 3,
 
     /// How long a `poll` waits before rechecking `running`. Short enough that
     /// `e` does not feel delayed, long enough that idling costs twenty
@@ -186,9 +188,28 @@ pub const Reader = struct {
                 const ev = res.event orelse continue;
                 switch (ev) {
                     .key_press => |k| self.queue.push(.{ .key = toKey(k) }) catch return,
+                    .mouse => |m| self.wheel(m),
                     else => {},
                 }
             }
+        }
+    }
+
+    /// The wheel, as the arrow keys a terminal outside tmux sends for it
+    /// itself: nothing above learns a second way to scroll, and rebinding the
+    /// arrows rebinds the wheel. The sideways pair is dropped - a trackpad
+    /// reports drift through a vertical flick - and so are the modifiers,
+    /// which are the terminal's own gestures rather than bindings.
+    fn wheel(self: *Reader, m: vaxis.Mouse) void {
+        if (m.type != .press) return;
+        const cp: u21 = switch (m.button) {
+            .wheel_up => event.code.up,
+            .wheel_down => event.code.down,
+            else => return,
+        };
+        var left = self.wheel_lines;
+        while (left > 0) : (left -= 1) {
+            self.queue.push(.{ .key = .{ .codepoint = cp, .mods = .{} } }) catch return;
         }
     }
 };
@@ -274,6 +295,56 @@ test "a burst of SIGWINCH collapses into one resize" {
     // And a signal after the drain is a fresh resize, not a swallowed one.
     WinsizeNotifier.onWinch(@ptrCast(&wn));
     try testing.expect(wn.consume());
+}
+
+test "the wheel arrives as the arrow keys, one per configured row" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var q = event.Queue.init(testing.allocator, threaded.io());
+    defer q.deinit();
+    // Nothing on this path reads the terminal.
+    var r: Reader = .{ .tty = undefined, .queue = &q, .wheel_lines = 3 };
+
+    r.wheel(.{ .col = 4, .row = 9, .button = .wheel_down, .mods = .{}, .type = .press });
+    const down = try q.drain(testing.allocator);
+    defer testing.allocator.free(down);
+    try testing.expectEqual(@as(usize, 3), down.len);
+    for (down) |ev| try testing.expectEqual(event.code.down, ev.key.codepoint);
+
+    r.wheel(.{ .col = 4, .row = 9, .button = .wheel_up, .mods = .{}, .type = .press });
+    const up = try q.drain(testing.allocator);
+    defer testing.allocator.free(up);
+    try testing.expectEqual(@as(usize, 3), up.len);
+    try testing.expectEqual(event.code.up, up[0].key.codepoint);
+}
+
+test "the wheel reports nothing but the two vertical directions" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var q = event.Queue.init(testing.allocator, threaded.io());
+    defer q.deinit();
+    var r: Reader = .{ .tty = undefined, .queue = &q, .wheel_lines = 3 };
+
+    // A release would double every notch; a click is not a scroll.
+    r.wheel(.{ .col = 0, .row = 0, .button = .wheel_down, .mods = .{}, .type = .release });
+    r.wheel(.{ .col = 0, .row = 0, .button = .left, .mods = .{}, .type = .press });
+    r.wheel(.{ .col = 0, .row = 0, .button = .wheel_left, .mods = .{}, .type = .press });
+    r.wheel(.{ .col = 0, .row = 0, .button = .wheel_right, .mods = .{}, .type = .press });
+    try testing.expect(!q.pending());
+}
+
+test "a modifier on the wheel is not a binding the reader typed" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    var q = event.Queue.init(testing.allocator, threaded.io());
+    defer q.deinit();
+    var r: Reader = .{ .tty = undefined, .queue = &q, .wheel_lines = 1 };
+
+    r.wheel(.{ .col = 0, .row = 0, .button = .wheel_down, .mods = .{ .ctrl = true }, .type = .press });
+    const evs = try q.drain(testing.allocator);
+    defer testing.allocator.free(evs);
+    try testing.expectEqual(@as(usize, 1), evs.len);
+    try testing.expect(!evs[0].key.mods.ctrl);
 }
 
 test "modifiers survive translation into the core key type" {

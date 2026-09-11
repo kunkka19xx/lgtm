@@ -116,6 +116,12 @@ pub const Ui = struct {
     /// arrives sooner because it moves a cell a frame and runs out of cells.
     /// Zero puts it there at once.
     cursor_ms: u32 = 80,
+    /// Rows one notch of the mouse wheel moves, and the switch for the mouse
+    /// itself: `0` never asks the terminal to report it, which leaves the
+    /// wheel and drag-selection where they were. Three is what a terminal
+    /// sends for a notch when it converts the wheel itself; a trackpad reports
+    /// a notch per line it travels, so `1` suits one.
+    scroll_lines: u8 = 3,
     /// Columns a tab is drawn as. A tab advances to the next multiple of it,
     /// so aligned code stays aligned. Four rather than eight because the pane
     /// this is built for is a split one, and Go or a Makefile indented at
@@ -375,6 +381,14 @@ pub const Loader = struct {
                         return;
                     }
                     self.cfg.ui.scroll_ms = @intCast(n);
+                } else if (std.mem.eql(u8, key, "scroll_lines")) {
+                    const n = self.wantInt(src, line, key, value) orelse return;
+                    // Past twenty rows a notch is a jump, not a scroll.
+                    if (n < 0 or n > 20) {
+                        self.note(src, line, "ui.scroll_lines must be between 0 and 20", .{});
+                        return;
+                    }
+                    self.cfg.ui.scroll_lines = @intCast(n);
                 } else if (std.mem.eql(u8, key, "tab_width")) {
                     const n = self.wantInt(src, line, key, value) orelse return;
                     // One is a tab that still separates; past sixteen it is an
@@ -783,6 +797,7 @@ pub const starter =
     \\# wrap = true               # soft wrap; zw toggles it for the session
     \\# preview = true            # the panel beside a list: pane screens, comments, diffs
     \\# tab_width = 4             # columns a tab is drawn as
+    \\# scroll_lines = 3          # rows one notch of the wheel moves; 0 leaves the mouse alone
     \\# scroll_ms = 250           # how long a jump travels; 0 is instant
     \\# cursor_ms = 80            # the same for the cursor
     \\
@@ -1319,6 +1334,37 @@ test "snapshot.keep has a floor, because a net that small is not one" {
     defer tiny.deinit();
     try testing.expectEqual(snapshot.default_keep, tiny.cfg.snapshot.keep);
     try testing.expectEqual(@as(usize, 1), tiny.problems.items.len);
+}
+
+test "ui.scroll_lines sets the wheel, and zero turns the mouse off" {
+    var d = loadText("");
+    defer d.deinit();
+    try testing.expectEqual(@as(u8, 3), d.cfg.ui.scroll_lines);
+
+    var one = loadText(
+        \\[ui]
+        \\scroll_lines = 1
+    );
+    defer one.deinit();
+    try testing.expectEqual(@as(u8, 1), one.cfg.ui.scroll_lines);
+    try testing.expectEqual(@as(usize, 0), one.problems.items.len);
+
+    // Zero is a value rather than a problem: the terminal keeps the mouse.
+    var off = loadText(
+        \\[ui]
+        \\scroll_lines = 0
+    );
+    defer off.deinit();
+    try testing.expectEqual(@as(u8, 0), off.cfg.ui.scroll_lines);
+    try testing.expectEqual(@as(usize, 0), off.problems.items.len);
+
+    var bad = loadText(
+        \\[ui]
+        \\scroll_lines = 99
+    );
+    defer bad.deinit();
+    try testing.expectEqual(@as(u8, 3), bad.cfg.ui.scroll_lines);
+    try testing.expectEqual(@as(usize, 1), bad.problems.items.len);
 }
 
 test "ui.tab_width takes a stop and refuses one no pane could hold" {
