@@ -19,6 +19,7 @@ const input = @import("../io/input.zig");
 const metrics = @import("../io/metrics.zig");
 const proc = @import("../io/proc.zig");
 const tty_mod = @import("../io/tty.zig");
+const tired = @import("tired.zig");
 const watch = @import("../io/watch.zig");
 const git = @import("../core/git.zig");
 
@@ -42,6 +43,9 @@ const theme_mod = @import("theme.zig");
 /// One animation frame. 60 Hz is smooth and is what the terminal can flush;
 /// asking for more would spend bandwidth on frames a pane cannot show.
 const frame_ms: i64 = 16;
+
+/// What `:tired` paces at once the screen is down.
+const resting_ms: i64 = 250;
 
 pub const Options = struct {
     /// Render one frame and exit. What CI and a screenshot need, and the only
@@ -360,6 +364,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             try deliver(&app, &br, w, how, &saved);
         }
 
+        if (app.want_tired) {
+            app.want_tired = false;
+            try playTired(&app, &vx, w, io, &queue);
+        }
+
         if (app.want_editor) {
             app.want_editor = false;
             try openEditor(&app, &vx, &term, w, environ, &reader, opts);
@@ -547,10 +556,9 @@ const Forge = struct {
 
 /// One animation frame's worth of waiting, and the real time it took.
 ///
-/// Real rather than assumed: a terminal slow to flush would otherwise stretch
-/// every animation out behind it. Slept in slices with the queue checked
-/// between, for the same reason `io/watch.zig` slices its interval - a
-/// keystroke arriving mid-animation should wait a slice, not a whole frame.
+/// Slept in slices with the queue checked between, for the same reason
+/// `io/watch.zig` slices its interval - a keystroke arriving mid-animation
+/// should wait a slice, not a whole frame.
 fn pace(io: std.Io, queue: *event.Queue, ms: i64) f32 {
     const slice: i64 = 4;
     const start: std.Io.Timestamp = .now(io, .awake);
@@ -559,6 +567,20 @@ fn pace(io: std.Io, queue: *event.Queue, ms: i64) f32 {
         std.Io.sleep(io, .fromMilliseconds(@min(slice, ms - slept)), .awake) catch break;
         if (queue.pending()) break;
     }
+    return since(io, start);
+}
+
+/// The same wait, uninterrupted: for an animation that is already the answer
+/// to what is on the queue.
+fn tick(io: std.Io, ms: i64) f32 {
+    const start: std.Io.Timestamp = .now(io, .awake);
+    std.Io.sleep(io, .fromMilliseconds(ms), .awake) catch {};
+    return since(io, start);
+}
+
+/// Measured rather than assumed: a terminal slow to flush would otherwise
+/// stretch every animation out behind it.
+fn since(io: std.Io, start: std.Io.Timestamp) f32 {
     const ns = start.durationTo(.now(io, .awake)).nanoseconds;
     return @as(f32, @floatFromInt(ns)) / std.time.ns_per_ms;
 }
@@ -646,6 +668,50 @@ fn openEditor(
     // The user very likely changed the file, and the watcher may or may not
     // have seen it while we were not draining events.
     try app.rediff();
+}
+
+/// `:tired`. The last drawn screen falls to the floor and stays down until an
+/// event sends it back up. Drawn here rather than in `App` for the reason
+/// `$EDITOR` is handed the terminal here: the loop owns the screen.
+///
+/// Nothing times out. A break that ends itself is not a break.
+fn playTired(
+    app: *App,
+    vx: *vaxis.Vaxis,
+    w: *std.Io.Writer,
+    io: std.Io,
+    queue: *event.Queue,
+) !void {
+    const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    var fall = try tired.capture(app.gpa, &vx.screen, @intCast(@mod(now, 1_000_000_007)));
+    defer fall.deinit(app.gpa);
+
+    const win = vx.window();
+    while (!fall.back()) {
+        // The event stays on the queue: this is the answer to it, not instead
+        // of it.
+        if (queue.pending()) fall.rise();
+
+        win.clear();
+        win.hideCursor();
+        fall.draw(win);
+        // Down, only the clock moves, so the frames slow to what a seconds
+        // counter needs. Rising, the queue is not watched at all: it is
+        // already pending, and every sleep would return at once.
+        const dt = switch (fall.phase) {
+            .rise => tick(io, frame_ms),
+            .fall => blk: {
+                if (!fall.quiet()) break :blk pace(io, queue, frame_ms);
+                fall.plaque(win, app.theme, app.glyphs);
+                break :blk pace(io, queue, resting_ms);
+            },
+        };
+        try vx.render(w);
+        try w.flush();
+        fall.step(dt);
+    }
+    // Nothing vaxis believes is on the screen still is.
+    vx.queueRefresh();
 }
 
 fn frameOf(app: *App, win: vaxis.Window, arena: Allocator) render.Frame {
@@ -743,5 +809,6 @@ test {
     _ = bridge;
     _ = editor;
     _ = splash;
+    _ = tired;
     _ = @import("path.zig");
 }

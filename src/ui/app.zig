@@ -328,6 +328,9 @@ pub const App = struct {
     /// loop owns the terminal the clipboard sequence goes to and the process
     /// the tmux send spawns.
     want_send: ?Delivery = null,
+    /// `:tired`. The loop owns the screen the glyphs fall off, so this is a
+    /// request like `want_editor`.
+    want_tired: bool = false,
 
     pub fn init(gpa: Allocator, io: std.Io, queue: *event.Queue) App {
         return .{
@@ -855,6 +858,7 @@ pub const App = struct {
             // The run loop owns the terminal and is the only thing that can
             // lend it out, so this is a request rather than an action.
             .open_editor => self.want_editor = true,
+            .tired => self.want_tired = true,
             .send_ref => try outgoing.openCompose(self, .send, .ref),
             .comment_add => {
                 if (self.readOnly()) return;

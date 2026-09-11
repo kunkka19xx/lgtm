@@ -10,7 +10,7 @@
 // for a keystroke is decided here, and it is decided by a table, so it can be
 // checked without a terminal to press Tab in.
 //
-// Fixed capacity, no allocator. There are 87 commands; a completion that can
+// Fixed capacity, no allocator. There are a hundred or so commands; a completion that can
 // fail to allocate is a completion that can eat a keystroke.
 
 const std = @import("std");

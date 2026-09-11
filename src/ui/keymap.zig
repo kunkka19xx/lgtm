@@ -195,6 +195,10 @@ pub const Command = enum {
     compose_presets,
     compose_mention,
     compose_newline,
+    /// `:tired`. The screen falls to the floor and a keystroke puts it back.
+    /// No binding: a key that does this by accident stops being funny the
+    /// first time.
+    tired,
     /// Move the selection in whichever overlay is open. Live only in the
     /// overlay modes, so these keys stay free for the review itself.
     list_down,
@@ -875,10 +879,11 @@ test "every command is reachable from the default bindings" {
     // A command with no binding is dead code that looks alive.
     inline for (@typeInfo(Command).@"enum".fields) |f| {
         const want: Command = @enumFromInt(f.value);
-        // `quit` is the one exception, and by design: it is typed as `:q`
-        // rather than chorded, so `command_line` is the binding that reaches
-        // it and `app.submitCommand` is what dispatches it.
-        if (want == .quit) continue;
+        // Two exceptions, both typed rather than chorded: `command_line` is
+        // the binding that reaches them and `app.submitCommand` dispatches
+        // them. `:q` is what a vim reader already presses, and `:tired` must
+        // not be one key away from the review.
+        if (want == .quit or want == .tired) continue;
         var found = false;
         for (default_bindings) |b| {
             if (b.command == want) found = true;

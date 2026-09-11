@@ -554,6 +554,14 @@ then refuse.
 `?` shows the keys and `:` runs the names. Both read the same table, so neither
 can drift from what the tool actually does.
 
+One name is not about the review at all. `:tired` drops the screen on the
+floor, where it stays, with a clock counting how long you have been away in a
+box over the heap.
+Whatever you press next sends every character back up the way it came down,
+onto the cell it started from, and then does whatever that key normally does.
+Try it at the end of a long session. It has no binding, because a key that does
+this by accident stops being funny the first time.
+
 ### In a list
 
 `J` and `K` move, `H` and `L` page, `<CR>` opens, `<Esc>` closes, and typing
