@@ -421,6 +421,7 @@ documents itself. What follows is the defaults.
 | `f` `t` `F` `T` | to or before a character on this line |
 | `;` `,` | repeat the last jump, either way (see below) |
 | `<C-d>` `<C-u>` | half a page |
+| wheel | three lines, the same as the arrows |
 | `gg` `G` | first and last line |
 | `}` `{` | next and previous break: a blank line, or a hunk edge |
 | `zz` | centre the cursor line |
@@ -595,6 +596,14 @@ Kill `lgtm` and restart it; you lose scroll position and nothing else.
 **"not a git repository".** `lgtm` reads `git diff` for a living. The screen
 shows which directory it means, so you can tell a wrong `cd` from a directory
 that needs `git init`.
+
+**The wheel scrolls the terminal instead of the review.** `lgtm` asks the
+terminal to report the wheel, which is what makes it work inside `tmux`: recent
+`tmux` hands the wheel to a pane only when the pane has asked for it, and puts
+it into copy mode otherwise. The cost is that a drag selects nothing, because
+the terminal is now sending those events here. Hold `Shift` to select the way
+you always did, or set `scroll_lines = 0` under `[ui]` to hand the mouse back
+to the terminal entirely.
 
 **A setting was ignored.** A bad key is reported on the status line with the
 file and the line. It never stops `lgtm` starting, and it only costs that one

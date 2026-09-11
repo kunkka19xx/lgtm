@@ -85,8 +85,12 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer vx.deinit(gpa, w);
 
     try vx.enterAltScreen(w);
+    // `--once` renders one frame and never reads a key.
+    const wheel = opts.cfg.ui.scroll_lines > 0 and !opts.once;
+    if (wheel) try tty_mod.enableMouse(w);
     try w.flush();
     defer {
+        if (wheel) tty_mod.disableMouse(w) catch {};
         vx.exitAltScreen(w) catch {};
         w.flush() catch {};
     }
@@ -154,6 +158,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     }
 
     var reader = input.Reader.init(&term, &queue);
+    reader.wheel_lines = opts.cfg.ui.scroll_lines;
     var winsize: input.WinsizeNotifier = .{ .tty = &term, .queue = &queue };
     // The reader services SIGWINCH on its own wake, because the handler is
     // only allowed to set a flag - see `io/input.zig`.
@@ -617,6 +622,9 @@ fn openEditor(
     }
 
     if (!opts.once) reader.stop();
+    // The editor is about to own the terminal, and does not read the wheel.
+    const wheel = opts.cfg.ui.scroll_lines > 0 and !opts.once;
+    if (wheel) tty_mod.disableMouse(w) catch {};
     vx.exitAltScreen(w) catch {};
     w.flush() catch {};
     term.suspendRaw();
@@ -628,6 +636,7 @@ fn openEditor(
 
     term.resumeRaw();
     vx.enterAltScreen(w) catch {};
+    if (wheel) tty_mod.enableMouse(w) catch {};
     w.flush() catch {};
     if (!opts.once) try reader.start();
 
