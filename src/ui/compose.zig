@@ -58,6 +58,8 @@ const Pending = union(enum) {
     delete,
     change,
     find: struct { forward: bool, till: bool },
+    /// The first `g` of `gg`, waiting for the second.
+    goto,
 };
 
 pub const Compose = struct {
@@ -78,6 +80,9 @@ pub const Compose = struct {
     undo_len: usize = 0,
     undo_cursor: usize = 0,
     undo_valid: bool = false,
+    /// Somebody's remark from the request, opened to be read. Motions work;
+    /// nothing that would change the text does, because this is a copy.
+    read_only: bool = false,
 
     /// Opens the box seeded with `text`, caret at the end - which is where
     /// someone about to add a sentence wants it. Nothing is selected and
@@ -94,6 +99,16 @@ pub const Compose = struct {
         self.mode = .insert;
         self.pending = null;
         self.undo_valid = false;
+        self.read_only = false;
+    }
+
+    /// Opens on a remark nothing here may change, caret at the top: reading
+    /// starts at the first word, not after the last.
+    pub fn startView(self: *Compose, seed: []const u8) void {
+        self.start(seed);
+        self.cursor = 0;
+        self.mode = .normal;
+        self.read_only = true;
     }
 
     /// Remembers the buffer so `u` can put it back. Called before anything
@@ -160,6 +175,8 @@ pub const Compose = struct {
         self.open = false;
         self.len = 0;
         self.cursor = 0;
+        self.pending = null;
+        self.read_only = false;
     }
 
     pub fn text(self: *const Compose) []const u8 {
@@ -301,8 +318,36 @@ pub const Compose = struct {
     }
 
     pub fn feed(self: *Compose, key: event.Key) Result {
+        if (self.read_only) return self.feedView(key);
         if (self.mode == .normal) return self.feedNormal(key);
         return self.feedInsert(key);
+    }
+
+    /// Reading keys only, and the same motions `feedNormal` uses. Anything
+    /// that would edit is dropped rather than half-applied.
+    fn feedView(self: *Compose, key: event.Key) Result {
+        const cp = key.codepoint;
+        if (self.pending != null) {
+            self.pending = null;
+            if (cp == 'g') self.cursor = 0;
+            return .typing;
+        }
+        switch (cp) {
+            'g' => self.pending = .goto,
+            'G' => self.toLastLine(),
+            'j', event.code.down => self.lineStep(1),
+            'k', event.code.up => self.lineStep(-1),
+            else => {
+                if (self.motionTarget(cp)) |at| self.cursor = at;
+            },
+        }
+        return .typing;
+    }
+
+    /// `G`: the start of the last line, the way vim counts it.
+    fn toLastLine(self: *Compose) void {
+        self.cursor = self.len;
+        self.cursor = self.lineStart();
     }
 
     /// Normal mode: motions from `ui/motion.zig` - the same ones the diff uses,
@@ -314,6 +359,11 @@ pub const Compose = struct {
         // A pending `f`/`t` takes the next key as its character, never as a
         // command, exactly the way the review does.
         if (self.pending) |p| switch (p) {
+            .goto => {
+                self.pending = null;
+                if (cp == 'g') self.cursor = 0;
+                return .typing;
+            },
             .find => |fd| {
                 self.pending = null;
                 if (cp == event.code.escape) return .typing;
@@ -415,6 +465,8 @@ pub const Compose = struct {
             },
             'd' => self.pending = .delete,
             'c' => self.pending = .change,
+            'g' => self.pending = .goto,
+            'G' => self.toLastLine(),
             'u' => self.undo(),
             'f' => self.pending = .{ .find = .{ .forward = true, .till = false } },
             't' => self.pending = .{ .find = .{ .forward = true, .till = true } },
@@ -985,4 +1037,23 @@ test "a full buffer takes what fits rather than trapping" {
     c.home();
     c.insert("more");
     try testing.expectEqual(@as(usize, max_bytes), c.text().len);
+}
+
+test "gg and G reach the ends of a box with more than one line in it" {
+    var c: Compose = .{};
+    c.start("first\nsecond\nthird");
+    c.toNormal();
+
+    _ = c.feed(.{ .codepoint = 'g', .mods = .{} });
+    _ = c.feed(.{ .codepoint = 'g', .mods = .{} });
+    try testing.expectEqual(@as(usize, 0), c.cursor);
+
+    _ = c.feed(.{ .codepoint = 'G', .mods = .{} });
+    try testing.expectEqualStrings("third", c.line());
+
+    // A half-typed `gg` cancels rather than jumping: `gx` is not a motion.
+    _ = c.feed(.{ .codepoint = 'g', .mods = .{} });
+    _ = c.feed(.{ .codepoint = 'x', .mods = .{} });
+    try testing.expectEqualStrings("third", c.line());
+    try testing.expectEqualStrings("first\nsecond\nthird", c.text());
 }

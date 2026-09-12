@@ -200,6 +200,9 @@ pub const App = struct {
     /// What the compose box will do with what is typed: send it, or attach it
     /// to a line as a note. The box itself does not know or care.
     compose_comment: ?u32 = null,
+    /// The forge's id of the comment in the box, when the reader left it on
+    /// the request. Saving one is a call, not a store write. Zero otherwise.
+    compose_remote: u64 = 0,
     /// Where the comment being written belongs, captured when the box opened.
     /// Opening it clears the selection, so asking again at save time would
     /// give a range of one line.
@@ -1368,7 +1371,7 @@ pub const App = struct {
         const line = f.lines.new_no[0];
 
         _ = try fx.app.comments.add(f.path(), line, "mine");
-        _ = try fx.app.comments.adopt(f.path(), line, 1, "theirs", "someone", false);
+        _ = try fx.app.comments.adopt(f.path(), line, 1, "theirs", "someone", false, 0);
         try fx.app.rebuildRows(.line);
 
         var seen: usize = 0;

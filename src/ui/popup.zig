@@ -1252,7 +1252,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     const box_col = geom.col;
 
     const label = try std.fmt.allocPrint(f.arena, "{s} - {s}", .{
-        v.what, if (v.normal) "NORMAL" else "INSERT",
+        v.what, if (v.read_only) "VIEW" else if (v.normal) "NORMAL" else "INSERT",
     });
     const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
     const foot = try footerOf(f.arena, "", try composeKeys(f, v), &.{}, content);
@@ -1272,6 +1272,16 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     };
     _ = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
 
+    // Which wrapped row the caret is on, so a message taller than the box
+    // scrolls with it rather than being cut off at the border.
+    var caret_at: u16 = 0;
+    var seen: u16 = 0;
+    var scan: ComposeRows = .init(v.text, content, f.method());
+    while (scan.next()) |chunk| : (seen += 1) {
+        if (v.cursor >= chunk.start and v.cursor <= chunk.end) caret_at = seen;
+    }
+    const first: u16 = if (caret_at >= text_rows) caret_at - text_rows + 1 else 0;
+
     // The caret's cell falls out of the same wrap the text is drawn with, so
     // the two cannot disagree - the bug `ui/wrap.zig` exists to prevent.
     var caret_row: u16 = 0;
@@ -1279,11 +1289,12 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     var row: u16 = 0;
     var chunks: ComposeRows = .init(v.text, content, f.method());
     while (chunks.next()) |chunk| : (row += 1) {
-        if (row >= text_rows) break;
+        if (row < first) continue;
+        if (row - first >= text_rows) break;
         const line = chunk.slice(v.text);
-        f.put(box_top + 1 + row, box_col + 2, line, f.theme.text);
+        f.put(box_top + 1 + row - first, box_col + 2, line, f.theme.text);
         if (v.cursor >= chunk.start and v.cursor <= chunk.end) {
-            caret_row = row;
+            caret_row = row - first;
             caret_col = f.win.gwidth(v.text[chunk.start..v.cursor]);
         }
     }
@@ -1318,7 +1329,13 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
 /// does that are not motions (`keymap.Modes.compose_only`).
 fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEntry {
     var out: std.ArrayList(keytext.HelpEntry) = .empty;
-    const commit = if (v.saves) "save" else "send";
+    const commit = if (v.amends) "save on the request" else if (v.saves) "save" else "send";
+
+    // A row of keys that do nothing is worse than none.
+    if (v.read_only) {
+        try add(f, v, &out, .compose_cancel, "close");
+        return out.toOwnedSlice(f.arena);
+    }
 
     if (v.normal) try out.appendSlice(f.arena, &.{
         .{ .keys = "o", .desc = "new line" },
@@ -1329,8 +1346,8 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
     // Before the rest, because the footer sheds groups from the end and this
     // is the one a reader needs on their second sentence.
     if (!v.normal) try add(f, v, &out, .compose_newline, "line");
-    if (v.saves) try add(f, v, &out, .compose_send_now, "save + send");
-    if (v.saves and v.posts) try add(f, v, &out, .compose_post_now, "save + post");
+    if (v.saves and !v.amends) try add(f, v, &out, .compose_send_now, "save + send");
+    if (v.saves and v.posts and !v.amends) try add(f, v, &out, .compose_post_now, "save + post");
     if (!v.normal) {
         try add(f, v, &out, .compose_presets, "preset");
         if (!v.saves) try add(f, v, &out, .compose_mention, "file");

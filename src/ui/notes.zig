@@ -193,11 +193,27 @@ pub fn commentEdit(app: *App) Allocator.Error!void {
         app.notice.set("no comment here", .{});
         return;
     };
-    if (notYours(app, n.*)) return;
+    // Somebody else's opens to be read. Refusing to open it at all left the
+    // only full copy of it in a gutter marker.
+    if (n.theirs() and !mine(app, n.*)) return commentRead(app, n);
+    if (n.theirs()) app.compose_remote = n.remote;
     app.compose_is_comment = true;
     app.compose_comment = n.id;
     app.compose_to = .copy;
     app.compose.start(n.body);
+    app.preset_index = null;
+    app.mode = .note_input;
+}
+
+/// A remark from the request, in the box with no way to change it: editing a
+/// copy would say something its author never wrote.
+pub fn commentRead(app: *App, n: *comments_mod.Comment) void {
+    app.compose_is_comment = false;
+    app.compose_remote = 0;
+    app.compose_comment = n.id;
+    app.compose_spot = null;
+    app.compose_to = .copy;
+    app.compose.startView(n.body);
     app.preset_index = null;
     app.mode = .note_input;
 }
@@ -223,7 +239,8 @@ pub fn commentUnderCursor(app: *App) ?*comments_mod.Comment {
     return app.comments.at(at.path, at.line);
 }
 
-/// `<Space>vc`: the nearest note, opened to read and edit.
+/// `<Space>vc`: the nearest note, opened to read and edit - or to read
+/// only, when it is a remark that came from the request.
 ///
 /// Nearest rather than "the one under the cursor", because the reader
 /// asking to see a note is usually near it rather than on it - the marker
@@ -343,12 +360,27 @@ pub fn commentDelete(app: *App) void {
     app.notice.set("comment deleted", .{});
 }
 
-/// Somebody else's remark, and why nothing here may change it: it lives on
-/// the request, and editing a copy would say something the author never
-/// wrote while the real one stayed as it was.
+/// Whether the reader wrote it. Without a login - `gh` could not be asked, or
+/// no request is open - nothing is claimed, which errs towards read only.
+pub fn mine(app: *App, n: comments_mod.Comment) bool {
+    if (!n.theirs()) return true;
+    if (n.remote == 0) return false;
+    const who = app.pr.viewer();
+    return who.len > 0 and std.ascii.eqlIgnoreCase(who, n.author);
+}
+
+/// A remark nothing here may delete, and why. Either way it lives on the
+/// request, and that is where it changes.
 pub fn notYours(app: *App, n: comments_mod.Comment) bool {
     if (!n.theirs()) return false;
-    app.notice.set("{s} wrote that one - reply on the request", .{n.author});
+    var key: [32]u8 = undefined;
+    if (mine(app, n)) {
+        app.notice.set("that one is on the request - {s} edits it there", .{
+            app.keyFor(.comment_view, .normal, &key),
+        });
+    } else {
+        app.notice.set("{s} wrote that one - reply on the request", .{n.author});
+    }
     return true;
 }
 
@@ -543,4 +575,78 @@ pub fn noComments(app: *App) void {
 
 pub fn dist(a: u32, b: u32) u32 {
     return if (a > b) a - b else b - a;
+}
+
+const testing = std.testing;
+
+test "a remark from the request opens to be read, never to be edited" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    const body = "this retry never backs off";
+    _ = try fx.app.comments.adopt("a.zig", 2, 1, body, "someone", false, 0);
+    try commentView(&fx.app, 20);
+
+    // It used to refuse to open at all.
+    try testing.expect(fx.app.mode == .note_input);
+    try testing.expect(fx.app.compose.read_only);
+    try testing.expect(!fx.app.compose_is_comment);
+    try testing.expectEqualStrings(body, fx.app.compose.text());
+
+    // Nothing typed reaches the text, and `i` finds no way in.
+    for ("ixddu") |c| _ = fx.app.compose.feed(.{ .codepoint = c, .mods = .{} });
+    try testing.expectEqualStrings(body, fx.app.compose.text());
+    try testing.expect(fx.app.compose.read_only);
+
+    _ = fx.app.compose.feed(.{ .codepoint = 'w', .mods = .{} });
+    try testing.expectEqual(@as(usize, 5), fx.app.compose.cursor);
+    _ = fx.app.compose.feed(.{ .codepoint = '0', .mods = .{} });
+    try testing.expectEqual(@as(usize, 0), fx.app.compose.cursor);
+}
+
+test "a remark of the reader's own on the request opens to be edited there" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.pr.number = 16;
+    fx.app.pr.login_len = @intCast("kunkka19xx".len);
+    @memcpy(fx.app.pr.login[0..fx.app.pr.login_len], "kunkka19xx");
+    const id = try fx.app.comments.adopt("a.zig", 2, 1, "mine, posted", "Kunkka19xx", false, 777);
+
+    try commentView(&fx.app, 20);
+    // Editable, and `<CR>` knows it has to reach the forge.
+    try testing.expect(!fx.app.compose.read_only);
+    try testing.expect(fx.app.compose_is_comment);
+    try testing.expectEqual(@as(u64, 777), fx.app.compose_remote);
+    try testing.expectEqual(@as(?u32, id), fx.app.compose_comment);
+
+    // Somebody else's on the same request is read and no more.
+    fx.app.comments.remove(id);
+    _ = try fx.app.comments.adopt("a.zig", 2, 1, "theirs", "someone", false, 778);
+    try commentView(&fx.app, 20);
+    try testing.expect(fx.app.compose.read_only);
+    try testing.expectEqual(@as(u64, 0), fx.app.compose_remote);
+}
+
+test "without a login nothing is claimed, so a remark stays read only" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `gh` could not be asked. Guessing would offer an edit that 404s.
+    _ = try fx.app.comments.adopt("a.zig", 2, 1, "mine, posted", "kunkka19xx", false, 777);
+    try commentView(&fx.app, 20);
+    try testing.expect(fx.app.compose.read_only);
+}
+
+test "the reader's own remark still opens to be edited" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    _ = try fx.app.comments.add("a.zig", 2, "mine");
+    try commentView(&fx.app, 20);
+
+    try testing.expect(!fx.app.compose.read_only);
+    try testing.expect(fx.app.compose_is_comment);
+    _ = fx.app.compose.feed(.{ .codepoint = '!', .mods = .{} });
+    try testing.expectEqualStrings("mine!", fx.app.compose.text());
 }
