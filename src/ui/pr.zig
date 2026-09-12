@@ -11,6 +11,7 @@ const notes = @import("notes.zig");
 const finder_mod = @import("finder.zig");
 const comments_mod = @import("../core/comments.zig");
 const gh = @import("../core/gh.zig");
+const compose_mod = @import("compose.zig");
 const wrap_mod = @import("wrap.zig");
 
 /// A review the loop is to hand to the forge.
@@ -39,6 +40,15 @@ pub const State = struct {
     note_buf: [256]u8 = undefined,
     note_len: u16 = 0,
     want_post: ?Post = null,
+    /// Who the reader is on the forge, asked once a session and kept. Without
+    /// it their own remark on the request looks like everybody else's.
+    login: [64]u8 = undefined,
+    login_len: u8 = 0,
+    /// A remark on its way back to the forge, and the text it is to carry -
+    /// held here because the box has closed by the time the call is made.
+    want_amend: ?Amend = null,
+    amend_buf: [compose_mod.max_bytes]u8 = undefined,
+    amend_len: u16 = 0,
     /// A forge call the loop is to make off the main thread: `gh` costs the
     /// better part of a second, and a frozen pane reads as a key that missed.
     want: ?Want = null,
@@ -49,6 +59,18 @@ pub const State = struct {
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.rows.deinit(gpa);
     }
+
+    /// Empty until a request has been opened.
+    pub fn viewer(self: *const State) []const u8 {
+        return self.login[0..self.login_len];
+    }
+};
+
+/// A remark of the reader's own being changed where it lives: the store's id,
+/// so the copy here can follow, and the forge's, which the call names.
+pub const Amend = struct {
+    id: u32,
+    remote: u64,
 };
 
 /// What the forge is being asked for. Arguments only: the call happens on the
@@ -64,6 +86,8 @@ pub const Want = union(enum) {
     /// A review, already built: the body is made from the comment store, which
     /// only the main thread may read.
     post: Sending,
+    /// New text for one remark already on the request.
+    amend: Amending,
 
     /// The sentence the spinner sits beside.
     pub fn says(self: Want, buf: []u8) []const u8 {
@@ -75,6 +99,7 @@ pub const Want = union(enum) {
             .list => "listing pull requests",
             .pick => |pr| std.fmt.bufPrint(buf, "opening #{d}", .{pr.number}) catch "opening",
             .post => |p| std.fmt.bufPrint(buf, "posting to #{d}", .{p.number}) catch "posting",
+            .amend => "editing that comment on the request",
         };
     }
 };
@@ -87,6 +112,15 @@ pub const Sending = struct {
     ids: []const u32,
     one: ?u32,
     event: gh.Event,
+};
+
+/// One remark's new text on its way to the forge.
+pub const Amending = struct {
+    repo: []const u8,
+    id: u32,
+    remote: u64,
+    payload: []const u8,
+    body: []const u8,
 };
 
 /// A copy of `gh.Pr` owning its own bytes, so a row survives the arena its
@@ -136,6 +170,7 @@ pub const Got = union(enum) {
     refs: gh.Refs,
     rows: []gh.Pr,
     posted: void,
+    amended: void,
     failed: void,
 };
 
@@ -156,6 +191,10 @@ pub fn fetch(gpa: Allocator, arena: Allocator, io: std.Io, want: Want) Got {
             gh.post(gpa, arena, io, p.repo, p.number, p.payload) catch return .failed;
             return .posted;
         },
+        .amend => |a| {
+            gh.amend(gpa, arena, io, a.repo, a.remote, a.payload) catch return .failed;
+            return .amended;
+        },
     };
 }
 
@@ -166,6 +205,8 @@ pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
         .failed => switch (want) {
             .list => app.notice.set("could not list pull requests - is gh set up?", .{}),
             .post => |p| app.notice.set("could not post to #{d}", .{p.number}),
+            // Nothing changed here either, which is the point of waiting.
+            .amend => app.notice.set("could not edit that comment on #{d} - it is unchanged", .{app.pr.number}),
             else => app.notice.set("could not open that pull request", .{}),
         },
         .posted => {
@@ -178,6 +219,13 @@ pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
                 app.notice.set("posted {d} to #{d} as {s}", .{ p.ids.len, p.number, p.event.wire() });
             }
             notes.saveComments(app);
+        },
+        .amended => {
+            const a = want.amend;
+            // Now, and only now: this copy follows the forge's.
+            app.comments.edit(a.id, a.body) catch {};
+            app.rebuildRows(.line) catch {};
+            app.notice.set("comment updated on #{d}", .{app.pr.number});
         },
         .refs => |refs| enterPr(app, refs),
         .rows => |rows| {
@@ -254,6 +302,39 @@ pub fn postReview(app: *App, want: gh.Event, note: []const u8) void {
     @memcpy(app.pr.note_buf[0..app.pr.note_len], note[0..app.pr.note_len]);
     app.pr.want_post = .{ .event = want };
     app.startBusy("posting to #{d}", .{app.pr.number});
+}
+
+/// `<CR>` on a remark of the reader's own that lives on the request. The new
+/// text goes to the forge first and the store waits. Armed rather than made,
+/// like every other call, so the notice reaches the screen before `gh` blocks.
+pub fn amend(app: *App, id: u32, remote: u64, body: []const u8) void {
+    if (postRepo(app) == null) {
+        app.notice.set("not reviewing a pull request", .{});
+        return;
+    }
+    app.pr.amend_len = @intCast(@min(body.len, app.pr.amend_buf.len));
+    @memcpy(app.pr.amend_buf[0..app.pr.amend_len], body[0..app.pr.amend_len]);
+    app.pr.want_amend = .{ .id = id, .remote = remote };
+    app.startBusy("editing on #{d}", .{app.pr.number});
+}
+
+/// The half only the main thread may do, into the job's arena.
+pub fn prepareAmend(app: *App, arena: Allocator, req: Amend) ?Want {
+    const repo = postRepo(app) orelse return null;
+    const body = app.pr.amend_buf[0..app.pr.amend_len];
+
+    var out: std.ArrayList(u8) = .empty;
+    out.appendSlice(arena, "{\"body\":") catch return null;
+    comments_mod.quoteJson(&out, arena, body) catch return null;
+    out.append(arena, '}') catch return null;
+
+    return .{ .amend = .{
+        .repo = arena.dupe(u8, repo) catch return null,
+        .id = req.id,
+        .remote = req.remote,
+        .payload = out.items,
+        .body = arena.dupe(u8, body) catch return null,
+    } };
 }
 
 pub fn unposted(app: *const App) usize {
@@ -382,6 +463,16 @@ pub fn importRemarks(app: *App, repo: []const u8, number: u32) usize {
 
     var scratch: std.heap.ArenaAllocator = .init(app.gpa);
     defer scratch.deinit();
+
+    // Asked once, beside the call already being made: nothing else here can
+    // tell which of the names on the request is the reader's.
+    if (app.pr.login_len == 0) {
+        if (gh.viewer(app.gpa, scratch.allocator(), app.io)) |who| {
+            app.pr.login_len = @intCast(@min(who.len, app.pr.login.len));
+            @memcpy(app.pr.login[0..app.pr.login_len], who[0..app.pr.login_len]);
+        } else |_| {}
+    }
+
     const found = gh.remarks(app.gpa, scratch.allocator(), app.io, repo, number) catch {
         app.notice.set("could not read the remarks already on #{d}", .{number});
         return 0;
@@ -393,7 +484,7 @@ pub fn importRemarks(app: *App, repo: []const u8, number: u32) usize {
         // the gutter. Hard rule 7 is about the reader's own remarks; this
         // one is on the request, where it stays.
         if (r.line == 0) continue;
-        _ = app.comments.adopt(r.path, r.line, r.span, r.body, r.author, r.outdated) catch continue;
+        _ = app.comments.adopt(r.path, r.line, r.span, r.body, r.author, r.outdated, r.id) catch continue;
         taken += 1;
     }
     app.comments.dirty = was_dirty;
@@ -779,4 +870,39 @@ test "every path that posts arms the spinner, not a notice" {
     try testing.expect(fx.app.pr.want_post != null);
     try testing.expect(fx.app.busy != null);
     try testing.expect(std.mem.indexOf(u8, fx.app.busy.?.label(), "...") == null);
+}
+
+test "editing a remark of the reader's own is a call, and the store waits for it" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.pr.number = 16;
+    fx.app.pr.repo_len = @intCast("o/r".len);
+    @memcpy(fx.app.pr.repo[0..3], "o/r");
+    const id = try fx.app.comments.adopt("a.zig", 2, 1, "was", "me", false, 555);
+
+    amend(&fx.app, id, 555, "now\twith a tab");
+    const req = fx.app.pr.want_amend.?;
+    try testing.expectEqual(id, req.id);
+    try testing.expectEqual(@as(u64, 555), req.remote);
+    // Armed, not made: the copy here still says what the forge says.
+    try testing.expectEqualStrings("was", fx.app.comments.find(id).?.body);
+
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const job = prepareAmend(&fx.app, a.allocator(), req).?;
+    try testing.expectEqualStrings("o/r", job.amend.repo);
+    try testing.expectEqualStrings("{\"body\":\"now\\twith a tab\"}", job.amend.payload);
+
+    // Only once the forge has taken it does the copy here follow.
+    try apply(&fx.app, job, .amended);
+    try testing.expectEqualStrings("now\twith a tab", fx.app.comments.find(id).?.body);
+
+    // A failed call leaves it exactly as the forge still has it.
+    amend(&fx.app, id, 555, "never sent");
+    const again = prepareAmend(&fx.app, a.allocator(), fx.app.pr.want_amend.?).?;
+    fx.app.pr.want_amend = null;
+    try apply(&fx.app, again, .failed);
+    try testing.expectEqualStrings("now\twith a tab", fx.app.comments.find(id).?.body);
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "unchanged") != null);
 }
