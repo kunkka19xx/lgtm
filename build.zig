@@ -38,8 +38,6 @@ pub fn build(b: *std.Build) void {
     });
     root.addOptions("build_options", build_options);
     root.addImport("vaxis", vaxis);
-    // Recorded git output, embedded so core/ tests stay free of file I/O.
-    root.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const exe = b.addExecutable(.{
         .name = "lgtm",
@@ -80,7 +78,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseSmall,
     }).module("vaxis"));
-    dist_module.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const dist_exe = b.addExecutable(.{
         .name = "lgtm",
@@ -98,6 +95,9 @@ pub fn build(b: *std.Build) void {
     });
     test_module.addOptions("build_options", build_options);
     test_module.addImport("vaxis", vaxis);
+    // Recorded git output, embedded so core/ tests stay free of file I/O. Only
+    // the test build needs it: the decl is unreferenced elsewhere, so Zig never
+    // analyses it and no other module has to declare the import.
     test_module.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
@@ -119,7 +119,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     lgtm_mod.addOptions("build_options", build_options);
-    lgtm_mod.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
 
     const harness_mod = b.createModule(.{
         .root_source_file = b.path("src/harness/anchor_harness.zig"),

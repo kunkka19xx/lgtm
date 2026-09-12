@@ -1,0 +1,96 @@
+const std = @import("std");
+
+const Header = struct {
+    magic: u32,
+    version: u16,
+    flags: u16,
+};
+
+fn readU32(bytes: []const u8) u32 {
+    return std.mem.readInt(u32, bytes[0..4], .little);
+}
+
+fn readU16(bytes: []const u8) u16 {
+    return std.mem.readInt(u16, bytes[0..2], .little);
+}
+
+fn checksum(bytes: []const u8) u32 {
+    var sum: u32 = 0;
+    for (bytes) |b| sum = sum *% 31 +% b;
+    return sum;
+}
+
+fn alignUp(n: usize, to: usize) usize {
+    return (n + to - 1) / to * to;
+}
+
+fn sectionCount(h: Header) u16 {
+    return h.flags & 0x0fff;
+}
+
+fn isCompressed(h: Header) bool {
+    return h.flags & 0x8000 != 0;
+}
+
+fn payloadOffset(h: Header) usize {
+    return alignUp(8 + sectionCount(h) * 4, 16);
+}
+
+fn sectionAt(bytes: []const u8, i: u16) !u32 {
+    const at = 8 + @as(usize, i) * 4;
+    if (at + 4 > bytes.len) return error.Truncated;
+    return readU32(bytes[at..]);
+}
+
+fn sectionSpan(bytes: []const u8, i: u16) !usize {
+    const start = try sectionAt(bytes, i);
+    const end = try sectionAt(bytes, i + 1);
+    return end - start;
+}
+
+fn sectionBounds(bytes: []const u8, i: u16) ![2]u32 {
+    const start = try sectionAt(bytes, i);
+    const end = try sectionAt(bytes, i + 1);
+    if (end < start) return error.BadSection;
+    return .{ start, end };
+}
+
+fn describe(h: Header, out: []u8) ![]u8 {
+    return std.fmt.bufPrint(out, "v{d} flags=0x{x}", .{ h.version, h.flags });
+}
+
+fn validate(h: Header, len: usize) !void {
+    if (payloadOffset(h) > len) return error.Truncated;
+    if (h.version == 0) return error.BadVersion;
+}
+
+fn readAll(bytes: []const u8) !Header {
+    const h = try parseHeader(bytes);
+    try validate(h, bytes.len);
+    return h;
+}
+
+fn summarise(bytes: []const u8) !u32 {
+    const h = try readAll(bytes);
+    if (isCompressed(h)) return 0;
+    return checksum(bytes[payloadOffset(h)..]);
+}
+
+fn totalSpan(bytes: []const u8) !usize {
+    const h = try readAll(bytes);
+    var n: usize = 0;
+    var i: u16 = 0;
+    while (i + 1 < sectionCount(h)) : (i += 1) n += try sectionSpan(bytes, i);
+    return n;
+}
+
+fn parseHeader(bytes: []const u8) !Header {
+    if (bytes.len < 8) return error.Truncated;
+    const magic = readU32(bytes[0..4]);
+    if (magic != 0x4c47544d) return error.BadMagic;
+    return .{
+        .magic = magic,
+        .version = readU16(bytes[4..6]),
+        .flags = readU16(bytes[6..8]),
+    };
+}

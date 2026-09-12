@@ -252,11 +252,14 @@ fn loadFixture(io: std.Io, gpa: Allocator, root: []const u8, name: []const u8) !
     }
     if (expects.items.len == 0) return error.NoExpectations;
 
-    const fx: Fixture = .{
+    // Both errdefers above are spent once the lists are given away, so the
+    // fixture owns everything from here and a failed validate must free it.
+    var fx: Fixture = .{
         .name = name,
         .versions = try versions.toOwnedSlice(gpa),
         .expects = try expects.toOwnedSlice(gpa),
     };
+    errdefer freeFixture(gpa, &fx);
     try validate(fx);
     return fx;
 }
