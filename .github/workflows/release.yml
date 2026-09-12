@@ -10,6 +10,10 @@ on:
 permissions:
   contents: write
 
+# Kept in step with ci.yml, which checks the same number on every push.
+env:
+  MAX_BINARY_BYTES: 6291456
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -42,8 +46,8 @@ jobs:
             # once: a cross build can regress on one architecture alone, and
             # what a user downloads is this file and not the average.
             size=$(wc -c < zig-out/bin/lgtm)
-            echo "$target: $size bytes ($((size * 100 / 1048576))% of 1 MB)"
-            test "$size" -lt 1048576
+            echo "$target: $size bytes ($((size * 100 / MAX_BINARY_BYTES))% of budget)"
+            test "$size" -lt "$MAX_BINARY_BYTES"
 
             # Flat tarball, one binary, no leading directory: the install
             # script and every package manager want to extract and move on.

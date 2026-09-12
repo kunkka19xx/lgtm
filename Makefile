@@ -44,7 +44,7 @@ help:
 	@echo "install elsewhere with: make local PREFIX=/usr/local"
 
 # `dist`, not the default build: ReleaseSmall and stripped, which is the binary
-# a user would download and the one CI checks against the 1 MB budget.
+# a user would download and the one CI checks against the size budget.
 local:
 	zig build dist
 	@mkdir -p "$(BINDIR)" "$(STATE)/backup"

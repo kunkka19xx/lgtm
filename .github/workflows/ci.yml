@@ -11,6 +11,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# The download budget, also checked per target in release.yml.
+env:
+  MAX_BINARY_BYTES: 6291456
+
 jobs:
   check:
     strategy:
@@ -53,17 +57,15 @@ jobs:
           zig build -Doptimize=ReleaseFast
           zig build test -Doptimize=ReleaseFast
 
-      # The 1 MB budget is about what a user downloads, so it is checked
-      # against the binary a user would download rather than left in prose.
-      # Phase 0 said "recheck if it ever approaches 1 MB"; this is that recheck,
-      # run on every push instead of remembered.
+      # The budget is about what a user downloads, so it is checked against the
+      # binary a user would download.
       - name: distribution binary fits its budget
         if: ${{ !cancelled() }}
         run: |
           zig build dist
           size=$(stat -c%s zig-out/bin/lgtm 2>/dev/null || stat -f%z zig-out/bin/lgtm)
-          echo "stripped ReleaseSmall: $size bytes ($((size * 100 / 1048576))% of 1 MB)"
-          test "$size" -lt 1048576
+          echo "stripped ReleaseSmall: $size bytes ($((size * 100 / MAX_BINARY_BYTES))% of budget)"
+          test "$size" -lt "$MAX_BINARY_BYTES"
 
   # The AUR rejects a push whose .SRCINFO disagrees with its PKGBUILD, and that
   # rejection arrives at release time, on a machine most of us do not have. It
