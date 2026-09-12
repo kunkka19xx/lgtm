@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 
     const profile = b.option(bool, "profile", "Enable timing spans and the --profile report") orelse false;
 
-    // Stack traces on panic cost 304 KB of the 1 MB binary budget: DWARF
+    // Stack traces on panic cost 304 KB of the binary size budget: DWARF
     // parsing, the inflate to read compressed debug sections, and the stable
     // sort those pull in. Measured, not guessed. On by default where they are
     // read - a developer's Debug build - and off in a release, where a panic
@@ -52,13 +52,12 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run.addArgs(args);
     b.step("run", "Run lgtm").dependOn(&run.step);
 
-    // The distribution build, and the only one the 1 MB budget is about: what
-    // a user downloads. `ReleaseFast` had drifted to 982 KB of that budget by
-    // phase 5, which is what triggered phase 0's "recheck near 1 MB"; the same
-    // tree at `ReleaseSmall` is half of it, with `uucode`'s Unicode tables and
-    // the default panic handler both still present. That is what settled the
-    // question without dropping `gwidth` or adding a `-Dexternal_uucode` flag
-    // (PLAN.md, "Binary size needs a decision before 5c").
+    // The distribution build, and the only one the size budget is about: what
+    // a user downloads. `ReleaseFast` had drifted to 982 KB, which is what
+    // first put binary size on the agenda; the same tree at `ReleaseSmall` is
+    // half of it, with `uucode`'s Unicode tables and the default panic handler
+    // both still present. That is what settled the question without dropping
+    // `gwidth` or adding a `-Dexternal_uucode` flag.
     //
     // Its own module rather than a flag on the default one: the optimize mode
     // is the decision, so it should not be something a caller has to remember
