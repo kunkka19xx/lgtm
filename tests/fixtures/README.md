@@ -16,6 +16,9 @@ One directory per scenario:
   notes.txt   expectations
 ```
 
+`diffs/` is not a scenario and the harness skips it: `diffs/mixed.diff` is
+recorded `git diff` output embedded by a unit test in `core/diff.zig`.
+
 Versions are whole-file snapshots, not diffs. This is deliberate: the primary
 re-anchor path (PERFORMANCE.md 3.1) diffs the previous worktree against the new
 one to build an old-to-new line map, so the harness needs both full states. A
@@ -49,6 +52,7 @@ must produce. A run is a hit when the computed line equals the expectation, and
 | `hunk-split` | An insertion partly reverted, splitting the original hunk |
 | `revert-rewrite` | Change then revert; v2 is byte-identical to v0, so the anchor must return, not drift |
 | `anchor-deleted` | The anchored region is rewritten away; every tier misses and the note goes stale |
+| `block-move` | A function is reordered, so the line map has no counterpart and the exact window hash has to find it. The only fixture that reaches tiers 1 and 2, one move either side of `near_window` |
 | `real-session-1` | Recorded agent session, 6 versions, 3 notes. Includes a duplicate-line case the agent produced on its own |
 
 `real-session-1` is worth reading before writing the harness. The agent added a
@@ -74,7 +78,7 @@ Two rules, both learned the hard way while writing these:
 
 ## Recording a real agent session
 
-The seven fixtures above are mechanical and cover known failure modes. A real
+The eight fixtures above are mechanical and cover known failure modes. A real
 session covers the ones nobody thought of, so at least one is wanted.
 
 **1. Start the recorder in a spare pane**, pointing at a file you expect the

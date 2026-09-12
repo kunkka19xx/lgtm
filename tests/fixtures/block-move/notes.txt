@@ -1,0 +1,9 @@
+# An agent reorders functions. parseHeader moves to the bottom of the file in
+# v1 and back to the middle in v2. A moved block has no counterpart in the line
+# map - the diff reports it deleted here and added there - so the primary path
+# misses and the exact window hash is what finds it again.
+#
+# This is the only fixture that reaches tier 1 and tier 2. Both are the same
+# lookup; near_window is what separates them, so the v1 move is deliberately
+# further than 50 lines and the v2 move deliberately nearer.
+n1 20 90 61
