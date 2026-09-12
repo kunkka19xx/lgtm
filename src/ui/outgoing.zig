@@ -26,6 +26,7 @@ pub fn closeCompose(app: *App) void {
     app.compose.close();
     app.preset_index = null;
     app.compose_spot = null;
+    app.compose_remote = 0;
     app.mode = .normal;
 }
 
@@ -65,6 +66,8 @@ pub fn composeCommand(app: *App, key: event.Key) ?keymap.Command {
 }
 
 pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !void {
+    // A remark opened to be read has one key that means anything.
+    if (app.compose.read_only and cmd != .compose_cancel) return;
     switch (cmd) {
         .compose_cancel => {
             // One level at a time: out of insert, then out of the box.
@@ -97,8 +100,14 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
             finder_mod.buildPickList(app);
             finder_mod.show(app, .{ .title = " mention a file " });
         },
-        .compose_send_now => try composeSendNow(app, body),
-        .compose_post_now => try composePostNow(app, body),
+        // Both save first, which for a remark on the request is a call with
+        // an answer owed - and posting an already posted one means nothing.
+        .compose_send_now, .compose_post_now => if (app.compose_remote != 0)
+            app.notice.set("that one is on the request - <CR> saves it there", .{})
+        else if (cmd == .compose_send_now)
+            try composeSendNow(app, body)
+        else
+            try composePostNow(app, body),
         .compose_submit => try composeSubmit(app, body),
         else => {},
     }
@@ -211,8 +220,9 @@ pub fn composeSubmit(app: *App, body: u16) !void {
             @memcpy(raw_buf[0..typed.len], typed);
             const raw = raw_buf[0..typed.len];
             const how = app.compose_to;
-            // Before the close, which clears it.
+            // Before the close, which clears both.
             const spot = app.compose_spot;
+            const remote = app.compose_remote;
             closeCompose(app);
             if (line.len == 0) {
                 app.notice.set("nothing to send", .{});
@@ -220,6 +230,13 @@ pub fn composeSubmit(app: *App, body: u16) !void {
             }
             if (app.compose_is_comment) {
                 app.compose_is_comment = false;
+                if (remote != 0) {
+                    // The store waits: a call that fails must not leave a
+                    // remark here saying something the forge never heard.
+                    pr_mod.amend(app, app.compose_comment orelse 0, remote, raw);
+                    app.compose_comment = null;
+                    return;
+                }
                 if (app.compose_comment) |id| {
                     try app.comments.edit(id, raw);
                     app.notice.set("comment updated", .{});
@@ -388,7 +405,19 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
     // holds it, so the body does not have to - and a note whose text
     // repeats its own line number would say it twice in `review-N.md`.
     var what: []const u8 = "compose";
-    if (app.compose_is_comment) {
+    if (app.compose.read_only) {
+        // Whose it is and where, because the box has to say why it is shut.
+        what = if (app.compose_comment) |id| blk: {
+            const n = app.comments.find(id) orelse break :blk "comment";
+            break :blk std.fmt.allocPrint(arena, "@{s} {s}:{d}", .{ n.author, n.path, n.line }) catch "comment";
+        } else "comment";
+    } else if (app.compose_remote != 0) {
+        // The box looks like any other, and `<CR>` does not do the same.
+        what = if (app.compose_comment) |id| blk: {
+            const n = app.comments.find(id) orelse break :blk "comment";
+            break :blk std.fmt.allocPrint(arena, "your remark on #{d} {s}:{d}", .{ app.pr.number, n.path, n.line }) catch "comment";
+        } else "comment";
+    } else if (app.compose_is_comment) {
         // The spot the box opened on: the selection is gone by this
         // frame, and the title would say one line for a range of three.
         what = if (app.compose_spot orelse notes.commentLine(app)) |at| blk: {
@@ -411,7 +440,9 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
         .at = app.compose_at,
         .saves = app.compose_is_comment,
         .posts = app.pr.number != 0,
+        .amends = app.compose_remote != 0,
         .normal = app.compose.mode == .normal,
+        .read_only = app.compose.read_only,
     };
 }
 

@@ -209,7 +209,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>gc` | suggest a change: a comment already holding the selected lines in a suggestion block |
 | | the box's title says what the comment covers: `a.txt:5` for one line, `a.txt:5-6` for a range |
 | `]c` `[c` | walk them |
-| `<Space>vc` | open the nearest one to read or edit |
+| `<Space>vc` | open the nearest one to read or edit. A remark from the request opens to be read only |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
@@ -244,8 +244,20 @@ spelling, and `:pr 16` still goes straight to one you already know.
 anybody left comes down with the diff and sits in the gutter beside your own,
 in the comment list, and on `]c`. They carry the author's name, and one whose
 line has gone from the diff arrives stale rather than silently placed somewhere
-plausible. You cannot edit or delete one: it lives on the request, and a changed
-copy here would say something its author never wrote. They are never posted
+plausible. `<Space>vc` opens one to read, in the same box your own comments use
+and with the same motions, titled `@author path:line - VIEW`; `<Esc>` closes it.
+Somebody else's you cannot edit or delete: it lives on the request, and a
+changed copy here would say something its author never wrote.
+
+**Your own remarks on the request you can edit.** `lgtm` asks `gh` who you are
+when it opens a request, so one you left on GitHub opens in the box the ordinary
+way, titled `your remark on #16 path:line`, and `<CR>` says `save on the
+request`. The text goes to the forge and the copy in the pane waits to hear that
+it landed, so a call that fails leaves a remark here saying exactly what GitHub
+still says. `save + send` and `save + post` are not offered: it is already
+posted, and `<Space>sc` is how it reaches your agent. Deleting one is still
+GitHub's to do. If `gh` cannot say who you are, every remark on the request
+opens to be read, which errs the safe way. They are never posted
 back, and they are not written to `.lgtm/`, so opening the request again reads
 them fresh rather than showing you yesterday's. If `gh` cannot reach the forge
 the diff still opens and the tool says only that it could not read them.
@@ -578,7 +590,9 @@ terminal sends it) is a line break, `<C-s>` saves a
 comment and sends it at once, and on a pull request `<C-p>` saves and posts it.
 The arrows move a line at a time; `<C-a>` `<C-e>` `<C-b>` `<C-f>` `<C-u>`
 `<C-w>` `<C-d>` are readline's. In normal mode: the review's motions plus
-`i a I A o O x D C dd cc d{motion} c{motion} u`.
+`gg G i a I A o O x D C dd cc d{motion} c{motion} u`. The box follows the caret
+through a message taller than it is, rather than drawing from the top and
+cutting the rest off.
 
 ---
 

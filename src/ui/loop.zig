@@ -291,6 +291,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             } else if (app.pr.want_post) |req| blk: {
                 app.pr.want_post = null;
                 break :blk pr_mod.preparePost(&app, prep.allocator(), req);
+            } else if (app.pr.want_amend) |req| blk: {
+                app.pr.want_amend = null;
+                break :blk pr_mod.prepareAmend(&app, prep.allocator(), req);
             } else null;
 
             if (want) |job| {
@@ -299,7 +302,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
                     app.notice.set("could not start that", .{});
                     break :blk null;
                 };
-            } else if (app.busy != null and app.pr.want == null and app.pr.want_post == null) {
+            } else if (app.busy != null and app.pr.want == null and
+                app.pr.want_post == null and app.pr.want_amend == null)
+            {
                 // Preparing refused and said why, so the spinner must go.
                 app.busy = null;
             }
