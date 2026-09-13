@@ -461,9 +461,9 @@ const Scan = struct {
 
             // Only a keyword can introduce a function, so this second map is
             // never consulted for an ordinary identifier.
-            if (kind == .keyword and self.def.fn_words.has(word)) {
+            if (kind == .keyword and self.def.isFnWord(word)) {
                 self.expect_fn = true;
-                self.expect_fn_body = self.def.fn_body_words.has(word);
+                self.expect_fn_body = self.def.isFnBodyWord(word);
             } else if (self.expect_fn and kind == .text) {
                 // `function M.foo()`: a qualifier means the declared name is
                 // still ahead, so `M` stays an ordinary word and the lookahead
@@ -1094,6 +1094,7 @@ const json_lang = @import("lang/json.zig");
 const yaml_lang = @import("lang/yaml.zig");
 const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
+const sql_lang = @import("lang/sql.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
@@ -2575,6 +2576,46 @@ test "a dockerfile names its stages" {
     // The brace of a shell expansion is not a scope: counted as one it closed
     // the stage on the line below it.
     try testing.expectEqualStrings("runtime", st.enclosingFn(8).?.name);
+}
+
+test "sql ignores case and names what a statement creates" {
+    const src =
+        \\/* users */
+        \\CREATE TABLE users (id Bigint PRIMARY KEY, note text);
+        \\Select "a--b", count(*) from users where note = 'it''s
+        \\two lines';
+        \\
+        \\create or replace procedure touch_user(p_id in out number) is
+        \\  type t_row is record (id number);
+        \\begin
+        \\  update users set note = 'x' where id = p_id; -- done
+        \\end;
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&sql_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "/* users */").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "CREATE").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "Select").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "KEY").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "Bigint").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "count").?);
+    try testing.expectEqual(Kind.fn_name, kindOf(runs, src, "users (").?);
+    // A quoted identifier, not a comment.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "a--b").?);
+    // A string may cross a line, and `''` does not end it early.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "s\ntwo lines'").?);
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "-- done").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("users", st.enclosingFn(2).?.name);
+    try testing.expectEqualStrings("touch_user", st.enclosingFn(6).?.name);
+    try testing.expectEqualStrings("touch_user", st.enclosingFn(8).?.name);
 }
 
 test "a yaml block scalar is not yaml" {

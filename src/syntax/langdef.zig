@@ -71,6 +71,10 @@ pub const LangDef = struct {
     strings: []const StringSpec = &.{},
     keywords: []const []const u8 = &.{},
     types: []const []const u8 = &.{},
+    /// SQL: `select`, `SELECT` and `Select` are one keyword. The word lists
+    /// are then spelled lower-case, and a word is folded before the lookup,
+    /// only once the prefilter has passed it.
+    case_insensitive: bool = false,
     /// Keywords that introduce a named function: the next identifier is its
     /// name, and it opens a span for the enclosing-function scan.
     fn_decl: []const []const u8 = &.{},
@@ -245,7 +249,24 @@ pub const LangDef = struct {
         if (word.len == 0 or word.len >= 64) return null;
         const bit = @as(u64, 1) << @intCast(word.len);
         if ((self.word_first[word[0]] & self.word_last[word[word.len - 1]] & bit) == 0) return null;
-        return self.words.get(word);
+        var buf: [64]u8 = undefined;
+        return self.words.get(self.fold(word, &buf));
+    }
+
+    /// Asked only of a word `lookupWord` already called a keyword, so it is
+    /// shorter than the fold buffer.
+    pub fn isFnWord(self: *const LangDef, word: []const u8) bool {
+        var buf: [64]u8 = undefined;
+        return self.fn_words.has(self.fold(word, &buf));
+    }
+
+    pub fn isFnBodyWord(self: *const LangDef, word: []const u8) bool {
+        var buf: [64]u8 = undefined;
+        return self.fn_body_words.has(self.fold(word, &buf));
+    }
+
+    fn fold(self: *const LangDef, word: []const u8, buf: *[64]u8) []const u8 {
+        return if (self.case_insensitive) std.ascii.lowerString(buf, word) else word;
     }
 };
 
@@ -305,6 +326,13 @@ pub fn define(comptime d: LangDef) LangDef {
             const bit = @as(u64, 1) << @intCast(kw.len);
             m_first[kw[0]] |= bit;
             m_last[kw[kw.len - 1]] |= bit;
+            if (d.case_insensitive) {
+                for (kw) |b| {
+                    if (std.ascii.isUpper(b)) @compileError("case-insensitive keyword must be lower-case: " ++ kw);
+                }
+                m_first[std.ascii.toUpper(kw[0])] |= bit;
+                m_last[std.ascii.toUpper(kw[kw.len - 1])] |= bit;
+            }
         }
         out.word_first = m_first;
         out.word_last = m_last;
