@@ -6,7 +6,7 @@ files and no history worth keeping, so the files live here and are copied out.
 | | |
 |---|---|
 | `lgtm-bin` | the release tarball, no toolchain needed |
-| `lgtm-git` | builds `main`, and runs `zig build test` in `check()` — the package that catches breakage early |
+| `lgtm-git` | builds `main`, and runs `zig build test` in `check()`: the package that catches breakage early |
 
 `.SRCINFO` is **generated, never hand-written**: the AUR rejects a push whose
 `.SRCINFO` disagrees with its `PKGBUILD`, and that check is the only thing
@@ -15,7 +15,7 @@ between a typo and a package that fails at install time.
 ## Releasing
 
 ```sh
-./update-pkgver.sh              # or: ./update-pkgver.sh 0.1.0
+./update-pkgver.sh              # latest release, or: ./update-pkgver.sh <version>
 make srcinfo                    # regenerates both .SRCINFO in a container
 make build                      # optional: compiles lgtm-git for real
 ```
@@ -25,7 +25,7 @@ Then, per package:
 ```sh
 git clone ssh://aur@aur.archlinux.org/lgtm-bin.git
 cp packaging/aur/lgtm-bin/{PKGBUILD,.SRCINFO} lgtm-bin/
-cd lgtm-bin && git commit -am "lgtm-bin 0.1.0" && git push
+cd lgtm-bin && git commit -am "lgtm-bin <version>" && git push
 ```
 
 ## No Arch machine
