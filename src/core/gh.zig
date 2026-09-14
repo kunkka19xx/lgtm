@@ -263,6 +263,8 @@ pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError
 /// The half of a review lgtm could not see. Reading a request without them
 /// means writing a remark somebody made yesterday and never knowing.
 pub const Remark = struct {
+    /// What a later edit names.
+    id: u64 = 0,
     path: []const u8,
     /// Where it sits in the request's head. Zero when the forge knows of no
     /// line at all, which is a comment on a file rather than on code.
@@ -283,7 +285,7 @@ pub const Remark = struct {
 /// `@tsv` escapes a newline, a tab, a return and a backslash in the field it
 /// writes, so a body of any shape survives one line - and `unescapeTsv` puts
 /// it back. That is the whole reason the rows can be tab-separated at all.
-const remark_query = ".[] | [.path, ((.line // .original_line // 0)|tostring), " ++
+const remark_query = ".[] | [(.id|tostring), .path, ((.line // .original_line // 0)|tostring), " ++
     "(if .line == null then \"1\" else \"0\" end), .user.login, " ++
     "((.start_line // .original_start_line // 0)|tostring), .body] | @tsv";
 
@@ -332,6 +334,7 @@ pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark
     while (rows.next()) |row| {
         if (row.len == 0) continue;
         var it = std.mem.splitScalar(u8, row, '\t');
+        const id = std.fmt.parseInt(u64, it.next() orelse continue, 10) catch continue;
         const path = it.next() orelse continue;
         const line = std.fmt.parseInt(u32, it.next() orelse continue, 10) catch continue;
         const outdated = std.mem.eql(u8, it.next() orelse continue, "1");
@@ -340,6 +343,7 @@ pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark
         const body = try unescapeTsv(arena, it.rest());
         if (path.len == 0 or body.len == 0) continue;
         try out.append(arena, .{
+            .id = id,
             .path = path,
             .line = line,
             // A range only when the forge gave both ends and they agree on
@@ -359,6 +363,44 @@ pub fn remarks(gpa: Allocator, arena: Allocator, io: std.Io, repo: []const u8, n
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.GhFailed;
     return parseRemarks(arena, try arena.dupe(u8, out.stdout));
+}
+
+/// `gh api user --jq .login`
+pub fn viewerArgv(arena: Allocator) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "gh", "api", "user", "--jq", ".login" });
+}
+
+/// Who the reader is on the forge. Without it their own remark on the request
+/// is indistinguishable from anybody else's, and the two may not do the same
+/// things.
+pub fn viewer(gpa: Allocator, arena: Allocator, io: std.Io) Error![]const u8 {
+    const argv = try viewerArgv(arena);
+    const out = proc.run(gpa, io, argv, view_output_max) catch return error.GhFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
+    return arena.dupe(u8, std.mem.trim(u8, out.stdout, " \t\r\n"));
+}
+
+/// `gh api --method PATCH repos/{owner}/{repo}/pulls/comments/{id} --input -`
+pub fn amendArgv(arena: Allocator, repo: []const u8, id: u64) Allocator.Error![]const []const u8 {
+    const path = try std.fmt.allocPrint(arena, "repos/{s}/pulls/comments/{d}", .{ repo, id });
+    return arena.dupe([]const u8, &.{ "gh", "api", "--method", "PATCH", path, "--input", "-" });
+}
+
+/// The new text of a remark the reader already left on the request. The store
+/// is not touched until this returns.
+pub fn amend(
+    gpa: Allocator,
+    arena: Allocator,
+    io: std.Io,
+    repo: []const u8,
+    id: u64,
+    payload: []const u8,
+) Error!void {
+    const argv = try amendArgv(arena, repo, id);
+    const out = proc.runWithInput(gpa, io, argv, payload, view_output_max) catch return error.GhFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
 }
 
 /// What a review says when it is submitted.
@@ -680,11 +722,15 @@ test "the remarks already on a request come back with their lines" {
     defer a.deinit();
     const arena = a.allocator();
 
-    const rows = try parseRemarks(arena, "src/toml.zig\t221\t1\tkunkka19xx\t216\tthe list body is read as settings\n" ++
-        "docs/CONFIG.md\t26\t0\tsomeone\t0\tline one\\nline two\ttabbed\n" ++
+    const rows = try parseRemarks(arena, "9001\tsrc/toml.zig\t221\t1\tkunkka19xx\t216\tthe list body is read as settings\n" ++
+        "9002\tdocs/CONFIG.md\t26\t0\tsomeone\t0\tline one\\nline two\ttabbed\n" ++
         "\n" ++
-        "src/config.zig\t8\t0\tme\t0\tsafe to delete\n");
+        "9003\tsrc/config.zig\t8\t0\tme\t0\tsafe to delete\n");
     try testing.expectEqual(@as(usize, 3), rows.len);
+
+    // The id comes with it, because that is what an edit names.
+    try testing.expectEqual(@as(u64, 9001), rows[0].id);
+    try testing.expectEqual(@as(u64, 9003), rows[2].id);
 
     // A range, from the two ends the forge gave.
     try testing.expectEqual(@as(u32, 6), rows[0].span);
@@ -709,7 +755,7 @@ test "a remark full of backslashes survives the round trip" {
     // A suggestion block of Zig multi-line strings, which is the shape of a
     // real review remark on this codebase. Only the four escapes `@tsv`
     // writes are escapes; everything else after a backslash is content.
-    const rows = try parseRemarks(arena, "a.zig\t1\t0\tme\t0\t```suggestion\\n    \\\\\\\\ a doc line\\n```\n");
+    const rows = try parseRemarks(arena, "77\ta.zig\t1\t0\tme\t0\t```suggestion\\n    \\\\\\\\ a doc line\\n```\n");
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("```suggestion\n    \\\\ a doc line\n```", rows[0].body);
 }
@@ -764,4 +810,21 @@ test "anything that is not a pull request is not guessed at" {
     try testing.expect(parseView("13\tOPEN\n") == null);
     // Present but empty is no answer either.
     try testing.expect(parseView("13\tOPEN\tmain\t\t\turl\tfalse\tme\t0\t0\ttitle") == null);
+}
+
+test "an edit names the one comment and the method that changes it" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    const argv = try amendArgv(a.allocator(), "kunkka19xx/lgtm", 2468);
+    try testing.expectEqualStrings("--method", argv[2]);
+    try testing.expectEqualStrings("PATCH", argv[3]);
+    // The comment endpoint, not the request's: no number appears in it.
+    try testing.expectEqualStrings("repos/kunkka19xx/lgtm/pulls/comments/2468", argv[4]);
+    try testing.expectEqualStrings("-", argv[6]);
+
+    // Who the reader is, which is what says a remark is theirs.
+    const who = try viewerArgv(a.allocator());
+    try testing.expectEqualStrings("user", who[2]);
+    try testing.expectEqualStrings(".login", who[4]);
 }

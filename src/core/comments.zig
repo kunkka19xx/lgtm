@@ -89,6 +89,9 @@ pub const Comment = struct {
     /// where it lives and opening the request fetches it. Owned when set, and
     /// the empty default is a literal, which is why `deinit` asks.
     author: []const u8 = "",
+    /// The forge's id, when it came from the request. What a `PATCH` names.
+    /// Zero for a remark written in this pane.
+    remote: u64 = 0,
 
     pub fn theirs(self: Comment) bool {
         return self.author.len > 0;
@@ -191,11 +194,13 @@ pub const Store = struct {
         body: []const u8,
         author: []const u8,
         outdated: bool,
+        remote: u64,
     ) Allocator.Error!u32 {
         const id = try self.addFull(path, line, body, "", false, span);
         const n = self.find(id).?;
         n.author = try self.gpa.dupe(u8, author);
         n.posted = true;
+        n.remote = remote;
         if (outdated) n.state = .stale;
         return id;
     }
@@ -660,8 +665,8 @@ test "somebody else's remark is theirs and stays theirs" {
     defer store.deinit();
 
     const mine = try store.add("a.zig", 10, "I would rename this");
-    const theirs = try store.adopt("a.zig", 47, 3, "this retry never backs off", "kunkka19xx", false);
-    const gone = try store.adopt("b.zig", 12, 1, "the line this was on has moved", "someone", true);
+    const theirs = try store.adopt("a.zig", 47, 3, "this retry never backs off", "kunkka19xx", false, 4242);
+    const gone = try store.adopt("b.zig", 12, 1, "the line this was on has moved", "someone", true, 4243);
 
     // Posted by definition, so a review never sends it back to its author.
     try testing.expect(store.find(theirs).?.posted);
