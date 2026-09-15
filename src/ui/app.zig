@@ -128,6 +128,10 @@ pub const App = struct {
     prev_hunks: []hunk.Hunk = &.{},
 
     file_index: u32 = 0,
+    /// Whether comments and reviews are read from and written to `.lgtm/`.
+    /// Off in tests, which run in the repository and must not touch the
+    /// reader's own files there.
+    persist: bool = true,
     quit: bool = false,
 
     /// Where the reader is and where the screen has got to catching up: the
@@ -743,10 +747,13 @@ pub const App = struct {
             .target = self.review.target orelse "",
             .label = self.review.label(),
             .viewing = self.review.viewing,
+            .by_commit = turns_mod.byCommit(self),
             .tree_moved = self.review.moved,
             .risk = self.review.risk_total,
-            .newer_turns = if (self.snap) |s|
-                (if (self.review.viewing) |t| s.state.latest_turn -| t else 0)
+            .newer_turns = if (self.review.viewing) |t|
+                (if (turns_mod.byCommit(self))
+                    turns_mod.commitCount(self) -| t
+                else if (self.snap) |s| s.state.latest_turn -| t else 0)
             else
                 0,
             .fresh = self.review.freshFor(self.file_index),
@@ -1750,6 +1757,10 @@ pub const App = struct {
     /// not take it.
     pub fn readOnly(self: *App) bool {
         const turn = self.review.viewing orelse return false;
+        if (turns_mod.byCommit(self)) {
+            self.notice.set("commit {d} is read only - comments go on the whole review", .{turn});
+            return true;
+        }
         var k: [32]u8 = undefined;
         self.notice.set("turn {d} is read only - {s} returns to the working tree", .{
             turn, self.keyFor(.next_turn, .normal, &k),
@@ -2079,7 +2090,8 @@ pub const App = struct {
                 // to the present mid-sentence, which is the one thing a history
                 // view must never do.
                 if (self.review.viewing != null) {
-                    self.review.moved = true;
+                    // Two trees cannot move, whatever happens on disk.
+                    if (!turns_mod.byCommit(self)) self.review.moved = true;
                     return;
                 }
                 try self.rediff();
@@ -2312,6 +2324,7 @@ pub const Fixture = struct {
         const io = self.threaded.io();
         self.queue = event.Queue.init(gpa, io);
         self.app = App.init(gpa, io, &self.queue);
+        self.app.persist = false;
 
         const hunks_a = try gpa.alloc(hunk.Hunk, 1);
         hunks_a[0] = .{ .old_start = 1, .old_count = 3, .new_start = 1, .new_count = 3, .lo = 0, .hi = 3, .id = 1 };

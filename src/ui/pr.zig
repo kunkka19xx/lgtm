@@ -1012,6 +1012,8 @@ pub fn closePr(app: *App) void {
 /// Re-diff against whatever the review now points at, and start again at
 /// the top: the cursor's line number means nothing in a different diff.
 pub fn reopen(app: *App) void {
+    // A turn or commit on screen belongs to the review being left.
+    app.review.showWorking();
     app.file_index = 0;
     app.vp.cursor = 0;
     app.rediff() catch {};

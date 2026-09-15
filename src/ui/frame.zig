@@ -179,6 +179,8 @@ pub const View = struct {
     /// exactly like the working tree's, and reading old code as current is the
     /// failure this view can cause.
     viewing: ?u32 = null,
+    /// The turns are the commits of a static review, not agent snapshots.
+    by_commit: bool = false,
     /// Turns written since the one on screen, so a reader parked in the past
     /// can see the present accumulating without being dragged into it.
     newer_turns: u32 = 0,

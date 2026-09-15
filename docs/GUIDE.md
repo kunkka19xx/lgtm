@@ -241,6 +241,12 @@ Typing digits means the request's number rather than a digit in a title.
 `:pr list all` takes in the merged and closed ones, `:prs` is the short
 spelling, and `:pr 16` still goes straight to one you already know.
 
+**`<Space>lt` lists its commits, and `]t` `[t` walk them.** A pull request has
+no agent turns; it has the commits its author built it from, newest first with
+the whole request pinned on top as the way back. The badge reads `COMMIT 3`, and
+a commit is read only: comments go on the whole request, where their line
+numbers mean something to GitHub.
+
 **Opening one reads the review that is already there.** Every inline remark
 anybody left comes down with the diff and sits in the gutter beside your own,
 in the comment list, and on `]c`. Replies come down with the remarks they
