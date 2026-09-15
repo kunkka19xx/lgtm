@@ -23,6 +23,7 @@ const testrisk = @import("../core/testrisk.zig");
 const event = @import("../core/event.zig");
 const buffer = @import("../text/buffer.zig");
 const lexer = @import("../syntax/lexer.zig");
+const app_mod = @import("app.zig");
 const keytext = @import("keytext.zig");
 const search = @import("search.zig");
 const keymap = @import("keymap.zig");
@@ -229,6 +230,9 @@ pub const View = struct {
     files: ?FilesView = null,
     /// The compose box, floating over the body while a message is written.
     compose: ?ComposeView = null,
+    /// One line's conversation, the same way. Its selection is a comment id,
+    /// which is what every key that acts on "the comment here" was missing.
+    thread: ?ThreadView = null,
     /// Enclosing function name per hunk, empty where unknown.
     fn_names: []const []const u8 = &.{},
     /// Whole-file token runs and the buffers they index. Empty when the file
@@ -459,6 +463,9 @@ pub const FilesView = struct {
     /// Null on the lists where it would be a lie: every file in the project,
     /// where most rows changed nothing, and the comments.
     totals: ?Totals = null,
+    /// A question waiting on a keystroke, which takes the title and the footer
+    /// while it is up - the box is over the status row that asks it too.
+    ask: []const u8 = "",
 };
 
 /// Added and removed lines across every row that is part of the review.
@@ -483,11 +490,9 @@ pub const ComposeView = struct {
     selected: ?usize = null,
     /// Whether Enter sends to the agent or copies. Only the footer cares.
     to_agent: bool = true,
-    /// Whether Enter saves a comment rather than sending a message. The
-    /// footer said "send" for a comment because it was inferred from the
-    /// delivery, which an edit forgot to set - so the box promised the wrong
-    /// destination. This is the fact itself rather than a proxy for it.
-    saves: bool = false,
+    /// What the box is for, in one field: four booleans inferring it had to
+    /// be kept agreeing with each other, and did not.
+    kind: app_mod.ComposeFor = .agent,
     /// A pull request is on screen, so a saved comment has somewhere to be
     /// posted. Decides whether the footer offers the key at all.
     posts: bool = false,
@@ -500,12 +505,6 @@ pub const ComposeView = struct {
     /// Which half of the box has the keyboard, drawn in its title. A modal
     /// box that does not say which mode it is in is a box that eats keystrokes.
     normal: bool = false,
-    /// The box holds the reader's own remark from the request, so `<CR>` is a
-    /// call to the forge. The footer drops the keys that would save it here.
-    amends: bool = false,
-    /// Somebody's remark, open to be read: the title says VIEW, the footer
-    /// offers only the key that closes it, and no keystroke reaches the text.
-    read_only: bool = false,
     /// What the box is for, drawn in its title: `compose`, or `note a.zig:47`.
     /// A note's line lives here rather than in the text, because the store
     /// already knows it - typing it into the body would put it in the review
@@ -539,12 +538,81 @@ pub const CommentMark = struct {
     body: []const u8 = "",
     /// Drawn differently, because "I still mean this" and "the code moved out
     /// from under it" are different things to know at a glance.
-    state: enum { open, sent, stale },
+    state: State,
+
+    pub const State = enum {
+        sent,
+        open,
+        stale,
+
+        /// Which state a single gutter dot shows when a line carries several
+        /// remarks: stale first, because it is the only one that says
+        /// something is wrong; then open; then sent, already dealt with. The
+        /// declaration order is the ranking.
+        pub fn worseThan(self: State, other: State) bool {
+            return @intFromEnum(self) > @intFromEnum(other);
+        }
+    };
 };
 
 pub const PresetEntry = struct {
     name: []const u8,
     text: []const u8,
+};
+
+/// One message of a thread, as the overlay draws it. Built in the frame
+/// arena from the store, which is the only place these live.
+pub const ThreadMessage = struct {
+    /// Empty for a remark written in this pane: there is no name to put on
+    /// the reader's own, and a login beside it would be noise on every row.
+    author: []const u8 = "",
+    /// How long ago, already worded. Empty when the forge gave no date, which
+    /// is not the epoch and must not be drawn as 1970.
+    when: []const u8 = "",
+    body: []const u8,
+    /// The reader's own, so `<CR>` can edit it and the row can say so.
+    mine: bool = false,
+    /// The line it was written against has gone. Dimmed rather than hidden,
+    /// which is the same answer the gutter gives.
+    stale: bool = false,
+    /// Already handed to the agent.
+    sent: bool = false,
+};
+
+/// What the thread overlay drew, written back by the renderer because only it
+/// knows the wrap, and read on the next keystroke so a page is half a screen.
+pub const ThreadLayout = struct {
+    /// Text rows the box has room for.
+    rows: u16 = 1,
+    /// Rows the whole stack wanted.
+    total: u16 = 1,
+    /// First stack row drawn.
+    scroll: u16 = 0,
+    /// The selection moved, so the next frame scrolls to show it rather than
+    /// keeping the rows it had. Cleared by the frame that honours it.
+    follow: bool = true,
+};
+
+/// Everything the thread overlay draws. Its own view for the reason
+/// `HelpView` is: it floats over the body and the body has no say in it.
+pub const ThreadView = struct {
+    /// What the conversation is about, drawn in the top border.
+    path: []const u8,
+    line: u32,
+    messages: []const ThreadMessage,
+    /// An index into `messages`.
+    selected: usize = 0,
+    /// The root's code as the forge kept it, above the stack. Empty draws
+    /// nothing rather than an empty frame.
+    code: []const u8 = "",
+    layout: *ThreadLayout,
+    /// The keymap, so the footer names the keys the reader actually has.
+    bindings: []const keymap.Binding = &.{},
+    /// A question waiting on a keystroke, which takes the box over: the title
+    /// while it is up, and the footer down to the two answers. Empty
+    /// otherwise. The status row asks it too, and is the one row of the screen
+    /// a reader looking into this box is not looking at.
+    ask: []const u8 = "",
 };
 
 /// The grid the popup last drew: how many columns, and how tall each is.

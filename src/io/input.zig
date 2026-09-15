@@ -76,8 +76,79 @@ pub const Reader = struct {
     /// pane all day.
     pub const poll_interval_ms: i32 = 50;
 
+    /// Two codepoints of two columns each, printed and measured. Erased
+    /// behind the reply: the first frame paints over it, but not before the
+    /// eye does.
+    const probe = vaxis.ctlseqs.home ++
+        "\u{1F44D}\u{1F3FB}" ++
+        vaxis.ctlseqs.cursor_position_request ++
+        vaxis.ctlseqs.home ++
+        vaxis.ctlseqs.erase_below_cursor;
+
+    /// What the measurement may cost a cold start. A terminal answers in about
+    /// a millisecond; the whole budget is only spent by one that never does.
+    const probe_poll_ms: i32 = 15;
+    const probe_rounds: u8 = 2;
+
     pub fn init(tty: *tty_mod.Tty, queue: *event.Queue) Reader {
         return .{ .tty = tty, .queue = queue };
+    }
+
+    /// Whether the terminal draws a grapheme cluster as one glyph.
+    ///
+    /// Unmeasured, vaxis counts columns with `wcwidth`: an emoji and its
+    /// skin-tone modifier are two codepoints of two columns each, where the
+    /// terminal draws one glyph two columns wide, and everything after it on
+    /// that row - a wash, a box's right border - lands two columns left of
+    /// where the frame put it.
+    ///
+    /// Measured rather than asked, because mode 2027 is not what answers: the
+    /// grid that draws the frame is tmux's whenever the pane is a tmux split,
+    /// and tmux clusters without implementing that mode. Synchronous, before
+    /// `start`, because a frame drawn before the answer is drawn the wrong
+    /// way. Anything else read on the way is a key pressed this early, and
+    /// goes to the queue.
+    pub fn clusters(self: *Reader, w: *std.Io.Writer) bool {
+        self.poll_fd = pollableFd(self.tty);
+        // Nothing to bound the read with: it could park until the first key.
+        if (self.poll_fd == null) return false;
+        w.writeAll(probe) catch return false;
+        w.flush() catch return false;
+
+        var parser: vaxis.Parser = .{};
+        var buf: [1024]u8 = undefined;
+        var carry: usize = 0;
+        var rounds: u8 = probe_rounds;
+        while (rounds > 0) : (rounds -= 1) {
+            if (!self.readableFor(probe_poll_ms)) continue;
+            const got = self.tty.read(buf[carry..]) catch return false;
+            if (got == 0) return false;
+            const n = carry + got;
+
+            var at: usize = 0;
+            while (at < n) {
+                const res = parser.parse(buf[at..n], null) catch return false;
+                if (res.n == 0) {
+                    std.mem.copyForwards(u8, buf[0 .. n - at], buf[at..n]);
+                    carry = n - at;
+                    break;
+                }
+                at += res.n;
+                carry = 0;
+                const ev = res.event orelse continue;
+                switch (ev) {
+                    // vaxis parses a cursor-position report as `F3` with the
+                    // column minus one in the modifier bits. Three columns is
+                    // one clustered glyph, five is the two `wcwidth` counts.
+                    .key_press => |k| {
+                        if (k.codepoint == vaxis.Key.f3) return k.mods.alt and !k.mods.ctrl;
+                        self.queue.push(.{ .key = toKey(k) }) catch return false;
+                    },
+                    else => {},
+                }
+            }
+        }
+        return false;
     }
 
     pub fn start(self: *Reader) !void {
@@ -106,13 +177,17 @@ pub const Reader = struct {
     /// `HUP` counts as readable so the terminal going away is reported by the
     /// read, which sees the end of the file, rather than spun on here.
     fn readable(self: *Reader) bool {
+        return self.readableFor(poll_interval_ms);
+    }
+
+    fn readableFor(self: *Reader, timeout_ms: i32) bool {
         const fd = self.poll_fd orelse return true;
         var fds = [_]std.posix.pollfd{.{
             .fd = fd,
             .events = std.posix.POLL.IN,
             .revents = 0,
         }};
-        const n = std.posix.poll(&fds, poll_interval_ms) catch return true;
+        const n = std.posix.poll(&fds, timeout_ms) catch return true;
         if (n == 0) return false;
         return fds[0].revents & (std.posix.POLL.IN | std.posix.POLL.HUP) != 0;
     }

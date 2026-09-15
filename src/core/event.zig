@@ -16,6 +16,9 @@ pub const Mode = enum {
     /// in the keymap like everything else, and so every other binding is
     /// invisible while it is up rather than firing behind it.
     help,
+    /// One line's conversation, stacked. Its own mode for the same reason
+    /// `help` is, and because its selection is a comment id rather than a line.
+    thread,
     // Not reachable in v0.1. Present so dispatch never grows an `if (in_visual)`.
     insert,
     command,
@@ -247,10 +250,11 @@ test "deinit frees the payloads of events nobody drained" {
     q.deinit();
 }
 
-test "all seven modes are declared" {
+test "all eight modes are declared" {
     // Six from the original set, plus `help` - added when `?` gained an
-    // overlay whose close keys had to be keymap rows like any other.
-    try std.testing.expectEqual(@as(usize, 7), @typeInfo(Mode).@"enum".fields.len);
+    // overlay whose close keys had to be keymap rows like any other - and
+    // `thread`, added for the same reason over a conversation.
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(Mode).@"enum".fields.len);
 }
 
 test "unreachable event variants are declared, not retrofitted" {

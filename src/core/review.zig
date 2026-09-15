@@ -28,6 +28,21 @@ pub fn path(buf: []u8, n: u32) []const u8 {
     return std.fmt.bufPrint(buf, ".lgtm/review-{d}.md", .{n}) catch ".lgtm/review.md";
 }
 
+/// What a review turned out to contain. Two numbers, because the file holds
+/// the reviewers' asks as well as the reader's own.
+pub const Written = struct {
+    mine: u32 = 0,
+    theirs: u32 = 0,
+
+    pub fn total(self: Written) u32 {
+        return self.mine + self.theirs;
+    }
+};
+
+/// The most messages one conversation contributes, so a group fits a stack
+/// buffer.
+const max_thread = 64;
+
 /// Renders the open comments, grouped by file and ordered by line within each.
 ///
 /// Grouped because that is how the agent will act on them: everything about
@@ -50,7 +65,7 @@ pub fn render(
     store: *const comments.Store,
     n: u32,
     scope: []const u8,
-) Allocator.Error!u32 {
+) Allocator.Error!Written {
     var num: [24]u8 = undefined;
     try out.appendSlice(gpa, "# Review ");
     try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{n}) catch "");
@@ -61,7 +76,7 @@ pub fn render(
         try out.appendSlice(gpa, "\n");
     }
 
-    var written: u32 = 0;
+    var written: Written = .{};
     // Files in first-appearance order, without allocating a set: the comment
     // count is small enough that a scan per file is cheaper than a hash map,
     // and it keeps the output stable between runs.
@@ -102,6 +117,12 @@ pub fn render(
             last = m.line;
             last_id = m.id;
             first = false;
+            // Already written under its conversation's first message: a
+            // reply and what it answers are one bullet, not two.
+            if (!leadsThread(store, m)) continue;
+
+            var members: [max_thread]*const comments.Comment = undefined;
+            const group = threadOf(store, m, &members);
 
             try out.appendSlice(gpa, "\n- **line ");
             if (m.span > 1) {
@@ -110,19 +131,79 @@ pub fn render(
                 try out.appendSlice(gpa, std.fmt.bufPrint(&num, "{d}", .{m.line}) catch "");
             }
             try out.appendSlice(gpa, "**");
+            // Who wrote it, when that is not the reader: their own stay
+            // unattributed so the attributed ones read as somebody else's.
+            if (group.len == 1 and m.theirs()) {
+                try out.appendSlice(gpa, " _(@");
+                try out.appendSlice(gpa, m.author);
+                try out.appendSlice(gpa, ")_");
+            }
             // A stale comment says so in the file as well as on screen. The agent
             // should know the line moved out from under the remark rather than
             // being pointed at code that may not be the code meant.
             if (m.about_removed) try out.appendSlice(gpa, " _(about code removed in this hunk)_");
             if (m.state == .stale) try out.appendSlice(gpa, " _(stale - the line this was written against has gone)_");
-            try out.appendSlice(gpa, "\n\n");
-            try indent(out, gpa, m.body);
-            written += 1;
+            try out.appendSlice(gpa, "\n");
+
+            for (group) |msg| {
+                // Inside a conversation every message is labelled: a bare
+                // block between two attributed ones reads as a continuation.
+                if (group.len > 1) {
+                    try out.appendSlice(gpa, "\n  **");
+                    if (msg.theirs()) {
+                        try out.appendSlice(gpa, "@");
+                        try out.appendSlice(gpa, msg.author);
+                    } else {
+                        try out.appendSlice(gpa, "you");
+                    }
+                    try out.appendSlice(gpa, ":**\n");
+                }
+                try out.appendSlice(gpa, "\n");
+                try indent(out, gpa, msg.body);
+                if (msg.theirs()) written.theirs += 1 else written.mine += 1;
+            }
         }
     }
 
-    if (written == 0) try out.appendSlice(gpa, "\nNo open comments.\n");
+    if (written.total() == 0) try out.appendSlice(gpa, "\nNo open comments.\n");
     return written;
+}
+
+/// Whether a comment leads its conversation, in the order the file is
+/// written: by line, then by id. A remark written in this pane belongs to no
+/// thread, so it always leads.
+fn leadsThread(store: *const comments.Store, m: *const comments.Comment) bool {
+    const t = m.thread();
+    if (t == 0) return true;
+    for (store.items()) |*o| {
+        if (o == m or o.state == .sent) continue;
+        if (o.thread() != t or !std.mem.eql(u8, o.path, m.path)) continue;
+        if (o.line < m.line or (o.line == m.line and o.id < m.id)) return false;
+    }
+    return true;
+}
+
+/// Every message of one conversation, in store order - which the import has
+/// already made the order they were written in.
+fn threadOf(
+    store: *const comments.Store,
+    m: *const comments.Comment,
+    buf: []*const comments.Comment,
+) []*const comments.Comment {
+    const t = m.thread();
+    if (t == 0) {
+        buf[0] = m;
+        return buf[0..1];
+    }
+    var n: usize = 0;
+    for (store.items()) |*o| {
+        if (n == buf.len) break;
+        if (o.state == .sent) continue;
+        if (o.thread() != t or !std.mem.eql(u8, o.path, m.path)) continue;
+        buf[n] = o;
+        n += 1;
+    }
+    return buf[0..n];
 }
 
 /// The body as a markdown blockquote, so a comment containing a list or a code
@@ -185,7 +266,9 @@ test "the review groups by file and orders by line" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     const n = try render(&out, testing.allocator, &store, 3, "");
-    try testing.expectEqual(@as(u32, 3), n);
+    try testing.expectEqual(@as(u32, 3), n.total());
+    // Every one of them the reader's own, which is the working-tree case.
+    try testing.expectEqual(@as(u32, 0), n.theirs);
 
     const text = out.items;
     try testing.expect(std.mem.startsWith(u8, text, "# Review 3\n"));
@@ -208,7 +291,7 @@ test "sent comments stay out, so nothing is asked for twice" {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
     const n = try render(&out, testing.allocator, &store, 1, "");
-    try testing.expectEqual(@as(u32, 1), n);
+    try testing.expectEqual(@as(u32, 1), n.total());
     try testing.expect(std.mem.indexOf(u8, out.items, "already said this") == null);
     try testing.expect(std.mem.indexOf(u8, out.items, "this one is new") != null);
 }
@@ -226,6 +309,86 @@ test "a stale comment says so in the file, not just on screen" {
     _ = try render(&out, testing.allocator, &store, 1, "");
     try testing.expect(std.mem.indexOf(u8, out.items, "stale") != null);
     try testing.expect(std.mem.indexOf(u8, out.items, "this branch is dead") != null);
+}
+
+test "a remark from the request says who wrote it" {
+    // Or the agent acts on the reviewers' asks as if the reader had made them.
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.add("a.zig", 1, "mine");
+    _ = try store.adopt(.{ .path = "a.zig", .line = 2, .body = "theirs", .author = "someone", .remote = 10 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    const n = try render(&out, testing.allocator, &store, 1, "");
+    try testing.expectEqual(@as(u32, 1), n.mine);
+    try testing.expectEqual(@as(u32, 1), n.theirs);
+
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 2** _(@someone)_") != null);
+    // The reader's own stays unattributed, which is what makes the attributed
+    // one read as somebody else's rather than as a list of names.
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 1**\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 1** _") == null);
+}
+
+test "a thread is one conversation, not unrelated bullets sharing a line" {
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.adopt(.{ .path = "docs/CONFIG.md", .line = 26, .body = "that's nice", .author = "someone", .remote = 10 });
+    _ = try store.adopt(.{ .path = "docs/CONFIG.md", .line = 26, .body = "fixed in the follow-up", .author = "kunkka19xx", .remote = 11, .reply_to = 10 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    const n = try render(&out, testing.allocator, &store, 1, "");
+    // Both messages are written, under one bullet.
+    try testing.expectEqual(@as(u32, 2), n.total());
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "- **line 26**"));
+
+    const root = std.mem.indexOf(u8, out.items, "**@someone:**").?;
+    const reply = std.mem.indexOf(u8, out.items, "**@kunkka19xx:**").?;
+    try testing.expect(root < reply);
+    try testing.expect(std.mem.indexOf(u8, out.items, "  > that's nice") != null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "  > fixed in the follow-up") != null);
+
+    // The attribution is on the messages rather than on the bullet: a thread
+    // has no single author to name up there.
+    try testing.expect(std.mem.indexOf(u8, out.items, "**line 26** _(@") == null);
+}
+
+test "the reader's own reply inside a thread is labelled, alone it is not" {
+    // A bare block between two attributed ones reads as a continuation of
+    // whichever came first, so inside a conversation everything is labelled.
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.adopt(.{ .path = "a.zig", .line = 4, .body = "why this way?", .author = "someone", .remote = 10 });
+    // Written in this pane, on the line the thread sits on: not part of the
+    // conversation, because it belongs to no thread on the forge.
+    _ = try store.add("a.zig", 4, "a thought of my own");
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    _ = try render(&out, testing.allocator, &store, 1, "");
+
+    // Two bullets on one line, not one conversation of two.
+    try testing.expectEqual(@as(usize, 2), std.mem.count(u8, out.items, "- **line 4**"));
+    try testing.expect(std.mem.indexOf(u8, out.items, "**you:**") == null);
+    try testing.expect(std.mem.indexOf(u8, out.items, "  > a thought of my own") != null);
+}
+
+test "a thread whose reply landed on another line is still written once" {
+    // Hard rule 7: a message folded under a bullet must not be a message
+    // dropped. The reply is on line 31 and its root on line 26.
+    var store: comments.Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.adopt(.{ .path = "a.zig", .line = 26, .body = "root", .author = "someone", .remote = 10 });
+    _ = try store.adopt(.{ .path = "a.zig", .line = 31, .body = "moved reply", .author = "other", .remote = 11, .reply_to = 10 });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+    const n = try render(&out, testing.allocator, &store, 1, "");
+    try testing.expectEqual(@as(u32, 2), n.theirs);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "moved reply"));
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, out.items, "- **line "));
 }
 
 test "a multi-line note stays inside its bullet" {
@@ -248,7 +411,7 @@ test "an empty review says so rather than being a bare heading" {
 
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(testing.allocator);
-    try testing.expectEqual(@as(u32, 0), try render(&out, testing.allocator, &store, 7, ""));
+    try testing.expectEqual(@as(u32, 0), (try render(&out, testing.allocator, &store, 7, "")).total());
     try testing.expect(std.mem.indexOf(u8, out.items, "No open comments") != null);
 }
 

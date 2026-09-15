@@ -16,6 +16,7 @@ const Allocator = std.mem.Allocator;
 
 const vaxis = @import("vaxis");
 
+const event = @import("../core/event.zig");
 const frame_mod = @import("frame.zig");
 const Frame = frame_mod.Frame;
 const HelpView = frame_mod.HelpView;
@@ -871,7 +872,11 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
 
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
-    const title: Footer = .{ .text = v.title, .keys = &.{} };
+    var title: Footer = .{ .text = v.title, .keys = &.{} };
+    // A question takes the title, and only the title: it says the key that
+    // answers it, so a second copy of that along the bottom border is the
+    // same sentence twice.
+    if (v.ask.len > 0) title = .{ .text = try std.fmt.allocPrint(f.arena, " {s} ", .{v.ask}), .keys = &.{} };
     const foot = try footerOf(f.arena, filter_lead, v.keys, v.extra_keys, f.width() -| 2);
     const query = try std.fmt.allocPrint(f.arena, "{s}{s}", .{ prompt_filter_prefix, v.query });
     m.title = f.win.gwidth(title.text);
@@ -882,7 +887,15 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
 
     const text_col = box.col + 2;
     const sel = @min(v.index, entries.len -| 1);
+    // Clipped to the box that was laid out for it: a label wider than the
+    // border is dropped whole, and a question nobody can see is not asked.
+    if (v.ask.len > 0) {
+        title = .{ .text = title.text[0..wrap_mod.fitFront(title.text, box.content, f.method())], .keys = &.{} };
+        m.title = f.win.gwidth(title.text);
+    }
     const blank = try chromeOf(f, box, title, foot, m.title, m.footer);
+    // Loud, over the border the chrome already laid it into.
+    if (v.ask.len > 0) f.put(box.top, box.col + 2, title.text, f.theme.del_sign);
 
     // The whole change, let into the right end of the top border - the same
     // place and the same two colours the status row uses, so it reads as the
@@ -1252,7 +1265,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     const box_col = geom.col;
 
     const label = try std.fmt.allocPrint(f.arena, "{s} - {s}", .{
-        v.what, if (v.read_only) "VIEW" else if (v.normal) "NORMAL" else "INSERT",
+        v.what, if (v.kind == .view) "VIEW" else if (v.normal) "NORMAL" else "INSERT",
     });
     const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
     const foot = try footerOf(f.arena, "", try composeKeys(f, v), &.{}, content);
@@ -1329,11 +1342,16 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
 /// does that are not motions (`keymap.Modes.compose_only`).
 fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEntry {
     var out: std.ArrayList(keytext.HelpEntry) = .empty;
-    const commit = if (v.amends) "save on the request" else if (v.saves) "save" else "send";
+    const commit = switch (v.kind) {
+        .reply => "reply on the request",
+        .amend => "save on the request",
+        .fresh, .edit => "save",
+        .agent, .view => "send",
+    };
 
     // A row of keys that do nothing is worse than none.
-    if (v.read_only) {
-        try add(f, v, &out, .compose_cancel, "close");
+    if (v.kind == .view) {
+        try add(f, v.bindings, .note_input, &out, .compose_cancel, "close");
         return out.toOwnedSlice(f.arena);
     }
 
@@ -1341,31 +1359,39 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
         .{ .keys = "o", .desc = "new line" },
         .{ .keys = "i", .desc = "insert" },
     });
-    try add(f, v, &out, .compose_submit, commit);
-    try add(f, v, &out, .compose_cancel, "cancel");
+    try add(f, v.bindings, .note_input, &out, .compose_submit, commit);
+    try add(f, v.bindings, .note_input, &out, .compose_cancel, "cancel");
     // Before the rest, because the footer sheds groups from the end and this
     // is the one a reader needs on their second sentence.
-    if (!v.normal) try add(f, v, &out, .compose_newline, "line");
-    if (v.saves and !v.amends) try add(f, v, &out, .compose_send_now, "save + send");
-    if (v.saves and v.posts and !v.amends) try add(f, v, &out, .compose_post_now, "save + post");
+    if (!v.normal) try add(f, v.bindings, .note_input, &out, .compose_newline, "line");
+    // Only the two that write a remark here: an amend and a reply go to the
+    // forge and nowhere else, so "save + send" would promise nothing.
+    if (v.kind.savesHere()) {
+        try add(f, v.bindings, .note_input, &out, .compose_send_now, "save + send");
+        if (v.posts) try add(f, v.bindings, .note_input, &out, .compose_post_now, "save + post");
+    }
     if (!v.normal) {
-        try add(f, v, &out, .compose_presets, "preset");
-        if (!v.saves) try add(f, v, &out, .compose_mention, "file");
+        try add(f, v.bindings, .note_input, &out, .compose_presets, "preset");
+        if (!v.kind.isComment()) try add(f, v.bindings, .note_input, &out, .compose_mention, "file");
     }
     return out.toOwnedSlice(f.arena);
 }
 
 /// One footer entry, skipped when nothing is bound to the command: a footer
 /// that named a key the reader had unbound would be worse than a shorter one.
+///
+/// Takes the bindings and the mode rather than a view: every box has a footer,
+/// and only one of them is the compose box.
 fn add(
     f: Frame,
-    v: ComposeView,
+    bindings: []const keymap.Binding,
+    mode: event.Mode,
     out: *std.ArrayList(keytext.HelpEntry),
     cmd: keymap.Command,
     desc: []const u8,
 ) Allocator.Error!void {
     var buf: [32]u8 = undefined;
-    const keys = keytext.firstKeyFor(v.bindings, cmd, .note_input, &buf);
+    const keys = keytext.firstKeyFor(bindings, cmd, mode, &buf);
     if (keys.len == 0) return;
     try out.append(f.arena, .{ .keys = try f.arena.dupe(u8, keys), .desc = desc });
 }
@@ -1424,12 +1450,347 @@ fn drawPresetList(
     }
 }
 
+// -- the thread overlay ------------------------------------------------------
+//
+// One line's conversation, stacked. The wrap and the scroll are the parts that
+// are easy to get wrong and impossible to see, so `stackRows` and
+// `threadFirstRow` are pure and unit tested.
+
+/// One drawn row of the stack. Flat rather than a message holding its lines,
+/// so the scroll is a row index and the box draws a window into a list.
+pub const ThreadRow = struct {
+    pub const Kind = enum {
+        /// A line of the root's code, above the stack.
+        code,
+        /// `@author  2d ago  (you)`, drawn from the message rather than from
+        /// text, because it is three things in three colours.
+        head,
+        body,
+        blank,
+    };
+
+    kind: Kind,
+    text: []const u8 = "",
+    /// Which message it belongs to, or `no_message` for the code above the
+    /// stack and the blank under it.
+    msg: usize = no_message,
+
+    pub const no_message = std.math.maxInt(usize);
+};
+
+/// Columns a message's body is indented by, so the names head their own text
+/// the way a threaded conversation reads everywhere else.
+const thread_indent: u16 = 2;
+
+/// The whole stack, wrapped to `content`. Pure: no window, no drawing.
+pub fn stackRows(
+    arena: Allocator,
+    v: frame_mod.ThreadView,
+    content: u16,
+    m: wrap_mod.Metrics,
+) Allocator.Error![]const ThreadRow {
+    var out: std.ArrayList(ThreadRow) = .empty;
+
+    if (v.code.len > 0) {
+        var lines = std.mem.splitScalar(u8, v.code, '\n');
+        while (lines.next()) |line| {
+            // Clipped, not wrapped: a wrapped line of code reads as two.
+            const kept = wrap_mod.fitFront(line, content, m);
+            try out.append(arena, .{ .kind = .code, .text = line[0..kept] });
+        }
+        try out.append(arena, .{ .kind = .blank });
+    }
+
+    for (v.messages, 0..) |msg, i| {
+        // The gap between two messages belongs to neither, so the selection
+        // wash starts at a name rather than a row above it.
+        if (i > 0) try out.append(arena, .{ .kind = .blank });
+        try out.append(arena, .{ .kind = .head, .msg = i });
+        var rows: ComposeRows = .init(msg.body, content -| thread_indent, m);
+        var any = false;
+        while (rows.next()) |chunk| {
+            any = true;
+            try out.append(arena, .{ .kind = .body, .text = chunk.slice(msg.body), .msg = i });
+        }
+        // A remark with nothing in it cannot happen through the store, but a
+        // message that drew no rows would make the selection unreachable.
+        if (!any) try out.append(arena, .{ .kind = .body, .msg = i });
+    }
+    return out.toOwnedSlice(arena);
+}
+
+/// Which stack row the box starts at. `at` is where it was, so only a moved
+/// selection pulls the view; a message taller than the box scrolls to its
+/// head, which is where reading it starts.
+pub fn threadFirstRow(total: u16, head: u16, last: u16, box_rows: u16, at: u16, follow: bool) u16 {
+    const max_first = total -| box_rows;
+    if (!follow) return @min(at, max_first);
+    if (last - head + 1 > box_rows) return @min(head, max_first);
+    var first = @min(at, max_first);
+    if (head < first) first = head;
+    if (last >= first + box_rows) first = @min(last + 1 -| box_rows, max_first);
+    return first;
+}
+
+/// The first and last stack row of one message.
+fn spanOf(rows: []const ThreadRow, msg: usize) struct { head: u16, last: u16 } {
+    var head: u16 = 0;
+    var last: u16 = 0;
+    var found = false;
+    for (rows, 0..) |r, i| {
+        if (r.msg != msg or r.kind == .blank) continue;
+        if (!found) {
+            head = @intCast(i);
+            found = true;
+        }
+        last = @intCast(i);
+    }
+    return .{ .head = head, .last = last };
+}
+
+/// Where the box goes. The compose box's width, because both hold prose and a
+/// reader should not have to change their eye's span between the two.
+fn threadBox(f: Frame, stack: u16, top: u16, height: u16) ?Box {
+    if (height < 5 or f.width() < 24) return null;
+    const width = @min(f.width() -| 4, @as(u16, 72));
+    const content = width -| 4;
+    if (content == 0) return null;
+
+    const rows = @max(@as(u16, 1), @min(stack, height -| 4));
+    const box_h = rows + 2;
+    return .{
+        .cols = 1,
+        .per = rows,
+        .offset = 0,
+        .shown = rows,
+        .hidden = 0,
+        .col = (f.width() -| width) / 2,
+        .top = top + (height -| box_h) / 2,
+        .width = width,
+        .height = box_h,
+        .content = content,
+        .column = content,
+        .list_width = content,
+    };
+}
+
+pub fn drawThread(f: Frame, v: frame_mod.ThreadView, top: u16, height: u16) Allocator.Error!void {
+    // Measured against the width the box will have, which is fixed: the
+    // stack cannot change it, so there is no circle to break here.
+    const probe = threadBox(f, 1, top, height) orelse return;
+    const rows = try stackRows(f.arena, v, probe.content, f.method());
+    const box = threadBox(f, @intCast(rows.len), top, height) orelse return;
+    const text_rows = box.height - 2;
+
+    const span = spanOf(rows, v.selected);
+    const first = threadFirstRow(
+        @intCast(rows.len),
+        span.head,
+        span.last,
+        text_rows,
+        v.layout.scroll,
+        v.layout.follow,
+    );
+    // Written back for the next keystroke: a page is half of what is on
+    // screen, and only this knows what that was.
+    v.layout.* = .{ .rows = text_rows, .total = @intCast(rows.len), .scroll = first, .follow = false };
+
+    // The frame arena, for the reason `drawThreadHead` spells out.
+    const where = if (v.ask.len > 0) v.ask else try std.fmt.allocPrint(f.arena, "{s}:{d}", .{ v.path, v.line });
+    const title = try footerOf(f.arena, "", &.{}, &.{.{
+        .keys = "",
+        .desc = where[0..wrap_mod.fitFront(where, box.content, f.method())],
+    }}, box.content);
+    const foot = try footerOf(f.arena, "", try threadKeys(f, v), &.{}, box.content);
+    const blank = try chromeWith(
+        f,
+        box,
+        title,
+        foot,
+        @intCast(title.text.len),
+        @intCast(foot.text.len),
+        Border.heavy(f.glyphs),
+        f.theme.accent,
+    );
+
+    // Loud, over the border line the chrome already laid the text into: the
+    // question is what the next keystroke answers, and the accent the title
+    // is drawn in is the colour of everything else in this box.
+    if (v.ask.len > 0) {
+        f.put(box.top, box.col + 2, title.text, f.theme.del_sign);
+    }
+
+    // Only while the stack is taller than the box: a conversation the reader
+    // can see all of counts itself.
+    if (rows.len > text_rows) {
+        const count = try std.fmt.allocPrint(f.arena, " {d}/{d} ", .{ v.selected + 1, v.messages.len });
+        const wide = f.win.gwidth(count);
+        if (wide + 4 <= box.width) f.put(box.top, box.col + box.width - 1 - wide, count, f.theme.dim);
+    }
+
+    var r: u16 = 0;
+    while (r < text_rows and first + r < rows.len) : (r += 1) {
+        const row = rows[first + r];
+        const y = box.top + 1 + r;
+        // A wash across the message, the way the cursor line marks the diff.
+        // No marker column: chrome this narrow costs a word of every line.
+        const on = row.msg == v.selected;
+        if (on) f.put(y, box.col + 1, blank[0 .. box.content + 2], f.theme.cursor_line);
+        const bg = if (on) f.theme.cursor_line.bg else null;
+        switch (row.kind) {
+            .blank => {},
+            .code => f.put(y, box.col + 2, row.text, frame_mod.withBg(codeStyle(f, row.text), bg)),
+            .head => try drawThreadHead(f, v.messages[row.msg], y, box, bg),
+            .body => {
+                const msg = v.messages[row.msg];
+                const style = if (msg.stale)
+                    f.theme.comment_stale
+                else if (msg.sent)
+                    f.theme.comment_sent
+                else
+                    f.theme.text;
+                f.put(y, box.col + 2 + thread_indent, row.text, frame_mod.withBg(style, bg));
+            },
+        }
+    }
+}
+
+/// `@author  2d ago` on the left, `(you)` on the right. Three strings in
+/// three colours, because the colour is what says whose remark it is.
+fn drawThreadHead(
+    f: Frame,
+    msg: frame_mod.ThreadMessage,
+    y: u16,
+    box: Box,
+    bg: ?vaxis.Color,
+) Allocator.Error!void {
+    var col = box.col + 2;
+    if (msg.author.len > 0) {
+        // The frame arena, never a stack buffer: vaxis cells reference the
+        // text, and the frame is rendered after this returns.
+        const name = try std.fmt.allocPrint(f.arena, "@{s}", .{msg.author});
+        const style = if (msg.mine) f.theme.accent else f.theme.comment_author;
+        f.put(y, col, name, frame_mod.withBg(style, bg));
+        col += f.win.gwidth(name);
+    } else {
+        // A remark written in this pane has no login on it, and inventing one
+        // would name the reader on rows the forge has never heard of.
+        f.put(y, col, "you", frame_mod.withBg(f.theme.accent, bg));
+        col += 3;
+    }
+    if (msg.when.len > 0) {
+        f.put(y, col + 2, msg.when, frame_mod.withBg(f.theme.dim, bg));
+    }
+    if (msg.author.len > 0 and msg.mine) {
+        const tag = "(you)";
+        const at = box.col + 2 + box.content -| @as(u16, tag.len);
+        if (at > col) f.put(y, at, tag, frame_mod.withBg(f.theme.dim, bg));
+    }
+}
+
+/// A line of the root's hunk, coloured by its sign and nothing else. The
+/// overlay is a reading view, not a second diff.
+fn codeStyle(f: Frame, line: []const u8) vaxis.Style {
+    if (line.len == 0) return f.theme.dim;
+    return switch (line[0]) {
+        '+' => f.theme.add_sign,
+        '-' => f.theme.del_sign,
+        else => f.theme.dim,
+    };
+}
+
+/// The box's footer, read from the keymap every frame so a remapped key
+/// relabels it.
+fn threadKeys(f: Frame, v: frame_mod.ThreadView) Allocator.Error![]const keytext.HelpEntry {
+    var out: std.ArrayList(keytext.HelpEntry) = .empty;
+    inline for (.{
+        .{ keymap.Command.list_down, "move" },
+        .{ keymap.Command.list_up, "move" },
+        .{ keymap.Command.thread_select, "edit" },
+        .{ keymap.Command.thread_reply, "reply" },
+        .{ keymap.Command.comment_delete, "delete" },
+    }) |pair| try add(f, v.bindings, .thread, &out, pair[0], pair[1]);
+    return out.toOwnedSlice(f.arena);
+}
+
 const preset_title: keytext.HelpEntry = .{ .keys = "", .desc = "insert at the caret" };
 const preset_keys: []const keytext.HelpEntry = &.{
     .{ .keys = "j k", .desc = "pick" },
     .{ .keys = "<CR>", .desc = "insert" },
     .{ .keys = "<Esc>", .desc = "back" },
 };
+
+test "a thread wraps into a flat stack, and every message keeps its rows" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var layout: frame_mod.ThreadLayout = .{};
+    const v: frame_mod.ThreadView = .{
+        .path = "docs/CONFIG.md",
+        .line = 26,
+        .code = "@@ -20 +20 @@\n-a\n+b",
+        .messages = &.{
+            .{ .author = "someone", .when = "2d ago", .body = "that's nice if people want multiple shortkeys" },
+            .{ .author = "kunkka19xx", .when = "1d ago", .body = "fixed", .mine = true },
+        },
+        .layout = &layout,
+    };
+
+    // Twenty columns of content, two of them the body's indent: the first
+    // body wraps, the second does not.
+    const rows = try stackRows(arena, v, 20, .{ .method = .unicode });
+
+    // Three lines of code, a blank, then each message as a head and its body,
+    // with a blank between the two.
+    try testing.expectEqual(ThreadRow.Kind.code, rows[0].kind);
+    try testing.expectEqual(ThreadRow.Kind.code, rows[2].kind);
+    try testing.expectEqual(ThreadRow.Kind.blank, rows[3].kind);
+    try testing.expectEqual(ThreadRow.Kind.head, rows[4].kind);
+    try testing.expectEqual(@as(usize, 0), rows[4].msg);
+
+    // The code above the stack belongs to no message, so the selection wash
+    // never covers it.
+    try testing.expectEqual(ThreadRow.no_message, rows[0].msg);
+
+    var first_body: usize = 0;
+    for (rows) |r| {
+        if (r.kind == .body and r.msg == 0) first_body += 1;
+    }
+    // Forty-four characters into eighteen columns is three rows, not one.
+    try testing.expectEqual(@as(usize, 3), first_body);
+
+    const second = spanOf(rows, 1);
+    try testing.expectEqual(ThreadRow.Kind.head, rows[second.head].kind);
+    try testing.expectEqual(ThreadRow.Kind.body, rows[second.last].kind);
+    try testing.expectEqualStrings("fixed", rows[second.last].text);
+    // The blank before a message belongs to neither, or the wash would start
+    // a row above the name it is marking.
+    try testing.expectEqual(ThreadRow.Kind.blank, rows[second.head - 1].kind);
+    try testing.expectEqual(ThreadRow.no_message, rows[second.head - 1].msg);
+}
+
+test "the stack scrolls to the selection, and stays put when the reader scrolls" {
+    // A stack of thirty rows in a box of ten.
+    // Already on screen: nothing moves.
+    try testing.expectEqual(@as(u16, 0), threadFirstRow(30, 2, 5, 10, 0, true));
+    // Below the fold: the least scrolling that shows the whole message.
+    try testing.expectEqual(@as(u16, 6), threadFirstRow(30, 12, 15, 10, 0, true));
+    // Above it: its head, which is where reading starts.
+    try testing.expectEqual(@as(u16, 4), threadFirstRow(30, 4, 6, 10, 12, true));
+    // Taller than the box: its head rather than its end, because the reader
+    // moved to it in order to start reading it.
+    try testing.expectEqual(@as(u16, 12), threadFirstRow(30, 12, 27, 10, 0, true));
+    // Never past the last window, so the box is never drawn half empty.
+    try testing.expectEqual(@as(u16, 20), threadFirstRow(30, 28, 29, 10, 0, true));
+    // A stack shorter than the box does not scroll at all.
+    try testing.expectEqual(@as(u16, 0), threadFirstRow(6, 4, 5, 10, 3, true));
+
+    // An explicit scroll is the reader saying where to look: the selection
+    // stops dragging the view back to itself.
+    try testing.expectEqual(@as(u16, 15), threadFirstRow(30, 0, 2, 10, 15, false));
+    try testing.expectEqual(@as(u16, 20), threadFirstRow(30, 0, 2, 10, 99, false));
+}
 
 test "an empty list and a filtered-out one say different things" {
     // Found by opening `<Space>F` in a directory git knows nothing about: the

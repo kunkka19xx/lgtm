@@ -143,11 +143,13 @@ pub const Files = struct {
         files: []const frame.FileEntry,
         current: u32,
         bindings: []const keymap.Binding,
+        ask: []const u8,
         arena: Allocator,
     ) Allocator.Error!?frame.FilesView {
         if (mode != .finder) return null;
         const filter = self.filter.text();
         return .{
+            .ask = ask,
             .totals = self.totals,
             .entries = try entries(files, current, filter, arena),
             .title = self.title,

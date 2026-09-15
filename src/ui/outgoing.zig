@@ -18,6 +18,7 @@ const keytext = @import("keytext.zig");
 const keymap = @import("keymap.zig");
 const notes = @import("notes.zig");
 const pr_mod = @import("pr.zig");
+const thread_mod = @import("thread.zig");
 const render = @import("render.zig");
 const template = @import("../bridge/template.zig");
 const walks = @import("walks.zig");
@@ -25,9 +26,11 @@ const walks = @import("walks.zig");
 pub fn closeCompose(app: *App) void {
     app.compose.close();
     app.preset_index = null;
-    app.compose_spot = null;
-    app.compose_remote = 0;
-    app.mode = .normal;
+    app.compose_for = .agent;
+    // Back where the box was opened from, and only while that overlay still
+    // has something to show.
+    app.mode = if (app.compose_from == .thread and thread_mod.alive(app)) .thread else .normal;
+    app.compose_from = .normal;
 }
 
 /// One keystroke inside the box, or inside the preset list floating over
@@ -75,8 +78,8 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
                 app.compose.toNormal();
                 return;
             }
-            app.compose_is_comment = false;
-            app.compose_comment = null;
+            // `closeCompose` clears what the box was for, so cancelling
+            // leaves nothing behind for the next one to inherit.
             closeCompose(app);
         },
         .compose_presets => app.preset_index = 0,
@@ -100,14 +103,20 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
             finder_mod.buildPickList(app);
             finder_mod.show(app, .{ .title = " mention a file " });
         },
-        // Both save first, which for a remark on the request is a call with
-        // an answer owed - and posting an already posted one means nothing.
-        .compose_send_now, .compose_post_now => if (app.compose_remote != 0)
-            app.notice.set("that one is on the request - <CR> saves it there", .{})
-        else if (cmd == .compose_send_now)
-            try composeSendNow(app, body)
+        // `<C-p>` means "to the forge" everywhere else, so on a box that only
+        // goes there it does what Enter does.
+        .compose_post_now => if (app.compose_for.onForge())
+            try composeSubmit(app, body)
         else
             try composePostNow(app, body),
+        // `<C-s>` is save-here-and-send-to-the-agent, and the first half has
+        // nowhere to happen for a remark that lives on the request.
+        .compose_send_now => if (app.compose_for.onForge()) {
+            var kb: [32]u8 = undefined;
+            app.notice.set("that one is on the request - {s} sends it there", .{
+                app.keyFor(.compose_submit, .note_input, &kb),
+            });
+        } else try composeSendNow(app, body),
         .compose_submit => try composeSubmit(app, body),
         else => {},
     }
@@ -123,7 +132,9 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
 /// Shared by the two keys that save and then do something with it, which
 /// otherwise differ only in where the result goes.
 pub fn saveComposedComment(app: *App, body: u16) !?u32 {
-    if (!app.compose_is_comment) return null;
+    // Only the two that write a remark here: a box aimed at the forge used to
+    // fall through and save a second remark saying what the reply said.
+    if (!app.compose_for.savesHere()) return null;
 
     var raw_buf: [compose_mod.max_bytes]u8 = undefined;
     const typed = app.compose.text();
@@ -133,19 +144,17 @@ pub fn saveComposedComment(app: *App, body: u16) !?u32 {
         app.notice.set("nothing to save", .{});
         return null;
     }
-    const editing = app.compose_comment;
-    const at = app.compose_spot orelse notes.commentLine(app);
-    app.compose_is_comment = false;
-    app.compose_comment = null;
-    app.compose_spot = null;
+    const what = app.compose_for;
     closeCompose(app);
 
     var id: u32 = 0;
-    if (editing) |eid| {
-        try app.comments.edit(eid, raw);
-        id = eid;
-    } else if (at) |spot| {
-        id = try app.comments.addFull(spot.path, spot.line, raw, notes.textOfNewLine(app, spot.line), spot.deleted, spot.span);
+    switch (what) {
+        .edit => |eid| {
+            try app.comments.edit(eid, raw);
+            id = eid;
+        },
+        .fresh => |spot| id = try app.comments.addFull(spot.path, spot.line, raw, notes.textOfNewLine(app, spot.line), spot.deleted, spot.span),
+        else => {},
     }
     notes.saveComments(app);
     app.rebuildRows(.line) catch {};
@@ -154,7 +163,7 @@ pub fn saveComposedComment(app: *App, body: u16) !?u32 {
 }
 
 pub fn composeSendNow(app: *App, body: u16) !void {
-    if (!app.compose_is_comment) {
+    if (!app.compose_for.isComment()) {
         // Not a comment: the key means the same thing the plain send does.
         try composeSubmit(app, body);
         return;
@@ -190,16 +199,13 @@ pub fn composeSendNow(app: *App, body: u16) !void {
 /// The same arm-then-perform the list's key uses, so the notice saying it
 /// is happening reaches the screen before the call blocks.
 pub fn composePostNow(app: *App, body: u16) !void {
-    if (!app.compose_is_comment) return;
+    if (!app.compose_for.isComment()) return;
     if (pr_mod.postRepo(app) == null) {
         app.notice.set("not reviewing a pull request", .{});
         return;
     }
     const id = try saveComposedComment(app, body) orelse return;
-    const n = app.comments.find(id) orelse return;
-    app.pr.note_len = 0;
-    app.pr.want_post = .{ .event = .comment, .one = id };
-    app.startBusy("posting {s}:{d}", .{ n.path, n.line });
+    pr_mod.postComment(app, id);
 }
 
 pub fn composeSubmit(app: *App, body: u16) !void {
@@ -221,50 +227,44 @@ pub fn composeSubmit(app: *App, body: u16) !void {
             const raw = raw_buf[0..typed.len];
             const how = app.compose_to;
             // Before the close, which clears both.
-            const spot = app.compose_spot;
-            const remote = app.compose_remote;
+            const what = app.compose_for;
             closeCompose(app);
             if (line.len == 0) {
                 app.notice.set("nothing to send", .{});
                 return;
             }
-            if (app.compose_is_comment) {
-                app.compose_is_comment = false;
-                if (remote != 0) {
-                    // The store waits: a call that fails must not leave a
-                    // remark here saying something the forge never heard.
-                    pr_mod.amend(app, app.compose_comment orelse 0, remote, raw);
-                    app.compose_comment = null;
-                    return;
-                }
-                if (app.compose_comment) |id| {
+            switch (what) {
+                // Both wait for the forge: a call that fails must not leave a
+                // remark here saying something GitHub never heard.
+                .reply => |root| return pr_mod.reply(app, root, raw),
+                .amend => |a| return pr_mod.amend(app, a.id, a.remote, raw),
+                .edit => |id| {
                     try app.comments.edit(id, raw);
                     app.notice.set("comment updated", .{});
-                } else if (spot orelse notes.commentLine(app)) |at| {
+                },
+                .fresh => |at| {
                     // The line's text goes with the note, so a restart can
                     // find it again when the file moved underneath.
                     _ = try app.comments.addFull(at.path, at.line, raw, notes.textOfNewLine(app, at.line), at.deleted, at.span);
-                    {
-                        var kb: [32]u8 = undefined;
-                        app.notice.set("comment added - {s} submits the review", .{
-                            app.keyFor(.submit_review, .normal, &kb),
-                        });
-                    }
-                }
-                app.compose_comment = null;
-                notes.saveComments(app);
-                // The note is a row now, so the layout has changed - and
-                // the reader should still be on the line they noted, not
-                // pushed off it by the row that just appeared under it.
-                const on = notes.commentLine(app);
-                app.rebuildRows(.reset) catch {};
-                if (on) |at| _ = walks.gotoNewLine(app, at.line);
-                app.clampScroll(body);
-                return;
+                    var kb: [32]u8 = undefined;
+                    app.notice.set("comment added - {s} submits the review", .{
+                        app.keyFor(.submit_review, .normal, &kb),
+                    });
+                },
+                .agent, .view => {
+                    app.outgoing.clearRetainingCapacity();
+                    try app.outgoing.appendSlice(app.gpa, line);
+                    app.want_send = how;
+                    app.clampScroll(body);
+                    return;
+                },
             }
-            app.outgoing.clearRetainingCapacity();
-            try app.outgoing.appendSlice(app.gpa, line);
-            app.want_send = how;
+            notes.saveComments(app);
+            // The note is a row now, and the reader should still be on the
+            // line they noted rather than pushed off it.
+            const on = notes.commentLine(app);
+            app.rebuildRows(.reset) catch {};
+            if (on) |at| _ = walks.gotoNewLine(app, at.line);
             app.clampScroll(body);
         }
     }
@@ -404,30 +404,43 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
     // The line a note is being written against, in the title. The store
     // holds it, so the body does not have to - and a note whose text
     // repeats its own line number would say it twice in `review-N.md`.
-    var what: []const u8 = "compose";
-    if (app.compose.read_only) {
+    // The same switch `composeSubmit` runs, over the same union, so the
+    // title can no longer disagree with what `<CR>` will do.
+    const what: []const u8 = switch (app.compose_for) {
+        .agent => "compose",
         // Whose it is and where, because the box has to say why it is shut.
-        what = if (app.compose_comment) |id| blk: {
+        .view => |id| blk: {
             const n = app.comments.find(id) orelse break :blk "comment";
             break :blk std.fmt.allocPrint(arena, "@{s} {s}:{d}", .{ n.author, n.path, n.line }) catch "comment";
-        } else "comment";
-    } else if (app.compose_remote != 0) {
+        },
+        // Who is being answered: a reply box that said only the line would
+        // look like the box that writes a new remark on it.
+        .reply => |root| blk: {
+            const n = app.comments.findRemote(root) orelse break :blk "reply";
+            break :blk std.fmt.allocPrint(arena, "reply to @{s} on #{d} {s}:{d}", .{
+                n.author, app.pr.number, n.path, n.line,
+            }) catch "reply";
+        },
         // The box looks like any other, and `<CR>` does not do the same.
-        what = if (app.compose_comment) |id| blk: {
-            const n = app.comments.find(id) orelse break :blk "comment";
+        .amend => |a| blk: {
+            const n = app.comments.find(a.id) orelse break :blk "comment";
             break :blk std.fmt.allocPrint(arena, "your remark on #{d} {s}:{d}", .{ app.pr.number, n.path, n.line }) catch "comment";
-        } else "comment";
-    } else if (app.compose_is_comment) {
-        // The spot the box opened on: the selection is gone by this
-        // frame, and the title would say one line for a range of three.
-        what = if (app.compose_spot orelse notes.commentLine(app)) |at| blk: {
+        },
+        .edit => |id| blk: {
+            const n = app.comments.find(id) orelse break :blk "comment";
+            break :blk std.fmt.allocPrint(arena, "comment {s}:{d}", .{ n.path, n.line }) catch "comment";
+        },
+        // The spot the box opened on: the selection is gone by this frame,
+        // and asking again would say one line for a range of three.
+        .fresh => |at| blk: {
             const tail: []const u8 = if (at.deleted) " - removed code" else "";
             break :blk (if (at.span > 1)
                 std.fmt.allocPrint(arena, "comment {s}:{d}-{d}{s}", .{ at.path, at.line, at.line + at.span - 1, tail })
             else
                 std.fmt.allocPrint(arena, "comment {s}:{d}{s}", .{ at.path, at.line, tail })) catch "comment";
-        } else "comment";
-    }
+        },
+    };
+
     return .{
         .what = what,
         .bindings = app.km.bindings,
@@ -438,11 +451,9 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
         .selected = app.preset_index,
         .to_agent = app.compose_to == .send,
         .at = app.compose_at,
-        .saves = app.compose_is_comment,
+        .kind = app.compose_for,
         .posts = app.pr.number != 0,
-        .amends = app.compose_remote != 0,
         .normal = app.compose.mode == .normal,
-        .read_only = app.compose.read_only,
     };
 }
 

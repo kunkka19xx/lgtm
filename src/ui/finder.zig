@@ -462,6 +462,9 @@ pub fn feedFiles(app: *App, key: event.Key, body: u16) !void {
                     @memcpy(want_path[0..n.path.len], n.path);
                     want_line = n.line;
                     have = true;
+                    // Which remark, not only which line: the row picked may
+                    // be the second on its line.
+                    app.comment_sel = n.id;
                     closeFiles(app);
                     try walks.showComment(app, want_path[0..n.path.len], want_line, body);
                     return;

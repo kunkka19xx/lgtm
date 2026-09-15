@@ -113,6 +113,9 @@ pub fn commentStep(app: *App, delta: i32, body: u16) void {
         break :blk e;
     };
 
+    // Which remark, not only which line: the next press starts from this one,
+    // so a line carrying three is walked through rather than landed on.
+    app.comment_sel = target.id;
     var path_buf: [4096]u8 = undefined;
     @memcpy(path_buf[0..target.path.len], target.path);
     showComment(app, path_buf[0..target.path.len], target.line, body) catch return;
