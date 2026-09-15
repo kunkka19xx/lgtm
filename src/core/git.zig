@@ -621,6 +621,79 @@ pub fn fetchRef(gpa: Allocator, io: std.Io, remote: []const u8, ref: []const u8)
     out.deinit(gpa);
 }
 
+/// One commit of a static review, as a row wants it.
+pub const Commit = struct {
+    oid: []const u8,
+    /// Committer date, seconds since the epoch.
+    when_s: i64 = 0,
+    subject: []const u8 = "",
+    files: u32 = 0,
+    added: u32 = 0,
+    removed: u32 = 0,
+};
+
+/// The commits between two refs, oldest first, so commit N is `commits[N - 1]`.
+/// Every slice borrows from `text`.
+pub const Log = struct {
+    text: []u8,
+    commits: []Commit,
+
+    pub fn deinit(self: *Log, gpa: Allocator) void {
+        gpa.free(self.commits);
+        gpa.free(self.text);
+        self.* = undefined;
+    }
+};
+
+/// `git log base..target` with line counts: one subprocess however many
+/// commits. A merge counts against its first parent, which is what showing it
+/// diffs against.
+pub fn commitLog(gpa: Allocator, io: std.Io, base: []const u8, target: []const u8) Error!Log {
+    const range = try std.fmt.allocPrint(gpa, "{s}..{s}", .{ base, target });
+    defer gpa.free(range);
+    const out = try gitRun(gpa, io, &.{
+        "log",                        "--reverse",
+        "--diff-merges=first-parent", "--numstat",
+        "--format=%x00%H %ct %s",     range,
+    }, 8 << 20);
+    gpa.free(out.stderr);
+    errdefer gpa.free(out.stdout);
+    return .{ .text = out.stdout, .commits = try parseLog(gpa, out.stdout) };
+}
+
+/// `\0<oid> <ct> <subject>` then `<added>\t<removed>\t<path>` rows, per commit.
+/// A subject cannot hold a NUL, so the record boundary is never a guess.
+pub fn parseLog(gpa: Allocator, text: []const u8) Allocator.Error![]Commit {
+    var out: std.ArrayList(Commit) = .empty;
+    errdefer out.deinit(gpa);
+    var records = std.mem.splitScalar(u8, text, 0);
+    _ = records.next();
+    while (records.next()) |rec| {
+        var lines = std.mem.splitScalar(u8, rec, '\n');
+        const header = lines.next() orelse continue;
+        var head = std.mem.splitScalar(u8, header, ' ');
+        const oid = head.next() orelse continue;
+        if (oid.len == 0) continue;
+        var c: Commit = .{
+            .oid = oid,
+            .when_s = std.fmt.parseInt(i64, head.next() orelse "", 10) catch 0,
+            .subject = std.mem.trim(u8, head.rest(), " \r"),
+        };
+        while (lines.next()) |line| {
+            var it = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \r"), '\t');
+            const a = it.next() orelse continue;
+            const r = it.next() orelse continue;
+            if (it.next() == null) continue;
+            // `-` for a binary file: a file changed, with no lines to count.
+            c.files += 1;
+            c.added +|= std.fmt.parseInt(u32, a, 10) catch 0;
+            c.removed +|= std.fmt.parseInt(u32, r, 10) catch 0;
+        }
+        try out.append(gpa, c);
+    }
+    return out.toOwnedSlice(gpa);
+}
+
 pub fn freePaths(gpa: Allocator, paths: [][]const u8) void {
     for (paths) |p| gpa.free(p);
     gpa.free(paths);
@@ -667,4 +740,29 @@ test "with nothing to match, origin wins and otherwise the first one does" {
     // A repository with no remotes has no pull requests to read.
     try testing.expect(pickRemote("", null) == null);
     try testing.expect(pickRemote("\n  \n", "o/r") == null);
+}
+
+test "a log reads as commits, oldest first, with their counts" {
+    const text = "\x00aaa 100 feat: first one\n\n3\t1\tsrc/a.zig\n-\t-\tlogo.png\n" ++
+        "\x00bbb 200 merge main into it\n" ++
+        "\x00ccc 300 fix: a subject  with  spaces\n\n0\t4\tsrc/a.zig\n";
+    const got = try parseLog(testing.allocator, text);
+    defer testing.allocator.free(got);
+
+    try testing.expectEqual(@as(usize, 3), got.len);
+    try testing.expectEqualStrings("aaa", got[0].oid);
+    try testing.expectEqual(@as(i64, 100), got[0].when_s);
+    try testing.expectEqualStrings("feat: first one", got[0].subject);
+    // The binary file is a file changed, and no lines.
+    try testing.expectEqual(@as(u32, 2), got[0].files);
+    try testing.expectEqual(@as(u32, 3), got[0].added);
+    try testing.expectEqual(@as(u32, 1), got[0].removed);
+    // A commit that changed nothing is still a commit.
+    try testing.expectEqual(@as(u32, 0), got[1].files);
+    try testing.expectEqualStrings("fix: a subject  with  spaces", got[2].subject);
+    try testing.expectEqual(@as(u32, 4), got[2].removed);
+
+    const none = try parseLog(testing.allocator, "");
+    defer testing.allocator.free(none);
+    try testing.expectEqual(@as(usize, 0), none.len);
 }

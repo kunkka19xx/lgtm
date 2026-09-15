@@ -53,9 +53,14 @@ pub const State = struct {
     /// The last restore, for `u`. Session-only: a `u` that survived a restart
     /// would undo something long since forgotten. One step, then gone.
     last: ?Done = null,
+    /// A static review's commits, which are its turns. Read again only when
+    /// the refs it was read for change: a commit cannot.
+    log: ?git.Log = null,
+    log_for: u64 = 0,
 
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.rows.deinit(gpa);
+        if (self.log) |*l| l.deinit(gpa);
     }
 };
 
@@ -91,6 +96,17 @@ pub const Done = struct {
 /// selector and the diff view is the viewer - there is no second display
 /// of files and hunks anywhere in this feature.
 pub fn openTurnList(app: *App) !void {
+    if (byCommit(app)) {
+        app.turns.expanded = false;
+        if (!fillCommitRows(app)) return;
+        app.files_purpose = .turns;
+        var at: u32 = 0;
+        for (app.pick_list.items, 0..) |row, i| {
+            if (row.current) at = @intCast(i);
+        }
+        finder_mod.show(app, .{ .title = " commits ", .at = at });
+        return;
+    }
     if (app.snap == null) {
         app.notice.set("snapshots are off here - no turns to list", .{});
         return;
@@ -119,7 +135,7 @@ pub fn openTurnList(app: *App) !void {
 /// the list only ever grows here, so the row the reader was on is still
 /// there and usually still under the cursor.
 pub fn rebuildTurns(app: *App) void {
-    _ = fillTurnRows(app);
+    _ = if (byCommit(app)) fillCommitRows(app) else fillTurnRows(app);
     // The list only ever grows here, so the row the reader was on is still
     // there; `move(0)` re-narrows the selection against the new rows
     // without moving it.
@@ -199,17 +215,7 @@ pub fn fillTurnRows(app: *App) bool {
             continue;
         }
         if (folded > 0) {
-            app.pick_list.append(app.gpa, .{
-                .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
-                    folded,
-                    if (folded == 1) "" else "s",
-                }) catch "⋮",
-                .added = 0,
-                .removed = 0,
-                .in_review = false,
-                .plain = true,
-            }) catch return false;
-            app.turns.rows.append(app.gpa, elided_row) catch return false;
+            if (!appendFold(app, arena, folded, "turn")) return false;
             folded = 0;
         }
         // A run of turns over the same file, drawn as one row. `git log`
@@ -282,20 +288,203 @@ pub fn fillTurnRows(app: *App) bool {
     // A session whose oldest turns are folded and whose baseline is gone -
     // pruned by `[snapshot] keep` - ends on the fold rather than dropping
     // the count that says how much is missing.
-    if (folded > 0) {
+    if (folded > 0 and !appendFold(app, arena, folded, "turn")) return false;
+    return true;
+}
+
+/// The `⋮` row standing in for `folded` rows the list is not drawing.
+fn appendFold(app: *App, arena: Allocator, folded: u32, noun: []const u8) bool {
+    app.pick_list.append(app.gpa, .{
+        .path = std.fmt.allocPrint(arena, "⋮   {d} {s}{s}", .{
+            folded,
+            noun,
+            if (folded == 1) "" else "s",
+        }) catch "⋮",
+        .added = 0,
+        .removed = 0,
+        .in_review = false,
+        .plain = true,
+    }) catch return false;
+    app.turns.rows.append(app.gpa, elided_row) catch return false;
+    return true;
+}
+
+/// Whether the turns are commits. Two trees have no agent writing between
+/// them; what they have is the history from one to the other, which for a
+/// pull request is how its author built it.
+pub fn byCommit(app: *const App) bool {
+    return app.review.target != null;
+}
+
+/// How many commits the list last read, without reading them.
+pub fn commitCount(app: *const App) u32 {
+    const l = app.turns.log orelse return 0;
+    return @intCast(l.commits.len);
+}
+
+/// What the whole review is called in a notice: `#13`, or the two refs.
+fn wholeName(app: *const App, buf: []u8) []const u8 {
+    if (app.pr.number > 0) return std.fmt.bufPrint(buf, "#{d}", .{app.pr.number}) catch "the review";
+    const target = app.review.target orelse return "the review";
+    return std.fmt.bufPrint(buf, "{s}..{s}", .{ app.review.base, target }) catch "the review";
+}
+
+/// The review's commits, oldest first. One `git log` per pair of refs.
+fn commits(app: *App) ?[]const git.Commit {
+    const target = app.review.target orelse return null;
+    const key = logKey(app.review.base, target);
+    if (app.turns.log) |l| {
+        if (app.turns.log_for == key) return l.commits;
+    }
+    if (app.turns.log) |*l| l.deinit(app.gpa);
+    app.turns.log = null;
+    app.turns.log = git.commitLog(app.gpa, app.io, app.review.base, target) catch {
+        var nb: [288]u8 = undefined;
+        app.notice.set("could not read the commits of {s}", .{wholeName(app, &nb)});
+        return null;
+    };
+    app.turns.log_for = key;
+    return app.turns.log.?.commits;
+}
+
+fn logKey(base: []const u8, target: []const u8) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(base);
+    h.update("..");
+    h.update(target);
+    return h.final();
+}
+
+/// The commit list: newest first, like the turns, with the whole review
+/// pinned on top as the way back.
+///
+/// No runs. A commit is individually meaningful, which an agent's turn is
+/// not, so two in a row on one file are two things to read.
+pub fn fillCommitRows(app: *App) bool {
+    const list = commits(app) orelse return false;
+    var nb: [288]u8 = undefined;
+    if (list.len == 0) {
+        app.notice.set("{s} has no commits of its own", .{wholeName(app, &nb)});
+        return false;
+    }
+
+    app.pick_list.clearRetainingCapacity();
+    app.turns.rows.clearRetainingCapacity();
+    _ = app.pick_arena.reset(.retain_capacity);
+    const arena = app.pick_arena.allocator();
+    const now_s: i64 = @intCast(@divFloor(
+        std.Io.Timestamp.now(app.io, .real).toNanoseconds(),
+        std.time.ns_per_s,
+    ));
+
+    app.pick_list.append(app.gpa, .{
+        .path = std.fmt.allocPrint(arena, "│ all of {s}  {d} commit{s}", .{
+            wholeName(app, &nb),
+            list.len,
+            if (list.len == 1) "" else "s",
+        }) catch "all",
+        .added = 0,
+        .removed = 0,
+        .in_review = false,
+        .plain = true,
+        .current = app.review.viewing == null,
+    }) catch return false;
+    app.turns.rows.append(app.gpa, std.math.maxInt(u32)) catch return false;
+
+    var age_buf: [24]u8 = undefined;
+    var folded: u32 = 0;
+    var i = list.len;
+    while (i > 0) {
+        i -= 1;
+        const c = list[i];
+        const n: u32 = @intCast(i + 1);
+        // The same fold the turns get: the newest few, the first, and the
+        // one on screen.
+        const kept = app.turns.expanded or list.len - 1 - i < turns_shown or n == 1 or
+            (if (app.review.viewing) |v| v == n else false);
+        if (!kept) {
+            folded += 1;
+            continue;
+        }
+        if (folded > 0) {
+            if (!appendFold(app, arena, folded, "commit")) return false;
+            folded = 0;
+        }
         app.pick_list.append(app.gpa, .{
-            .path = std.fmt.allocPrint(arena, "⋮   {d} turn{s}", .{
-                folded,
-                if (folded == 1) "" else "s",
-            }) catch "⋮",
-            .added = 0,
-            .removed = 0,
-            .in_review = false,
+            .path = std.fmt.allocPrint(arena, "│ {d: <3} {s}  {s}  {s}", .{
+                n,
+                c.oid[0..@min(7, c.oid.len)],
+                c.subject,
+                timeline.age(&age_buf, c.when_s, now_s),
+            }) catch "commit",
+            .added = c.added,
+            .removed = c.removed,
             .plain = true,
+            .key = n,
+            .current = if (app.review.viewing) |v| v == n else false,
         }) catch return false;
-        app.turns.rows.append(app.gpa, elided_row) catch return false;
+        app.turns.rows.append(app.gpa, n) catch return false;
     }
     return true;
+}
+
+/// Shows commit `n` of the review, or all of it for the sentinel.
+fn showCommit(app: *App, n: u32, body: u16) !void {
+    var nb: [288]u8 = undefined;
+    if (n == std.math.maxInt(u32)) {
+        if (app.review.viewing == null) return;
+        app.review.showWorking();
+        try app.rediff();
+        app.clampScroll(body);
+        app.notice.set("back to all of {s}", .{wholeName(app, &nb)});
+        return;
+    }
+    const list = commits(app) orelse return;
+    if (n == 0 or n > list.len) return;
+    const c = list[n - 1];
+    // Against its own parent, so the view is what this commit did.
+    var base_buf: [128]u8 = undefined;
+    const base = std.fmt.bufPrint(&base_buf, "{s}^", .{c.oid}) catch return;
+    app.review.showTurn(n, c.oid, base);
+    try app.rediff();
+    app.clampScroll(body);
+    if (app.review.viewing == null) {
+        app.notice.set("commit {d} could not be read", .{n});
+        return;
+    }
+    var k: [32]u8 = undefined;
+    const forward: []const u8 = if (n >= list.len) "returns to all of them" else "goes forward";
+    app.notice.set("{s} {s} - {s} {s}", .{
+        c.oid[0..@min(7, c.oid.len)],
+        c.subject,
+        app.keyFor(.next_turn, .normal, &k),
+        forward,
+    });
+}
+
+/// `]t` and `[t` over the commits, with the whole review one past the newest.
+fn commitStep(app: *App, delta: i32, body: u16) !void {
+    const list = commits(app) orelse return;
+    var nb: [288]u8 = undefined;
+    if (list.len == 0) {
+        app.notice.set("{s} has no commits of its own", .{wholeName(app, &nb)});
+        return;
+    }
+    const latest: i64 = @intCast(list.len);
+    const here: i64 = if (app.review.viewing) |t| @intCast(t) else latest + 1;
+    const want = here + delta;
+    if (want > latest) {
+        if (app.review.viewing == null) {
+            app.notice.set("already on all of {s}", .{wholeName(app, &nb)});
+            return;
+        }
+        return showCommit(app, std.math.maxInt(u32), body);
+    }
+    if (want < 1) {
+        app.notice.set("commit 1 is the first of {s}", .{wholeName(app, &nb)});
+        return;
+    }
+    return showCommit(app, @intCast(want), body);
 }
 
 /// Asks whether to overwrite a file with the version in the turn on screen.
@@ -306,6 +495,11 @@ pub fn fillTurnRows(app: *App) bool {
 /// could reach outside the repository, or a store that cannot take the
 /// snapshot this is only safe because of.
 pub fn restoreAsk(app: *App) !void {
+    if (byCommit(app)) {
+        var nb: [288]u8 = undefined;
+        app.notice.set("nothing to restore - {s} is not your working tree", .{wholeName(app, &nb)});
+        return;
+    }
     const turn = app.review.viewing orelse {
         var k: [32]u8 = undefined;
         app.notice.set("nothing to restore from - {s} walks back to a turn", .{
@@ -506,6 +700,7 @@ pub fn baseRefFor(app: *App, turn: u32, buf: []u8) []const u8 {
 /// by stepping - which is the whole of what the list adds. Nothing here is
 /// a third way to be looking at something.
 pub fn showTurnNumber(app: *App, turn: u32, body: u16) !void {
+    if (byCommit(app)) return showCommit(app, turn, body);
     const store = if (app.snap) |*s| s else return;
     if (turn == std.math.maxInt(u32)) {
         if (app.review.viewing == null) return;
@@ -649,6 +844,7 @@ pub fn turnLabel(
 /// forward. Nothing here is a jump into a different mode: it is the same
 /// review with a different right-hand side.
 pub fn turnStep(app: *App, delta: i32, body: u16) !void {
+    if (byCommit(app)) return commitStep(app, delta, body);
     const store = if (app.snap) |*s| s else {
         app.notice.set("snapshots are off here - no turns to walk", .{});
         return;
@@ -1264,4 +1460,47 @@ test "undo has nothing to undo until a restore happens" {
     defer fx.deinit();
     try fx.press("u");
     try fx.expectNotice("nothing to undo");
+}
+
+test "a static review lists its commits, newest first, with the whole of it on top" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.review.base = "be94b77";
+    fx.app.review.target = "c7143ba";
+    fx.app.pr.number = 13;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (1..13) |n| try text.print(testing.allocator, "\x00{d:0>7} 0 commit number {d}\n\n1\t{d}\tsrc/a.zig\n", .{ n, n, n });
+    const owned = try testing.allocator.dupe(u8, text.items);
+    fx.app.turns.log = .{ .text = owned, .commits = try git.parseLog(testing.allocator, owned) };
+    fx.app.turns.log_for = logKey("be94b77", "c7143ba");
+    fx.app.review.viewing = 2;
+
+    try testing.expect(byCommit(&fx.app));
+    try testing.expect(fillCommitRows(&fx.app));
+    const rows = fx.app.turns.rows.items;
+    const list = fx.app.pick_list.items;
+
+    // The way back, then the eight newest, the fold, the one on screen and
+    // the first.
+    try testing.expectEqual(@as(usize, 12), rows.len);
+    try testing.expectEqual(std.math.maxInt(u32), rows[0]);
+    try testing.expect(std.mem.indexOf(u8, list[0].path, "all of #13  12 commits") != null);
+    try testing.expectEqual(@as(u32, 12), rows[1]);
+    try testing.expect(std.mem.indexOf(u8, list[1].path, "0000012  commit number 12") != null);
+    try testing.expectEqual(@as(u32, 12), list[1].removed);
+    try testing.expectEqual(@as(u32, 5), rows[8]);
+    try testing.expectEqual(elided_row, rows[9]);
+    try testing.expect(std.mem.indexOf(u8, list[9].path, "2 commits") != null);
+    try testing.expectEqual(@as(u32, 2), rows[10]);
+    try testing.expect(list[10].current);
+    try testing.expectEqual(@as(u32, 1), rows[11]);
+    try testing.expectEqual(@as(u32, 12), commitCount(&fx.app));
+
+    // Nothing here is the reader's to write to.
+    try restoreAsk(&fx.app);
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not your working tree") != null);
+    try testing.expect(fx.app.readOnly());
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "commit 2 is read only") != null);
 }

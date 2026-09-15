@@ -329,7 +329,9 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // and being parked in the past while the world changes is a state rather
     // than an answer to a keystroke.
     const label = if (v.viewing) |turn|
-        (if (turn == 0)
+        (if (v.by_commit)
+            try std.fmt.allocPrint(f.arena, "COMMIT {d}", .{turn})
+        else if (turn == 0)
             (if (v.tree_moved) "BASELINE •" else "BASELINE")
         else
             try std.fmt.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
@@ -410,8 +412,10 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         // moved out of would hide every notice for the rest of the session.
         .{ line, t.notice }
     else if (v.viewing != null and v.newer_turns > 0)
-        .{ try std.fmt.allocPrint(f.arena, "{d} newer turn{s} since", .{
-            v.newer_turns, if (v.newer_turns == 1) "" else "s",
+        .{ try std.fmt.allocPrint(f.arena, "{d} newer {s}{s} since", .{
+            v.newer_turns,
+            if (v.by_commit) "commit" else "turn",
+            if (v.newer_turns == 1) "" else "s",
         }), t.dim }
     else if (v.fresh_total > 0)
         // Ahead of the row count because it is the one thing in this slot the

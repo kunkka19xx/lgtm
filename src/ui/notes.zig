@@ -471,7 +471,7 @@ pub fn submitReview(app: *App) !void {
 
     var buf: [64]u8 = undefined;
     const rel = review_file.path(&buf, app.review_n);
-    fs_mod.writeStateFile(app.io, rel, out.items) catch {
+    if (app.persist) fs_mod.writeStateFile(app.io, rel, out.items) catch {
         app.notice.set("could not write {s}", .{rel});
         app.review_n -= 1;
         return;
@@ -547,7 +547,7 @@ pub fn commentsPath(app: *const App, buf: []u8) []const u8 {
 }
 
 pub fn saveComments(app: *App) void {
-    if (!app.comments.dirty) return;
+    if (!app.comments.dirty or !app.persist) return;
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(app.gpa);
     comments_mod.write(&out, app.gpa, &app.comments) catch return;
@@ -567,6 +567,7 @@ pub fn swapComments(app: *App, number: u32) void {
 }
 
 pub fn loadComments(app: *App) void {
+    if (!app.persist) return;
     // `.lgtm/notes.jsonl` is the name this file had before the feature was
     // called comments. Read once and it is written back under the new
     // name: renaming a concept should not lose a reader's remarks.
