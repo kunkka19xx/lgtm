@@ -24,6 +24,7 @@ const keytext = @import("keytext.zig");
 const complete = @import("complete.zig");
 const path_mod = @import("path.zig");
 const popup = @import("popup.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 pub const Frame = frame_mod.Frame;
 pub const View = frame_mod.View;
@@ -158,21 +159,21 @@ fn drawCompletions(f: Frame, p: PromptView, row: u16) void {
 
 fn modeLabel(mode: event.Mode) []const u8 {
     return switch (mode) {
-        .normal => "NORMAL",
-        .visual => "VISUAL",
-        .command => "COMMAND",
-        .help => "HELP",
-        .thread => "THREAD",
-        .note_input => "NOTE",
-        .finder => "FIND",
-        .insert => "INSERT",
+        .normal => i18n.t("NORMAL"),
+        .visual => i18n.t("VISUAL"),
+        .command => i18n.t("COMMAND"),
+        .help => i18n.t("HELP"),
+        .thread => i18n.t("THREAD"),
+        .note_input => i18n.t("NOTE"),
+        .finder => i18n.t("FIND"),
+        .insert => i18n.t("INSERT"),
     };
 }
 
 /// Below this there is no honest layout, so say so instead of drawing a
 /// corrupted one.
 fn drawTooSmall(f: Frame) void {
-    f.put(0, 0, "lgtm: window too small", f.theme.dim);
+    f.put(0, 0, i18n.t("lgtm: window too small"), f.theme.dim);
 }
 
 /// Columns the path keeps before a status field is dropped to pay for them,
@@ -196,7 +197,7 @@ fn drawStatus(f: Frame, v: View, row: u16) Allocator.Error!void {
     // worth printing: nothing changed in it. Saying so is shorter than
     // printing three numbers that are all lies.
     const counter = if (v.preview)
-        try std.fmt.allocPrint(f.arena, " {s} not in the review", .{g.sep})
+        try i18n.allocPrint(f.arena, " {s} not in the review", .{g.sep})
     else
         try std.fmt.allocPrint(f.arena, " {s} {d}/{d}", .{ g.sep, v.file_index + 1, v.file_count });
     const bar = try std.fmt.allocPrint(f.arena, " {s} ", .{g.sep});
@@ -330,13 +331,13 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // than an answer to a keystroke.
     const label = if (v.viewing) |turn|
         (if (v.by_commit)
-            try std.fmt.allocPrint(f.arena, "COMMIT {d}", .{turn})
+            try i18n.allocPrint(f.arena, "COMMIT {d}", .{turn})
         else if (turn == 0)
-            (if (v.tree_moved) "BASELINE •" else "BASELINE")
+            (if (v.tree_moved) i18n.t("BASELINE •") else i18n.t("BASELINE"))
         else
-            try std.fmt.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
+            try i18n.allocPrint(f.arena, "TURN {d}{s}", .{ turn, if (v.tree_moved) " •" else "" }))
     else if (v.mode == .visual and v.selection != null and v.selection.?.kind == .line)
-        "VISUAL LINE"
+        i18n.t("VISUAL LINE")
     else if (v.label.len > 0)
         // A name the refs cannot give. A pull request is two shas, which is a
         // true answer and a useless one.
@@ -381,11 +382,11 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     }
 
     const left: []const u8, const style = if (v.torn)
-        .{ "file changed while reading, re-diffing", t.removed_count }
+        .{ i18n.t("file changed while reading, re-diffing"), t.removed_count }
     else if (v.notice.len > 0)
         .{ v.notice, t.notice }
     else if (v.hidden > 0)
-        .{ try std.fmt.allocPrint(f.arena, "{d} file{s} hidden - zi shows them", .{
+        .{ try i18n.allocPrint(f.arena, "{d} file{s} hidden - zi shows them", .{
             v.hidden, if (v.hidden == 1) "" else "s",
         }), t.dim }
     else if (v.selection) |sel|
@@ -399,11 +400,11 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         // file saw nothing at all for ten seconds - which reads as the tool
         // having stopped rather than as it holding their place.
         .{ if (v.newer_turns > 0)
-            try std.fmt.allocPrint(f.arena, "the working tree has moved on - {d} newer turn{s}", .{
+            try i18n.allocPrint(f.arena, "the working tree has moved on - {d} newer turn{s}", .{
                 v.newer_turns, if (v.newer_turns == 1) "" else "s",
             })
         else
-            "the working tree has changed - ]t returns to it", t.notice }
+            i18n.t("the working tree has changed - ]t returns to it"), t.notice }
     else if (try riskLine(f.arena, v.risk)) |line|
         // Above the mark's count and the row count, below anything the reader
         // just did. A weakened test is the finding with the worst consequences
@@ -412,22 +413,21 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
         // moved out of would hide every notice for the rest of the session.
         .{ line, t.notice }
     else if (v.viewing != null and v.newer_turns > 0)
-        .{ try std.fmt.allocPrint(f.arena, "{d} newer {s}{s} since", .{
-            v.newer_turns,
-            if (v.by_commit) "commit" else "turn",
-            if (v.newer_turns == 1) "" else "s",
-        }), t.dim }
+        .{ if (v.by_commit)
+            try i18n.allocPrint(f.arena, "{d} newer commit{s} since", .{ v.newer_turns, if (v.newer_turns == 1) "" else "s" })
+        else
+            try i18n.allocPrint(f.arena, "{d} newer turn{s} since", .{ v.newer_turns, if (v.newer_turns == 1) "" else "s" }), t.dim }
     else if (v.fresh_total > 0)
         // Ahead of the row count because it is the one thing in this slot the
         // reader came back to find out. The count is of rows rather than
         // hunks: what arrived since the mark is lines, and a hunk holding one
         // of them is not the same answer.
-        .{ try std.fmt.allocPrint(f.arena, "{d} new since the mark - {s} walks them", .{
+        .{ try i18n.allocPrint(f.arena, "{d} new since the mark - {s} walks them", .{
             v.fresh_total,
             keytext.firstKeyFor(v.bindings, .next_fresh, .normal, &walk_key),
         }), t.accent }
     else
-        .{ try std.fmt.allocPrint(f.arena, "{d} row{s}", .{
+        .{ try i18n.allocPrint(f.arena, "{d} row{s}", .{
             v.rows.len(),
             if (v.rows.len() == 1) "" else "s",
         }), t.dim };
@@ -451,19 +451,19 @@ fn riskLine(arena: Allocator, r: testrisk.Risk) Allocator.Error!?[]const u8 {
     var out: std.ArrayList(u8) = .empty;
     var buf: [64]u8 = undefined;
     if (r.removed > 0) {
-        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} test{s} removed", .{
+        try out.appendSlice(arena, i18n.bufPrint(&buf, "{d} test{s} removed", .{
             r.removed, if (r.removed == 1) "" else "s",
         }) catch "");
     }
     if (r.skipped > 0) {
         if (out.items.len > 0) try out.appendSlice(arena, ", ");
-        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} skip{s} added", .{
+        try out.appendSlice(arena, i18n.bufPrint(&buf, "{d} skip{s} added", .{
             r.skipped, if (r.skipped == 1) "" else "s",
         }) catch "");
     }
     if (r.fewer_asserts > 0) {
         if (out.items.len > 0) try out.appendSlice(arena, ", ");
-        try out.appendSlice(arena, std.fmt.bufPrint(&buf, "{d} fewer assertion{s}", .{
+        try out.appendSlice(arena, i18n.bufPrint(&buf, "{d} fewer assertion{s}", .{
             r.fewer_asserts, if (r.fewer_asserts == 1) "" else "s",
         }) catch "");
     }
@@ -475,17 +475,17 @@ fn riskLine(arena: Allocator, r: testrisk.Risk) Allocator.Error!?[]const u8 {
 /// inside one, because that is what the reader is choosing at that point.
 fn selectionSize(f: Frame, v: View, sel: Selection) Allocator.Error![]const u8 {
     if (sel.kind == .char and sel.lo == sel.hi) {
-        const text = v.rows.lineAt(sel.lo) orelse return f.arena.dupe(u8, "1 line selected");
-        if (text >= v.file.lines.len()) return f.arena.dupe(u8, "1 line selected");
+        const text = v.rows.lineAt(sel.lo) orelse return f.arena.dupe(u8, i18n.t("1 line selected"));
+        if (text >= v.file.lines.len()) return f.arena.dupe(u8, i18n.t("1 line selected"));
         const line = v.file.lines.text[text];
         const lo = @min(sel.lo_col, line.len);
         const hi = @min(sel.hi_col, line.len);
         const n = motion.graphemeCount(line[lo..hi]);
-        return std.fmt.allocPrint(f.arena, "{d} character{s} selected", .{ n, if (n == 1) "" else "s" });
+        return i18n.allocPrint(f.arena, "{d} character{s} selected", .{ n, if (n == 1) "" else "s" });
     }
     // `V` on one line is a linewise selection of one, and reaches here.
     const lines = sel.count();
-    return std.fmt.allocPrint(f.arena, "{d} line{s} selected", .{
+    return i18n.allocPrint(f.arena, "{d} line{s} selected", .{
         lines,
         if (lines == 1) "" else "s",
     });
@@ -582,4 +582,28 @@ test "every mode has a label, including the ones v0.1 cannot reach" {
         const m: event.Mode = @enumFromInt(f.value);
         try testing.expect(modeLabel(m).len > 0);
     }
+}
+
+test "the badge and the row count speak japanese, measured in columns" {
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = 80, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    screen.width_method = .unicode;
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 4, .screen = &screen };
+    const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = Glyphs.unicode };
+
+    const file: diff.FileDiff = .{ .old_path = "a.zig", .new_path = "a.zig", .status = .modified };
+    const v: View = .{ .file = &file, .rows = .empty, .file_index = 0, .file_count = 1, .cursor = 0, .scroll = 0, .viewing = 3 };
+    try drawMode(f, v, 0);
+
+    try testing.expectEqualStrings("タ", screen.readCell(1, 0).?.char.grapheme);
+    try testing.expectEqualStrings("3", screen.readCell(8, 0).?.char.grapheme);
+    try testing.expectEqualStrings("0", screen.readCell(12, 0).?.char.grapheme);
+    try testing.expectEqualStrings("行", screen.readCell(13, 0).?.char.grapheme);
 }

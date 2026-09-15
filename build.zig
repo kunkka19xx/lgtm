@@ -222,7 +222,26 @@ pub fn build(b: *std.Build) void {
     const spdx_step = b.step("spdx", "Check SPDX headers");
     spdx_step.dependOn(&run_spdx.step);
 
-    const check = b.step("check", "Run tests and the SPDX header check");
+    const i18n_mod = b.createModule(.{
+        .root_source_file = b.path("src/i18n/i18n.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+    const i18n_check = b.addExecutable(.{
+        .name = "check-i18n",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/check_i18n.zig"),
+            .target = b.graph.host,
+            .optimize = .Debug,
+            .imports = &.{.{ .name = "i18n", .module = i18n_mod }},
+        }),
+    });
+    const run_i18n = b.addRunArtifact(i18n_check);
+    run_i18n.addDirectoryArg(b.path("src"));
+    b.step("i18n", "Check translations against the source").dependOn(&run_i18n.step);
+
+    const check = b.step("check", "Run tests, the SPDX header and the translation check");
     check.dependOn(&run_tests.step);
     check.dependOn(&run_spdx.step);
+    check.dependOn(&run_i18n.step);
 }

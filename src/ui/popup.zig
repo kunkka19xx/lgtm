@@ -27,6 +27,7 @@ const keymap = @import("keymap.zig");
 const path_mod = @import("path.zig");
 const prompt_mod = @import("prompt.zig");
 const wrap_mod = @import("wrap.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// A byte range inside a border label.
 const Span = struct { start: usize, len: usize };
@@ -47,8 +48,7 @@ const Footer = struct {
 /// `J K move  H L tab`, because four rows each saying the same word is the
 /// verbose spelling of it. `max` is the widest the label may be: a group that
 /// would not fit ends it, so a narrow pane loses the last hint rather than
-/// the whole row. Bytes stand in for columns, which every key name and
-/// description here is - and erring short only ever drops a group early. `tail` is for the keys that are not bindings:
+/// the whole row. `tail` is for the keys that are not bindings:
 /// `<CR>` and `<Esc>` are `prompt.zig`'s submit and cancel, the same two every
 /// prompt has, so they are passed in rather than generated.
 /// `lead` is what the label opens with before any key: the filterable
@@ -85,13 +85,13 @@ fn footerOf(
             try out.appendSlice(arena, k);
             try out.appendSlice(arena, " ");
         }
-        try out.appendSlice(arena, all.items[n].desc);
+        try out.appendSlice(arena, i18n.word(all.items[n].desc));
         try out.appendSlice(arena, "  ");
         // A group that would not fit ends the label rather than overflowing
         // it. Whole groups, because half of `<Esc> close` says nothing - and
         // a footer that is dropped altogether for being one column too wide
         // is the worst of the three, which is what this used to do.
-        if (out.items.len > max) {
+        if (wrap_mod.columns(out.items, .{ .method = .unicode }) > max) {
             out.shrinkRetainingCapacity(mark);
             while (spans.items.len > 0 and spans.items[spans.items.len - 1].start >= mark) {
                 _ = spans.pop();
@@ -121,7 +121,7 @@ fn tabsOf(arena: Allocator, active: ?keymap.Group) Allocator.Error!Footer {
     var spans: std.ArrayList(Span) = .empty;
     try out.appendSlice(arena, " ");
     for (std.enums.values(keymap.Group)) |g| {
-        const label = g.label();
+        const label = groupLabel(g);
         if (active) |a| {
             if (g == a) try spans.append(arena, .{ .start = out.items.len, .len = label.len });
         }
@@ -129,6 +129,18 @@ fn tabsOf(arena: Allocator, active: ?keymap.Group) Allocator.Error!Footer {
         try out.appendSlice(arena, "  ");
     }
     return .{ .text = out.items[0 .. out.items.len - 1], .keys = spans.items };
+}
+
+fn groupLabel(g: keymap.Group) []const u8 {
+    return switch (g) {
+        .move => i18n.t("move"),
+        .jump => i18n.t("jump"),
+        .send => i18n.t("send"),
+        .comment => i18n.t("comment"),
+        .find => i18n.t("find"),
+        .turns => i18n.t("turns"),
+        .view => i18n.t("view"),
+    };
 }
 
 // `<CR> open` and `<Esc> close` are deliberately absent from both list
@@ -215,16 +227,15 @@ fn chromeWith(
     f.put(box.top, box.col, try borderLine(f, b, b.tl, b.tr, title.text, inner), border);
     f.put(box.top + box.height - 1, box.col, try borderLine(f, b, b.bl, b.br, foot.text, inner), border);
     // `borderLine` lays the label after a corner and one rule glyph, so the
-    // label starts two columns in. Key names are ASCII, so a byte offset into
-    // the label is also a column offset.
+    // label starts two columns in.
     if (footer_width <= inner) {
         for (foot.keys) |sp| {
-            f.put(box.top + box.height - 1, box.col + 2 + @as(u16, @intCast(sp.start)), foot.text[sp.start..][0..sp.len], f.theme.accent);
+            f.put(box.top + box.height - 1, box.col + 2 + f.win.gwidth(foot.text[0..sp.start]), foot.text[sp.start..][0..sp.len], f.theme.accent);
         }
     }
     if (title_width <= inner) {
         for (title.keys) |sp| {
-            f.put(box.top, box.col + 2 + @as(u16, @intCast(sp.start)), title.text[sp.start..][0..sp.len], f.theme.accent);
+            f.put(box.top, box.col + 2 + f.win.gwidth(title.text[0..sp.start]), title.text[sp.start..][0..sp.len], f.theme.accent);
         }
     }
     var body_row: u16 = 1;
@@ -453,7 +464,7 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
     var m: Metrics = .{ .entries = entries.len };
     for (entries) |e| {
         m.keys = @max(m.keys, f.win.gwidth(e.keys));
-        m.desc = @max(m.desc, f.win.gwidth(e.desc));
+        m.desc = @max(m.desc, f.win.gwidth(i18n.word(e.desc)));
     }
 
     const title = try tabsOf(f.arena, v.group);
@@ -488,21 +499,21 @@ pub fn draw(f: Frame, v: HelpView, top: u16, height: u16) Allocator.Error!void {
             const bg = f.theme.cursor_line.bg;
             f.put(row, col, blank[0..@min(box.column, blank.len)], f.theme.cursor_line);
             f.put(row, col, e.keys, frame_mod.withBg(f.theme.accent, bg));
-            f.put(row, col + m.keys + gap, e.desc, frame_mod.withBg(f.theme.text, bg));
+            f.put(row, col + m.keys + gap, i18n.word(e.desc), frame_mod.withBg(f.theme.text, bg));
         } else {
             f.put(row, col, e.keys, f.theme.accent);
-            f.put(row, col + m.keys + gap, e.desc, f.theme.text);
+            f.put(row, col + m.keys + gap, i18n.word(e.desc), f.theme.text);
         }
     }
 
     if (box.hidden > 0) {
         // A silently short list is indistinguishable from a keymap that really
         // is that small.
-        const more = try std.fmt.allocPrint(f.arena, "+{d} more", .{box.hidden});
+        const more = try i18n.allocPrint(f.arena, "+{d} more", .{box.hidden});
         f.put(list_top + @as(u16, @intCast(box.per)), text_col, more, f.theme.dim);
     }
     if (entries.len == 0) {
-        f.put(list_top, text_col, "no key matches", f.theme.dim);
+        f.put(list_top, text_col, i18n.t("no key matches"), f.theme.dim);
     }
 }
 
@@ -872,7 +883,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
 
     // No tabs: the file list is one list. A `Footer` with no marked span
     // is a plain label, which is what the shared chrome wants.
-    var title: Footer = .{ .text = v.title, .keys = &.{} };
+    var title: Footer = .{ .text = i18n.word(v.title), .keys = &.{} };
     // A question takes the title, and only the title: it says the key that
     // answers it, so a second copy of that along the bottom border is the
     // same sentence twice.
@@ -996,7 +1007,7 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     }
 
     if (box.hidden > 0) {
-        const more = try std.fmt.allocPrint(f.arena, "+{d} more", .{box.hidden});
+        const more = try i18n.allocPrint(f.arena, "+{d} more", .{box.hidden});
         f.put(list_top + @as(u16, @intCast(box.per)), text_col, more, f.theme.dim);
     }
     if (entries.len == 0) f.put(list_top, text_col, emptyWhy(v.query), f.theme.dim);
@@ -1114,7 +1125,7 @@ fn previewStyle(f: Frame, e: frame_mod.FileEntry, line: []const u8) vaxis.Style 
 /// excluded everything are different facts, and the same rule that keeps
 /// `+0 -0` off a file that did not change applies to them.
 pub fn emptyWhy(query: []const u8) []const u8 {
-    return if (query.len > 0) "no file matches" else "nothing to list";
+    return if (query.len > 0) i18n.t("no file matches") else i18n.t("nothing to list");
 }
 
 /// Width of `+12 −4`, which the layout needs before anything is drawn. Zero
@@ -1265,7 +1276,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
     const box_col = geom.col;
 
     const label = try std.fmt.allocPrint(f.arena, "{s} - {s}", .{
-        v.what, if (v.kind == .view) "VIEW" else if (v.normal) "NORMAL" else "INSERT",
+        v.what, if (v.kind == .view) i18n.t("VIEW") else if (v.normal) i18n.t("NORMAL") else i18n.t("INSERT"),
     });
     const title = try footerOf(f.arena, "", &.{}, &.{.{ .keys = "", .desc = label }}, content);
     const foot = try footerOf(f.arena, "", try composeKeys(f, v), &.{}, content);
@@ -1283,7 +1294,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
         .column = content,
         .list_width = content,
     };
-    _ = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
+    _ = try chromeWith(f, box, title, foot, f.win.gwidth(title.text), f.win.gwidth(foot.text), Border.heavy(f.glyphs), f.theme.accent);
 
     // Which wrapped row the caret is on, so a message taller than the box
     // scrolls with it rather than being cut off at the border.
@@ -1321,7 +1332,7 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
 
     // Said before it happens, not discovered afterwards in the agent's input.
     if (v.joins and box_top + box_h < top + height) {
-        f.put(box_top + box_h, box_col + 2, "line breaks become spaces when sent", f.theme.dim);
+        f.put(box_top + box_h, box_col + 2, i18n.t("line breaks become spaces when sent"), f.theme.dim);
     }
     if (v.selected) |sel| try drawPresetList(f, v, box_col, box_top, box_h, width, top, height, sel);
 }
@@ -1434,7 +1445,7 @@ fn drawPresetList(
         .column = content,
         .list_width = content,
     };
-    const blank = try chromeWith(f, box, title, foot, @intCast(title.text.len), @intCast(foot.text.len), Border.heavy(f.glyphs), f.theme.accent);
+    const blank = try chromeWith(f, box, title, foot, f.win.gwidth(title.text), f.win.gwidth(foot.text), Border.heavy(f.glyphs), f.theme.accent);
 
     var i: u16 = 0;
     while (i < rows) : (i += 1) {
@@ -1442,10 +1453,10 @@ fn drawPresetList(
         const on = i == sel;
         if (on) f.put(top + 1 + i, col + 1, blank[0 .. content + 2], f.theme.cursor_line);
         const bg = if (on) f.theme.cursor_line.bg else null;
-        const name = try std.fmt.allocPrint(f.arena, "{s: <10}", .{e.name});
+        const name = e.name[0..wrap_mod.fitFront(e.name, 10, f.method())];
         f.put(top + 1 + i, col + 2, name, frame_mod.withBg(f.theme.accent, bg));
         const room = content -| 11;
-        const shown = if (f.win.gwidth(e.text) <= room) e.text else e.text[0..@min(e.text.len, room)];
+        const shown = e.text[0..wrap_mod.fitFront(e.text, room, f.method())];
         f.put(top + 1 + i, col + 2 + 11, shown, frame_mod.withBg(f.theme.dim, bg));
     }
 }
@@ -1607,8 +1618,8 @@ pub fn drawThread(f: Frame, v: frame_mod.ThreadView, top: u16, height: u16) Allo
         box,
         title,
         foot,
-        @intCast(title.text.len),
-        @intCast(foot.text.len),
+        f.win.gwidth(title.text),
+        f.win.gwidth(foot.text),
         Border.heavy(f.glyphs),
         f.theme.accent,
     );
@@ -1675,15 +1686,16 @@ fn drawThreadHead(
     } else {
         // A remark written in this pane has no login on it, and inventing one
         // would name the reader on rows the forge has never heard of.
-        f.put(y, col, "you", frame_mod.withBg(f.theme.accent, bg));
-        col += 3;
+        const you = i18n.t("you");
+        f.put(y, col, you, frame_mod.withBg(f.theme.accent, bg));
+        col += f.win.gwidth(you);
     }
     if (msg.when.len > 0) {
         f.put(y, col + 2, msg.when, frame_mod.withBg(f.theme.dim, bg));
     }
     if (msg.author.len > 0 and msg.mine) {
-        const tag = "(you)";
-        const at = box.col + 2 + box.content -| @as(u16, tag.len);
+        const tag = i18n.t("(you)");
+        const at = box.col + 2 + box.content -| f.win.gwidth(tag);
         if (at > col) f.put(y, at, tag, frame_mod.withBg(f.theme.dim, bg));
     }
 }

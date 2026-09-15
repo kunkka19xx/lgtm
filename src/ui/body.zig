@@ -18,6 +18,7 @@ const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
 const path_mod = @import("path.zig");
 const binary = @import("../core/binary.zig");
+const i18n = @import("../i18n/i18n.zig");
 const wrap = @import("wrap.zig");
 
 const frame_mod = @import("frame.zig");
@@ -176,7 +177,7 @@ fn drawBinary(f: Frame, v: View, at: u16) Allocator.Error!void {
     var size_buf: [16]u8 = undefined;
     const size = binary.humanSize(&size_buf, info.size);
 
-    var col = try f.print(at, 2, f.theme.dim, "{s}", .{info.kind});
+    var col = try f.print(at, 2, f.theme.dim, "{s}", .{i18n.word(info.kind)});
     if (info.hasDimensions()) {
         col += try f.print(at, 2 + col, f.theme.dim, " {s} {d}x{d}", .{ sep, info.width, info.height });
     }

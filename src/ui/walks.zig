@@ -10,6 +10,7 @@ const App = app_mod.App;
 const notes = @import("notes.zig");
 const motion = @import("motion.zig");
 const search = @import("search.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// One search step across the whole review, not just the current file: a
 /// reviewer who types `/token` means anywhere in the change. Files other
@@ -109,7 +110,10 @@ pub fn commentStep(app: *App, delta: i32, body: u16) void {
             edge = at;
         }
         const e = edge orelse return;
-        app.notice.set("wrapped to the {s} comment", .{if (delta > 0) "first" else "last"});
+        if (delta > 0)
+            app.notice.set("wrapped to the first comment", .{})
+        else
+            app.notice.set("wrapped to the last comment", .{});
         break :blk e;
     };
 
@@ -156,7 +160,7 @@ pub fn riskStep(app: *App, delta: i32) !void {
         return;
     }
     if (riskEdge(app, delta)) |row| {
-        noteWrap(app, delta, "weakened test");
+        noteWrap(app, delta, .weakened_test);
         app.moveTo(row);
     }
 }
@@ -282,7 +286,7 @@ pub fn stepHunk(app: *App, delta: i32) !void {
 
     const target = hs[app_mod.wrapIndex(raw, hs.len).index] + 1;
     // One hunk wraps onto itself; saying so every time would be noise.
-    if (target != app.vp.cursor) noteWrap(app, delta, "hunk");
+    if (target != app.vp.cursor) noteWrap(app, delta, .hunk);
     app.moveTo(target);
 }
 
@@ -319,16 +323,24 @@ pub fn stepFile(app: *App, delta: i32) !void {
     if (n == 0) return;
     const step = app_mod.wrapIndex(@as(i64, app.file_index) + delta, n);
     if (step.index == app.file_index) return;
-    if (step.wrapped) noteWrap(app, delta, "file");
+    if (step.wrapped) noteWrap(app, delta, .file);
     app.file_index = step.index;
     try app.rebuildRows(.reset);
 }
 
 /// Both ring motions say the same thing when they come round: the cursor
 /// moved further than one step and nothing else on screen would show it.
-pub fn noteWrap(app: *App, delta: i32, what: []const u8) void {
-    app.notice.set("wrapped to {s} {s}", .{ if (delta > 0) "first" else "last", what });
+pub fn noteWrap(app: *App, delta: i32, what: Ring) void {
+    const first = delta > 0;
+    app.notice.set("{s}", .{switch (what) {
+        .hunk => if (first) i18n.t("wrapped to first hunk") else i18n.t("wrapped to last hunk"),
+        .file => if (first) i18n.t("wrapped to first file") else i18n.t("wrapped to last file"),
+        .change => if (first) i18n.t("wrapped to first change") else i18n.t("wrapped to last change"),
+        .weakened_test => if (first) i18n.t("wrapped to first weakened test") else i18n.t("wrapped to last weakened test"),
+    }});
 }
+
+pub const Ring = enum { hunk, file, change, weakened_test };
 
 /// Puts the cursor on the row carrying a given new-file line, and says
 /// whether there was one.
