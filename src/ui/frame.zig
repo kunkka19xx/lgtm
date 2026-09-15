@@ -15,6 +15,7 @@
 // something the compiler catches.
 
 const std = @import("std");
+const i18n = @import("../i18n/i18n.zig");
 const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
@@ -179,7 +180,6 @@ pub const View = struct {
     /// exactly like the working tree's, and reading old code as current is the
     /// failure this view can cause.
     viewing: ?u32 = null,
-    /// The turns are the commits of a static review, not agent snapshots.
     by_commit: bool = false,
     /// Turns written since the one on screen, so a reader parked in the past
     /// can see the present accumulating without being dragged into it.
@@ -337,7 +337,7 @@ pub const Frame = struct {
         comptime fmt: []const u8,
         args: anytype,
     ) Allocator.Error!u16 {
-        const text = try std.fmt.allocPrint(self.arena, fmt, args);
+        const text = try i18n.allocPrint(self.arena, fmt, args);
         self.put(row, col, text, style);
         return self.win.gwidth(text);
     }

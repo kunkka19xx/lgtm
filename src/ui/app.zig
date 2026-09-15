@@ -15,6 +15,7 @@
 // vaxis cells reference that text rather than copying it.
 
 const std = @import("std");
+const i18n = @import("../i18n/i18n.zig");
 const Allocator = std.mem.Allocator;
 
 const diff = @import("../core/diff.zig");
@@ -64,14 +65,14 @@ const wrap_mod = @import("wrap.zig");
 /// by the next keystroke, which is the whole of its lifecycle - anything that
 /// needs to persist is state, not a notice.
 pub const Notice = struct {
-    buf: [192]u8 = undefined,
+    buf: [384]u8 = undefined,
     len: usize = 0,
 
     pub fn set(self: *Notice, comptime fmt: []const u8, args: anytype) void {
-        const out = std.fmt.bufPrint(&self.buf, fmt, args) catch blk: {
+        const out = i18n.bufPrint(&self.buf, fmt, args) catch blk: {
             // A message too long to format is still worth showing truncated:
             // `bufPrint` leaves what it managed to write in the buffer.
-            break :blk self.buf[0..self.buf.len];
+            break :blk i18n.whole(&self.buf);
         };
         self.len = out.len;
     }
@@ -128,9 +129,7 @@ pub const App = struct {
     prev_hunks: []hunk.Hunk = &.{},
 
     file_index: u32 = 0,
-    /// Whether comments and reviews are read from and written to `.lgtm/`.
-    /// Off in tests, which run in the repository and must not touch the
-    /// reader's own files there.
+    /// Off in tests, so they never touch the repo's real `.lgtm/`.
     persist: bool = true,
     quit: bool = false,
 
@@ -563,9 +562,10 @@ pub const App = struct {
         const want = self.expand_lines;
         const got = self.review.growContext(f.path(), hi, dir, want) catch 0;
         if (got == 0) {
-            self.notice.set("nothing left to show {s} this hunk", .{
-                if (dir == .up) "above" else "below",
-            });
+            if (dir == .up)
+                self.notice.set("nothing left to show above this hunk", .{})
+            else
+                self.notice.set("nothing left to show below this hunk", .{});
             return;
         }
 
@@ -891,7 +891,7 @@ pub const App = struct {
                 self.files_purpose = .comments;
                 finder_mod.buildPickList(self);
                 finder_mod.show(self, .{
-                    .title = " comments ",
+                    .title = i18n.t(" comments "),
                     .keys = finder_mod.commentListKeys(self, self.pick_arena.allocator()),
                 });
             },
@@ -1016,11 +1016,11 @@ pub const App = struct {
                 // one thing, so this is one keystroke doing one thing twice
                 // rather than two states to keep in step.
                 const kept = turns_mod.snapshotMark(self);
-                self.notice.set("marked {d} file{s} as read{s}", .{
-                    n,
-                    if (n == 1) "" else "s",
-                    if (kept) " - and saved, so it survives a restart" else "",
-                });
+                const plural = if (n == 1) "" else "s";
+                if (kept)
+                    self.notice.set("marked {d} file{s} as read - and saved, so it survives a restart", .{ n, plural })
+                else
+                    self.notice.set("marked {d} file{s} as read", .{ n, plural });
             },
             // Back to reading the change as one whole thing. The mark never
             // hid anything, so this removes annotation rather than revealing
@@ -1081,10 +1081,13 @@ pub const App = struct {
                 const why: []const u8 = if (!on or self.split)
                     ""
                 else if (self.vp.cols < rows_mod.min_split_width)
-                    " - this pane is too narrow for it"
+                    i18n.t(" - this pane is too narrow for it")
                 else
-                    " - this file has nothing to put beside it";
-                self.notice.set("side by side {s}{s}", .{ if (on) "on" else "off", why });
+                    i18n.t(" - this file has nothing to put beside it");
+                if (on)
+                    self.notice.set("side by side on{s}", .{why})
+                else
+                    self.notice.set("side by side off{s}", .{why});
             },
             .focus_left => self.focusSide(.old),
             .focus_right => self.focusSide(.new),
@@ -1094,7 +1097,10 @@ pub const App = struct {
                 // Nothing else on screen says which it is until a line is long
                 // enough to show it, and by then the reader has stopped
                 // wondering whether the key did anything.
-                self.notice.set("soft wrap {s}", .{if (self.wrap) "on" else "off"});
+                if (self.wrap)
+                    self.notice.set("soft wrap on", .{})
+                else
+                    self.notice.set("soft wrap off", .{});
             },
             .help => self.toggleHelp(),
             // Handled in `ui/thread.zig` before reaching here; listed so the
@@ -1112,7 +1118,7 @@ pub const App = struct {
                 if (self.mode == .finder) return finder_mod.closeFiles(self);
                 self.files_purpose = .browse;
                 finder_mod.buildPickList(self);
-                finder_mod.show(self, .{ .title = " every file " });
+                finder_mod.show(self, .{ .title = i18n.t(" every file ") });
             },
             // One set of list keys, two overlays. Which one they move is the
             // mode, because only one of them can be open.
@@ -1546,7 +1552,7 @@ pub const App = struct {
     /// keystroke that set it by a second, which is long enough for whatever
     /// arena it came from to have gone.
     pub const Busy = struct {
-        buf: [64]u8 = undefined,
+        buf: [160]u8 = undefined,
         len: u8 = 0,
         spin: anim.Spinner = .{},
 
@@ -1559,7 +1565,7 @@ pub const App = struct {
     /// the loop draws this frame before anything blocks.
     pub fn startBusy(self: *App, comptime fmt: []const u8, args: anytype) void {
         var b: Busy = .{};
-        const text = std.fmt.bufPrint(&b.buf, fmt, args) catch b.buf[0..0];
+        const text = i18n.bufPrint(&b.buf, fmt, args) catch i18n.whole(&b.buf);
         b.len = @intCast(text.len);
         self.busy = b;
     }
@@ -2090,7 +2096,6 @@ pub const App = struct {
                 // to the present mid-sentence, which is the one thing a history
                 // view must never do.
                 if (self.review.viewing != null) {
-                    // Two trees cannot move, whatever happens on disk.
                     if (!turns_mod.byCommit(self)) self.review.moved = true;
                     return;
                 }

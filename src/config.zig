@@ -33,6 +33,7 @@ const keytext = @import("ui/keytext.zig");
 const theme = @import("ui/theme.zig");
 const wrap = @import("ui/wrap.zig");
 const toml = @import("toml.zig");
+const i18n = @import("i18n/i18n.zig");
 
 /// A config file larger than this is not a config file. Reading it is the one
 /// thing on the cold-start path that a user can make arbitrarily slow.
@@ -91,6 +92,7 @@ pub const Diff = struct {
 };
 
 pub const Ui = struct {
+    language: i18n.Lang = .en,
     icons: Icons = .unicode,
     compose: ComposeAt = .bottom,
     comments: CommentStyle = .marker,
@@ -419,6 +421,12 @@ pub const Loader = struct {
                         .marker
                     else {
                         self.note(src, line, "ui.comments must be \"inline\" or \"marker\", not \"{s}\"", .{t});
+                        return;
+                    };
+                } else if (std.mem.eql(u8, key, "language")) {
+                    const s = self.wantString(src, line, key, value) orelse return;
+                    self.cfg.ui.language = std.meta.stringToEnum(i18n.Lang, s) orelse {
+                        self.note(src, line, "ui.language must be \"en\" or \"ja\", not \"{s}\"", .{s});
                         return;
                     };
                 } else if (std.mem.eql(u8, key, "icons")) {
@@ -791,6 +799,7 @@ pub const starter =
     \\# expand_lines = 10         # lines K and J pull in around a hunk
     \\
     \\# [ui]
+    \\# language = "en"           # "en" or "ja", the language the TUI speaks
     \\# icons = "unicode"         # "unicode", "ascii", or "nerd" (patched font)
     \\# comments = "marker"       # "marker" is the gutter dot, "inline" the text
     \\# compose = "bottom"        # "bottom", "top", or "centre"

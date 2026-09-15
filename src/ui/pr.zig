@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const i18n = @import("../i18n/i18n.zig");
 
 const App = @import("app.zig").App;
 const notes = @import("notes.zig");
@@ -95,10 +96,10 @@ pub const Pending = union(enum) {
 /// The spinner's sentence for a forge call, said in one place.
 fn busyLine(buf: []u8, kind: std.meta.Tag(Pending), number: u32) []const u8 {
     return switch (kind) {
-        .post => std.fmt.bufPrint(buf, "posting to #{d}", .{number}) catch "posting",
-        .amend => std.fmt.bufPrint(buf, "editing on #{d}", .{number}) catch "editing",
-        .reply => std.fmt.bufPrint(buf, "replying on #{d}", .{number}) catch "replying",
-        .drop => std.fmt.bufPrint(buf, "deleting on #{d}", .{number}) catch "deleting",
+        .post => i18n.bufPrint(buf, "posting to #{d}", .{number}) catch i18n.t("posting"),
+        .amend => i18n.bufPrint(buf, "editing on #{d}", .{number}) catch i18n.t("editing"),
+        .reply => i18n.bufPrint(buf, "replying on #{d}", .{number}) catch i18n.t("replying"),
+        .drop => i18n.bufPrint(buf, "deleting on #{d}", .{number}) catch i18n.t("deleting"),
     };
 }
 
@@ -132,11 +133,11 @@ pub const Want = union(enum) {
     pub fn says(self: Want, buf: []u8) []const u8 {
         return switch (self) {
             .open => |o| if (o.number) |x|
-                std.fmt.bufPrint(buf, "opening #{d}", .{x}) catch "opening"
+                i18n.bufPrint(buf, "opening #{d}", .{x}) catch i18n.t("opening")
             else
-                "opening this branch's request",
-            .list => "listing pull requests",
-            .pick => |p| std.fmt.bufPrint(buf, "opening #{d}", .{p.pr.number}) catch "opening",
+                i18n.t("opening this branch's request"),
+            .list => i18n.t("listing pull requests"),
+            .pick => |p| i18n.bufPrint(buf, "opening #{d}", .{p.pr.number}) catch i18n.t("opening"),
             .post => |p| busyLine(buf, .post, p.number),
             .amend => |a| busyLine(buf, .amend, a.number),
             .reply => |r| busyLine(buf, .reply, r.number),
@@ -281,7 +282,7 @@ fn failure(err: anyerror) Got {
 
 /// Arms a call and says so. The loop draws this frame before anything blocks.
 pub fn ask(app: *App, want: Want) void {
-    var buf: [64]u8 = undefined;
+    var buf: [160]u8 = undefined;
     app.startBusy("{s}", .{want.says(&buf)});
     app.pr.want = want;
 }
@@ -402,7 +403,7 @@ pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
         .opened => |o| enterPr(app, o),
         .rows => |rows| {
             if (rows.len == 0) {
-                app.notice.set("no {s}pull requests", .{if (want.list) "" else "open "});
+                if (want.list) app.notice.set("no pull requests", .{}) else app.notice.set("no open pull requests", .{});
                 return;
             }
             // Copied into the pick arena, because the job's dies with it.
@@ -457,7 +458,7 @@ fn armWith(app: *App, req: Pending, body: []const u8) void {
     app.pr.body_len = @intCast(@min(body.len, app.pr.body_buf.len));
     @memcpy(app.pr.body_buf[0..app.pr.body_len], body[0..app.pr.body_len]);
     app.pr.pending = req;
-    var buf: [64]u8 = undefined;
+    var buf: [160]u8 = undefined;
     app.startBusy("{s}", .{req.says(&buf, app.pr.number)});
 }
 
@@ -516,7 +517,7 @@ pub fn dropAsk(app: *App, n: *const comments_mod.Comment) void {
         return;
     }
     app.pr.dropping = .{ .id = n.id, .remote = n.remote };
-    var buf: [96]u8 = undefined;
+    var buf: [160]u8 = undefined;
     app.notice.set("{s}", .{dropQuestion(&buf, app.pr.number)});
 }
 
@@ -528,7 +529,7 @@ pub fn dropAsk(app: *App, n: *const comments_mod.Comment) void {
 /// what the key does and what every other key does.
 pub fn dropQuestion(buf: []u8, number: u32) []const u8 {
     _ = number;
-    return std.fmt.bufPrint(buf, "delete this comment? y deletes, any other key cancels", .{}) catch "delete this comment? y deletes";
+    return i18n.bufPrint(buf, "delete this comment? y deletes, any other key cancels", .{}) catch i18n.t("delete this comment? y deletes");
 }
 
 /// The same, into a frame's arena, and empty when nothing is being asked.
@@ -536,7 +537,7 @@ pub fn dropQuestion(buf: []u8, number: u32) []const u8 {
 /// chrome.
 pub fn askText(app: *App, arena: Allocator) Allocator.Error![]const u8 {
     if (app.pr.dropping == null) return "";
-    var buf: [96]u8 = undefined;
+    var buf: [160]u8 = undefined;
     return arena.dupe(u8, dropQuestion(&buf, app.pr.number));
 }
 
@@ -919,7 +920,7 @@ pub fn showPrs(app: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allo
         mixed_author = mixed_author or !std.mem.eql(u8, r.author, rows[0].author);
         who.* = try shortAuthor(arena, r.author, app.glyphs.ellipsis);
         w_num = @max(w_num, digits(r.number));
-        w_state = @max(w_state, r.status().len);
+        w_state = @max(w_state, wrap_mod.columns(i18n.word(r.status()), .{ .method = .unicode }));
         w_author = @max(w_author, wrap_mod.columns(who.*, .{ .method = .unicode }));
     }
 
@@ -927,7 +928,9 @@ pub fn showPrs(app: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allo
         var label: std.ArrayList(u8) = .empty;
         try label.print(arena, "#{d}{s}", .{ r.number, finder_mod.pad(arena, w_num -| digits(r.number)) });
         if (mixed_state) {
-            try label.print(arena, "  {s}{s}", .{ r.status(), finder_mod.pad(arena, w_state -| r.status().len) });
+            const state = i18n.word(r.status());
+            const w = wrap_mod.columns(state, .{ .method = .unicode });
+            try label.print(arena, "  {s}{s}", .{ state, finder_mod.pad(arena, w_state -| w) });
         }
         if (mixed_author) {
             const w = wrap_mod.columns(who, .{ .method = .unicode });
@@ -950,7 +953,7 @@ pub fn showPrs(app: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allo
     }
 
     finder_mod.show(app, .{
-        .title = if (all) " pull requests " else " open pull requests ",
+        .title = if (all) i18n.t(" pull requests ") else i18n.t(" open pull requests "),
         .gutter = false,
     });
 }
@@ -1012,7 +1015,6 @@ pub fn closePr(app: *App) void {
 /// Re-diff against whatever the review now points at, and start again at
 /// the top: the cursor's line number means nothing in a different diff.
 pub fn reopen(app: *App) void {
-    // A turn or commit on screen belongs to the review being left.
     app.review.showWorking();
     app.file_index = 0;
     app.vp.cursor = 0;
@@ -1168,6 +1170,12 @@ test "a column of one repeated word is not drawn" {
     try showPrRows(fx, &mixed, true);
     try testing.expectEqualStrings("#19  draft   kunkka19xx  feat: posting", fx.app.pick_list.items[0].path);
     try testing.expectEqualStrings("#16  merged  someone     chore: config", fx.app.pick_list.items[1].path);
+
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+    try showPrRows(fx, &mixed, true);
+    try testing.expectEqualStrings("#19  下書き      kunkka19xx  feat: posting", fx.app.pick_list.items[0].path);
+    try testing.expectEqualStrings("#16  マージ済み  someone     chore: config", fx.app.pick_list.items[1].path);
 }
 
 test "picking a request that is not there closes the list and does nothing" {

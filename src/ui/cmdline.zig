@@ -4,6 +4,7 @@
 // completing a value, and the search the prompt drives.
 
 const std = @import("std");
+const i18n = @import("../i18n/i18n.zig");
 
 const app_mod = @import("app.zig");
 const App = app_mod.App;
@@ -279,10 +280,10 @@ pub fn setTheme(app: *App, arg: []const u8) void {
 pub fn onlyIn(app: *App, cmd: keymap.Command) []const u8 {
     for (app.km.bindings) |b| {
         if (b.command != cmd) continue;
-        if (b.modes.compose) return "the compose box";
-        if (b.modes.help or b.modes.finder) return "a list";
+        if (b.modes.compose) return i18n.t("the compose box");
+        if (b.modes.help or b.modes.finder) return i18n.t("a list");
     }
-    return "another mode";
+    return i18n.t("another mode");
 }
 
 /// The closest command name to something that was not one.
@@ -703,6 +704,31 @@ test "every command-line message fits the slot at 80 columns" {
     const slot = 54;
     try testing.expect("not a command - did you mean :".len + longest + "?".len <= slot);
     try testing.expect(":".len + longest + " works only in the compose box".len <= slot);
+}
+
+test "the refusals fit the slot in Japanese too, measured in columns" {
+    const wrap = @import("wrap.zig");
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    var longest: []const u8 = "";
+    for (std.enums.values(keymap.Command)) |cmd| {
+        if (@tagName(cmd).len > longest.len) longest = @tagName(cmd);
+    }
+    const slot = 54;
+    const cols: wrap.Metrics = .{ .method = .unicode };
+
+    fx.app.notice.set("not a command - did you mean :{s}?", .{longest});
+    try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "不明なコマンド") != null);
+    try testing.expect(wrap.columns(fx.app.notice.text(), cols) <= slot);
+
+    fx.app.notice.set(":{s} works only in {s}", .{ longest, i18n.t("the compose box") });
+    try testing.expect(wrap.columns(fx.app.notice.text(), cols) <= slot);
+
+    try submitCommand(&fx.app, "compose_submit", app_mod.body_rows);
+    try testing.expectEqualStrings(":compose_submit は入力欄でのみ使えます", fx.app.notice.text());
 }
 
 test "Tab extends to what every candidate shares before choosing for you" {

@@ -12,6 +12,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
+const i18n = @import("../i18n/i18n.zig");
 
 const event = @import("../core/event.zig");
 const fs = @import("../io/fs.zig");
@@ -114,6 +115,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     var app = App.init(gpa, io, &queue);
     defer app.deinit();
     app.nav = opts.cfg.nav;
+    i18n.lang = opts.cfg.ui.language;
     app.wrap = opts.cfg.ui.wrap;
     app.list_preview = opts.cfg.ui.preview;
     app.layout = opts.cfg.diff.layout;
@@ -373,9 +375,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             app.finder_state.want_panes = false;
             const cx: bridge.Ctx = .{ .gpa = app.gpa, .io = app.io, .w = w };
             if (!offerPanes(&app, &br, cx, null)) {
-                app.notice.set("no other {s} to send to", .{br.unit()});
+                app.notice.set("no other {s} to send to", .{i18n.word(br.unit())});
             } else {
-                app.notice.set("pick the {s} sends go to", .{br.unit()});
+                app.notice.set("pick the {s} sends go to", .{i18n.word(br.unit())});
             }
         }
 
@@ -493,11 +495,11 @@ fn deliver(
             error.NoTarget => {
                 _ = br.copyText(cx, text) catch {};
                 if (offerPanes(app, br, cx, text)) {
-                    app.notice.set("no {s} found - copied, and pick one below", .{br.unit()});
+                    app.notice.set("no {s} found - copied, and pick one below", .{i18n.word(br.unit())});
                     return;
                 }
                 app.notice.set("no agent {s}: copied - restart with --pane {s}", .{
-                    br.unit(),
+                    i18n.word(br.unit()),
                     switch (br.*) {
                         .tmux => "%N",
                         .herdr => "w1:p1",
@@ -523,7 +525,7 @@ fn deliver(
             app.notice.set("sent to {s}", .{pane});
         },
         .copied => |why| if (why) |reason|
-            app.notice.set("{s}: copied to the clipboard instead", .{reason})
+            app.notice.set("{s}: copied to the clipboard instead", .{i18n.word(reason)})
         else
             app.notice.set("copied to the clipboard", .{}),
     }

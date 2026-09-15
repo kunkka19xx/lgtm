@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const i18n = @import("../i18n/i18n.zig");
 
 const app_mod = @import("app.zig");
 const App = app_mod.App;
@@ -753,6 +754,18 @@ test "without a login nothing is claimed, so a remark stays read only" {
     _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "mine, posted", .author = "kunkka19xx", .remote = 777 });
     try commentView(&fx.app, 20);
     try testing.expect(fx.app.compose.read_only);
+}
+
+test "a notice is drawn in the reader's language" {
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    try submitReview(&fx.app);
+    try testing.expectEqualStrings("未送信のコメントはありません", fx.app.notice.text());
+    noComments(&fx.app);
+    try testing.expectEqualStrings("コメントはまだありません - <Space>c で書く", fx.app.notice.text());
 }
 
 test "the reader's own remark still opens to be edited" {

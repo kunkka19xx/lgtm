@@ -24,6 +24,7 @@ const git = @import("../core/git.zig");
 const turns_mod = @import("turns.zig");
 const pr_mod = @import("pr.zig");
 const walks = @import("walks.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// One row of the pane picker, in this file's own vocabulary. The loop
 /// fills these from whatever its bridge knows: `ui/app.zig` never sees a
@@ -212,7 +213,7 @@ pub fn openPanePicker(app: *App, rows: []const PaneRow, pending: ?[]const u8) Al
     // Opened on the pane sends already go to, so reconnecting is a
     // confirmation rather than a search. Otherwise the top, which the
     // ordering has made the likeliest answer.
-    show(app, .{ .title = " panes ", .at = @intCast(at), .gutter = false });
+    show(app, .{ .title = i18n.t(" panes "), .at = @intCast(at), .gutter = false });
 }
 
 /// `n` spaces, from the pick arena.
@@ -288,8 +289,8 @@ pub fn buildPickList(app: *App) void {
             // so a list showing four when two are visible has to say why.
             const mark = switch (n.state) {
                 .open => "",
-                .sent => "[sent] ",
-                .stale => "[stale] ",
+                .sent => i18n.t("[sent] "),
+                .stale => i18n.t("[stale] "),
             };
             // The row is the remark's address, not the remark. It used to
             // carry the body too, flattened and cut at whatever the column
@@ -301,7 +302,7 @@ pub fn buildPickList(app: *App) void {
             const whose = if (n.theirs())
                 std.fmt.allocPrint(arena, "@{s} ", .{n.author}) catch ""
             else if (n.posted)
-                "[posted] "
+                i18n.t("[posted] ")
             else
                 "";
             const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
@@ -368,7 +369,7 @@ pub fn toggleFiles(app: *App) void {
         app.files_purpose = .jump;
         buildPickList(app);
         show(app, .{
-            .title = " changed files ",
+            .title = i18n.t(" changed files "),
             .at = @intCast(files_mod.rowOf(app.pick_list.items, app.file_index)),
             .totals = reviewTotals(app),
         });

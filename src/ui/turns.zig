@@ -18,6 +18,7 @@ const walks = @import("walks.zig");
 const fs_mod = @import("../io/fs.zig");
 const event = @import("../core/event.zig");
 const theme_mod = @import("theme.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// What `the list` holds for the `⋮` row: not a turn, and not the
 /// working tree's `maxInt` either, so opening it can be told from opening
@@ -53,8 +54,6 @@ pub const State = struct {
     /// The last restore, for `u`. Session-only: a `u` that survived a restart
     /// would undo something long since forgotten. One step, then gone.
     last: ?Done = null,
-    /// A static review's commits, which are its turns. Read again only when
-    /// the refs it was read for change: a commit cannot.
     log: ?git.Log = null,
     log_for: u64 = 0,
 
@@ -104,7 +103,7 @@ pub fn openTurnList(app: *App) !void {
         for (app.pick_list.items, 0..) |row, i| {
             if (row.current) at = @intCast(i);
         }
-        finder_mod.show(app, .{ .title = " commits ", .at = at });
+        finder_mod.show(app, .{ .title = i18n.t(" commits "), .at = at });
         return;
     }
     if (app.snap == null) {
@@ -124,7 +123,7 @@ pub fn openTurnList(app: *App) !void {
     for (app.pick_list.items, 0..) |row, i| {
         if (row.current) at = @intCast(i);
     }
-    finder_mod.show(app, .{ .title = " turns ", .at = at });
+    finder_mod.show(app, .{ .title = i18n.t(" turns "), .at = at });
 }
 
 /// The same rows again, with the fold in whatever state it is now.
@@ -192,7 +191,7 @@ pub fn fillTurnRows(app: *App) bool {
     var here: u32 = 0;
     if (app.review.viewing == null) here = 0;
     app.pick_list.append(app.gpa, .{
-        .path = arena.dupe(u8, "│ working tree  now") catch "working tree",
+        .path = arena.dupe(u8, i18n.t("│ working tree  now")) catch "working tree",
         .added = 0,
         .removed = 0,
         .in_review = false,
@@ -215,7 +214,7 @@ pub fn fillTurnRows(app: *App) bool {
             continue;
         }
         if (folded > 0) {
-            if (!appendFold(app, arena, folded, "turn")) return false;
+            if (!appendFold(app, arena, folded, .turn)) return false;
             folded = 0;
         }
         // A run of turns over the same file, drawn as one row. `git log`
@@ -288,18 +287,17 @@ pub fn fillTurnRows(app: *App) bool {
     // A session whose oldest turns are folded and whose baseline is gone -
     // pruned by `[snapshot] keep` - ends on the fold rather than dropping
     // the count that says how much is missing.
-    if (folded > 0 and !appendFold(app, arena, folded, "turn")) return false;
+    if (folded > 0 and !appendFold(app, arena, folded, .turn)) return false;
     return true;
 }
 
-/// The `⋮` row standing in for `folded` rows the list is not drawing.
-fn appendFold(app: *App, arena: Allocator, folded: u32, noun: []const u8) bool {
+fn appendFold(app: *App, arena: Allocator, folded: u32, noun: enum { turn, commit }) bool {
+    const plural: []const u8 = if (folded == 1) "" else "s";
     app.pick_list.append(app.gpa, .{
-        .path = std.fmt.allocPrint(arena, "⋮   {d} {s}{s}", .{
-            folded,
-            noun,
-            if (folded == 1) "" else "s",
-        }) catch "⋮",
+        .path = switch (noun) {
+            .turn => i18n.allocPrint(arena, "⋮   {d} turn{s}", .{ folded, plural }),
+            .commit => i18n.allocPrint(arena, "⋮   {d} commit{s}", .{ folded, plural }),
+        } catch "⋮",
         .added = 0,
         .removed = 0,
         .in_review = false,
@@ -309,27 +307,21 @@ fn appendFold(app: *App, arena: Allocator, folded: u32, noun: []const u8) bool {
     return true;
 }
 
-/// Whether the turns are commits. Two trees have no agent writing between
-/// them; what they have is the history from one to the other, which for a
-/// pull request is how its author built it.
 pub fn byCommit(app: *const App) bool {
     return app.review.target != null;
 }
 
-/// How many commits the list last read, without reading them.
 pub fn commitCount(app: *const App) u32 {
     const l = app.turns.log orelse return 0;
     return @intCast(l.commits.len);
 }
 
-/// What the whole review is called in a notice: `#13`, or the two refs.
 fn wholeName(app: *const App, buf: []u8) []const u8 {
-    if (app.pr.number > 0) return std.fmt.bufPrint(buf, "#{d}", .{app.pr.number}) catch "the review";
-    const target = app.review.target orelse return "the review";
-    return std.fmt.bufPrint(buf, "{s}..{s}", .{ app.review.base, target }) catch "the review";
+    if (app.pr.number > 0) return std.fmt.bufPrint(buf, "#{d}", .{app.pr.number}) catch i18n.t("the review");
+    const target = app.review.target orelse return i18n.t("the review");
+    return std.fmt.bufPrint(buf, "{s}..{s}", .{ app.review.base, target }) catch i18n.t("the review");
 }
 
-/// The review's commits, oldest first. One `git log` per pair of refs.
 fn commits(app: *App) ?[]const git.Commit {
     const target = app.review.target orelse return null;
     const key = logKey(app.review.base, target);
@@ -355,11 +347,6 @@ fn logKey(base: []const u8, target: []const u8) u64 {
     return h.final();
 }
 
-/// The commit list: newest first, like the turns, with the whole review
-/// pinned on top as the way back.
-///
-/// No runs. A commit is individually meaningful, which an agent's turn is
-/// not, so two in a row on one file are two things to read.
 pub fn fillCommitRows(app: *App) bool {
     const list = commits(app) orelse return false;
     var nb: [288]u8 = undefined;
@@ -378,7 +365,7 @@ pub fn fillCommitRows(app: *App) bool {
     ));
 
     app.pick_list.append(app.gpa, .{
-        .path = std.fmt.allocPrint(arena, "│ all of {s}  {d} commit{s}", .{
+        .path = i18n.allocPrint(arena, "│ all of {s}  {d} commit{s}", .{
             wholeName(app, &nb),
             list.len,
             if (list.len == 1) "" else "s",
@@ -398,8 +385,6 @@ pub fn fillCommitRows(app: *App) bool {
         i -= 1;
         const c = list[i];
         const n: u32 = @intCast(i + 1);
-        // The same fold the turns get: the newest few, the first, and the
-        // one on screen.
         const kept = app.turns.expanded or list.len - 1 - i < turns_shown or n == 1 or
             (if (app.review.viewing) |v| v == n else false);
         if (!kept) {
@@ -407,7 +392,7 @@ pub fn fillCommitRows(app: *App) bool {
             continue;
         }
         if (folded > 0) {
-            if (!appendFold(app, arena, folded, "commit")) return false;
+            if (!appendFold(app, arena, folded, .commit)) return false;
             folded = 0;
         }
         app.pick_list.append(app.gpa, .{
@@ -428,7 +413,6 @@ pub fn fillCommitRows(app: *App) bool {
     return true;
 }
 
-/// Shows commit `n` of the review, or all of it for the sentinel.
 fn showCommit(app: *App, n: u32, body: u16) !void {
     var nb: [288]u8 = undefined;
     if (n == std.math.maxInt(u32)) {
@@ -442,7 +426,6 @@ fn showCommit(app: *App, n: u32, body: u16) !void {
     const list = commits(app) orelse return;
     if (n == 0 or n > list.len) return;
     const c = list[n - 1];
-    // Against its own parent, so the view is what this commit did.
     var base_buf: [128]u8 = undefined;
     const base = std.fmt.bufPrint(&base_buf, "{s}^", .{c.oid}) catch return;
     app.review.showTurn(n, c.oid, base);
@@ -453,16 +436,14 @@ fn showCommit(app: *App, n: u32, body: u16) !void {
         return;
     }
     var k: [32]u8 = undefined;
-    const forward: []const u8 = if (n >= list.len) "returns to all of them" else "goes forward";
-    app.notice.set("{s} {s} - {s} {s}", .{
-        c.oid[0..@min(7, c.oid.len)],
-        c.subject,
-        app.keyFor(.next_turn, .normal, &k),
-        forward,
-    });
+    const sha = c.oid[0..@min(7, c.oid.len)];
+    const key = app.keyFor(.next_turn, .normal, &k);
+    if (n >= list.len)
+        app.notice.set("{s} {s} - {s} returns to all of them", .{ sha, c.subject, key })
+    else
+        app.notice.set("{s} {s} - {s} goes forward", .{ sha, c.subject, key });
 }
 
-/// `]t` and `[t` over the commits, with the whole review one past the newest.
 fn commitStep(app: *App, delta: i32, body: u16) !void {
     const list = commits(app) orelse return;
     var nb: [288]u8 = undefined;
@@ -805,14 +786,14 @@ pub fn turnLabel(
     const when = timeline.age(age_buf, turn.when_s, now_s);
 
     if (turn.number == 0) {
-        return std.fmt.allocPrint(arena, "{s} baseline   before the agent ran  {s}", .{ rail, when }) catch "baseline";
+        return i18n.allocPrint(arena, "{s} baseline   before the agent ran  {s}", .{ rail, when }) catch "baseline";
     }
     // A turn that changed nothing still happened - the snapshot restore
     // takes before it writes is one, and so is any quiet period the agent
     // spent thinking. It gets a word rather than a blank path and "0
     // files", which reads as a row that failed to load.
     if (turn.files == 0) {
-        return std.fmt.allocPrint(arena, "{s} {d: <3} no change  {s}", .{ rail, turn.number, when }) catch "turn";
+        return i18n.allocPrint(arena, "{s} {d: <3} no change  {s}", .{ rail, turn.number, when }) catch "turn";
     }
     // Appended rather than given a column of its own. A column would cost
     // one everywhere to say something on the rare row, and this is rare by
@@ -825,7 +806,7 @@ pub fn turnLabel(
     // The pair `SNAPSHOTS.md` 5.3c asks for: one says the agent went
     // backwards, the other says it was listening.
     const replied = if (turn.answered) glyphs.answer_mark else "";
-    return std.fmt.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}{s}{s}", .{
+    return i18n.allocPrint(arena, "{s} {d: <3} {s}  {s}  {d} file{s}{s}{s}", .{
         rail,
         turn.number,
         turn.path,
@@ -903,7 +884,7 @@ pub fn turnStep(app: *App, delta: i32, body: u16) !void {
     // "returns" only when there is nothing between here and the present. A
     // turn taken while the reader was parked puts one there, and the
     // message then promised something the key would not do.
-    const forward: []const u8 = if (turn >= latest) "returns to the working tree" else "goes forward";
+    const forward = if (turn >= latest) i18n.t("returns to the working tree") else i18n.t("goes forward");
     if (turn == 0) {
         // Not "turn 0". It is the tree as it was before the agent ran, and
         // that is the only thing about it worth saying.
@@ -1023,7 +1004,7 @@ pub fn freshStep(app: *App, delta: i32) !void {
         return;
     }
     if (freshEdge(app, delta)) |row| {
-        walks.noteWrap(app, delta, "change");
+        walks.noteWrap(app, delta, .change);
         app.moveTo(row);
     }
 }
@@ -1482,8 +1463,6 @@ test "a static review lists its commits, newest first, with the whole of it on t
     const rows = fx.app.turns.rows.items;
     const list = fx.app.pick_list.items;
 
-    // The way back, then the eight newest, the fold, the one on screen and
-    // the first.
     try testing.expectEqual(@as(usize, 12), rows.len);
     try testing.expectEqual(std.math.maxInt(u32), rows[0]);
     try testing.expect(std.mem.indexOf(u8, list[0].path, "all of #13  12 commits") != null);
@@ -1498,9 +1477,33 @@ test "a static review lists its commits, newest first, with the whole of it on t
     try testing.expectEqual(@as(u32, 1), rows[11]);
     try testing.expectEqual(@as(u32, 12), commitCount(&fx.app));
 
-    // Nothing here is the reader's to write to.
     try restoreAsk(&fx.app);
     try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "not your working tree") != null);
     try testing.expect(fx.app.readOnly());
     try testing.expect(std.mem.indexOf(u8, fx.app.notice.text(), "commit 2 is read only") != null);
+}
+
+test "the commit list and its notices read in japanese" {
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    fx.app.review.base = "be94b77";
+    fx.app.review.target = "c7143ba";
+    fx.app.pr.number = 13;
+
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(testing.allocator);
+    for (1..11) |n| try text.print(testing.allocator, "\x00{d:0>7} 0 commit number {d}\n\n1\t{d}\tsrc/a.zig\n", .{ n, n, n });
+    const owned = try testing.allocator.dupe(u8, text.items);
+    fx.app.turns.log = .{ .text = owned, .commits = try git.parseLog(testing.allocator, owned) };
+    fx.app.turns.log_for = logKey("be94b77", "c7143ba");
+
+    try testing.expect(fillCommitRows(&fx.app));
+    const list = fx.app.pick_list.items;
+    try testing.expectEqualStrings("│ #13 全体  10コミット", list[0].path);
+    try testing.expectEqualStrings("⋮   1コミット", list[9].path);
+
+    try restoreAsk(&fx.app);
+    try testing.expectEqualStrings("復元するものはありません - #13 は作業ツリーではありません", fx.app.notice.text());
 }

@@ -36,6 +36,8 @@ pub const testrisk = @import("core/testrisk.zig");
 pub const lexer = @import("syntax/lexer.zig");
 pub const highlight = @import("syntax/highlight.zig");
 
+pub const i18n = @import("i18n/i18n.zig");
+
 test {
     _ = fs;
     _ = proc;
@@ -60,4 +62,5 @@ test {
     _ = testrisk;
     _ = lexer;
     _ = highlight;
+    _ = i18n;
 }

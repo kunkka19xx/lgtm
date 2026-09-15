@@ -30,6 +30,7 @@ const theme_mod = @import("theme.zig");
 const keytext = @import("keytext.zig");
 const preview = @import("preview.zig");
 const wrap = @import("wrap.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// From `build.zig.zon` by way of a build option, which is the same string
 /// `--version` prints: two places saying the version is one place too many.
@@ -107,6 +108,8 @@ pub fn draw(
     hint: ?[]const u8,
 ) Allocator.Error!void {
     const art = f.glyphs.wordmark;
+    const said = i18n.word(state);
+    const tagline_shown = i18n.t(tagline);
 
     // Display width, never byte length: the block-element rows are three
     // bytes a column and the thumb is one column wider than it looks.
@@ -115,7 +118,7 @@ pub fn draw(
 
     // The sentence is what the name means, so it is dropped whole or not at
     // all: half of it clipped at the edge reads as a different claim.
-    const tag = f.win.gwidth(tagline) <= f.width();
+    const tag = f.win.gwidth(tagline_shown) <= f.width();
 
     // The extra rows the two optional lines need, so a short pane drops the
     // wordmark rather than drawing over its own byline.
@@ -125,7 +128,7 @@ pub fn draw(
         // One line is all there is room for, so it is the one that says what
         // is wrong. The path and the hint are help, and help is what a pane
         // this small has no room for.
-        f.put(0, 0, try std.fmt.allocPrint(f.arena, " lgtm: {s}", .{state}), f.theme.dim);
+        f.put(0, 0, try std.fmt.allocPrint(f.arena, " lgtm: {s}", .{said}), f.theme.dim);
         return;
     };
 
@@ -135,7 +138,7 @@ pub fn draw(
 
     var row = at.top + @as(u16, @intCast(art.len)) + 1;
     if (tag) {
-        _ = try centre(f, row, f.theme.dim, "{s}", .{tagline});
+        _ = try centre(f, row, f.theme.dim, "{s}", .{tagline_shown});
         row += 1;
     }
 
@@ -150,7 +153,7 @@ pub fn draw(
     f.putLink(row, col + lead_w, author, f.theme.accent, author_url);
 
     row += 2;
-    _ = try centre(f, row, f.theme.text, "{s}", .{state});
+    _ = try centre(f, row, f.theme.text, "{s}", .{said});
 
     // The directory, elided from the head so the last component survives -
     // which is the part that answers "am I where I meant to be" (`ui/path.zig`
@@ -162,7 +165,7 @@ pub fn draw(
     }
     if (hint) |h| {
         row += 1;
-        _ = try centre(f, row, f.theme.dim, "{s}", .{h});
+        _ = try centre(f, row, f.theme.dim, "{s}", .{i18n.word(h)});
     }
 
     // The key rather than a `?`: a remapped keymap has to document itself
@@ -316,7 +319,7 @@ fn centre(
     comptime fmt: []const u8,
     args: anytype,
 ) Allocator.Error!u16 {
-    const text = try std.fmt.allocPrint(f.arena, fmt, args);
+    const text = try i18n.allocPrint(f.arena, fmt, args);
     const w = f.win.gwidth(text);
     const col: u16 = if (w >= f.width()) 0 else (f.width() - w) / 2;
     f.put(row, col, text, style);

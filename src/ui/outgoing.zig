@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const i18n = @import("../i18n/i18n.zig");
 
 const app_mod = @import("app.zig");
 const App = app_mod.App;
@@ -101,7 +102,7 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
             // layer over it, not a place the reader has gone instead.
             app.files_purpose = .mention;
             finder_mod.buildPickList(app);
-            finder_mod.show(app, .{ .title = " mention a file " });
+            finder_mod.show(app, .{ .title = i18n.t(" mention a file ") });
         },
         // `<C-p>` means "to the forge" everywhere else, so on a box that only
         // goes there it does what Enter does.
@@ -407,37 +408,37 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
     // The same switch `composeSubmit` runs, over the same union, so the
     // title can no longer disagree with what `<CR>` will do.
     const what: []const u8 = switch (app.compose_for) {
-        .agent => "compose",
+        .agent => i18n.t("compose"),
         // Whose it is and where, because the box has to say why it is shut.
         .view => |id| blk: {
-            const n = app.comments.find(id) orelse break :blk "comment";
-            break :blk std.fmt.allocPrint(arena, "@{s} {s}:{d}", .{ n.author, n.path, n.line }) catch "comment";
+            const n = app.comments.find(id) orelse break :blk i18n.t("comment");
+            break :blk std.fmt.allocPrint(arena, "@{s} {s}:{d}", .{ n.author, n.path, n.line }) catch i18n.t("comment");
         },
         // Who is being answered: a reply box that said only the line would
         // look like the box that writes a new remark on it.
         .reply => |root| blk: {
-            const n = app.comments.findRemote(root) orelse break :blk "reply";
-            break :blk std.fmt.allocPrint(arena, "reply to @{s} on #{d} {s}:{d}", .{
+            const n = app.comments.findRemote(root) orelse break :blk i18n.t("reply");
+            break :blk i18n.allocPrint(arena, "reply to @{s} on #{d} {s}:{d}", .{
                 n.author, app.pr.number, n.path, n.line,
-            }) catch "reply";
+            }) catch i18n.t("reply");
         },
         // The box looks like any other, and `<CR>` does not do the same.
         .amend => |a| blk: {
-            const n = app.comments.find(a.id) orelse break :blk "comment";
-            break :blk std.fmt.allocPrint(arena, "your remark on #{d} {s}:{d}", .{ app.pr.number, n.path, n.line }) catch "comment";
+            const n = app.comments.find(a.id) orelse break :blk i18n.t("comment");
+            break :blk i18n.allocPrint(arena, "your remark on #{d} {s}:{d}", .{ app.pr.number, n.path, n.line }) catch i18n.t("comment");
         },
         .edit => |id| blk: {
-            const n = app.comments.find(id) orelse break :blk "comment";
-            break :blk std.fmt.allocPrint(arena, "comment {s}:{d}", .{ n.path, n.line }) catch "comment";
+            const n = app.comments.find(id) orelse break :blk i18n.t("comment");
+            break :blk i18n.allocPrint(arena, "comment {s}:{d}", .{ n.path, n.line }) catch i18n.t("comment");
         },
         // The spot the box opened on: the selection is gone by this frame,
         // and asking again would say one line for a range of three.
         .fresh => |at| blk: {
-            const tail: []const u8 = if (at.deleted) " - removed code" else "";
+            const tail: []const u8 = if (at.deleted) i18n.t(" - removed code") else "";
             break :blk (if (at.span > 1)
-                std.fmt.allocPrint(arena, "comment {s}:{d}-{d}{s}", .{ at.path, at.line, at.line + at.span - 1, tail })
+                i18n.allocPrint(arena, "comment {s}:{d}-{d}{s}", .{ at.path, at.line, at.line + at.span - 1, tail })
             else
-                std.fmt.allocPrint(arena, "comment {s}:{d}{s}", .{ at.path, at.line, tail })) catch "comment";
+                i18n.allocPrint(arena, "comment {s}:{d}{s}", .{ at.path, at.line, tail })) catch i18n.t("comment");
         },
     };
 

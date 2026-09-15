@@ -15,6 +15,8 @@ const Allocator = std.mem.Allocator;
 const vaxis = @import("vaxis");
 
 const theme_mod = @import("theme.zig");
+const wrap = @import("wrap.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// Rows per ms squared: a 30-row pane empties in about three quarters of a
 /// second.
@@ -250,12 +252,13 @@ pub const Fall = struct {
     /// mid-word says less than no sentence.
     pub fn restFor(self: *const Fall, width: u16) []const u8 {
         const room = width -| 8;
-        const pick = self.rest();
-        if (pick.len <= room) return pick;
+        const pick = i18n.word(self.rest());
+        if (widthOf(pick) <= room) return pick;
         var shortest: []const u8 = "";
-        for (rests) |line| {
-            if (line.len > room) continue;
-            if (shortest.len == 0 or line.len < shortest.len) shortest = line;
+        for (rests) |en| {
+            const line = i18n.word(en);
+            if (widthOf(line) > room) continue;
+            if (shortest.len == 0 or widthOf(line) < widthOf(shortest)) shortest = line;
         }
         return shortest;
     }
@@ -268,7 +271,7 @@ pub const Fall = struct {
         const ticking = self.clock(&buf);
         const line = self.restFor(win.width);
 
-        const content: u16 = @intCast(@max(line.len, ticking.len));
+        const content: u16 = @max(widthOf(line), widthOf(ticking));
         const width = @min(content + 8, win.width);
         // A row of air above and below, where the pane can spare two.
         const pad: u16 = if (win.height >= 12) 1 else 0;
@@ -344,8 +347,12 @@ fn box(
     }
 }
 
+fn widthOf(text: []const u8) u16 {
+    return wrap.columns(text, .{ .method = .unicode });
+}
+
 fn centred(win: vaxis.Window, row: u16, text: []const u8, style: vaxis.Style) void {
-    const width: u16 = @intCast(@min(text.len, win.width));
+    const width: u16 = @min(win.gwidth(text), win.width);
     _ = win.printSegment(
         .{ .text = text, .style = style },
         .{ .row_offset = row, .col_offset = (win.width -| width) / 2, .wrap = .none },

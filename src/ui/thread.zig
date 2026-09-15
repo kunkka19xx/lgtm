@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const i18n = @import("../i18n/i18n.zig");
 
 const app_mod = @import("app.zig");
 const App = app_mod.App;
@@ -215,17 +216,17 @@ pub fn replyHere(app: *App) void {
 /// How long ago, in one unit: `2d` answers "an hour or a month later" in
 /// three columns where `2 days, 4 hours ago` takes eighteen.
 pub fn ago(buf: []u8, seconds: i64) []const u8 {
-    if (seconds < 0) return "just now";
-    if (seconds < 60) return "just now";
+    if (seconds < 0) return i18n.t("just now");
+    if (seconds < 60) return i18n.t("just now");
     const mins = @divTrunc(seconds, 60);
-    if (mins < 60) return std.fmt.bufPrint(buf, "{d}m ago", .{mins}) catch "";
+    if (mins < 60) return i18n.bufPrint(buf, "{d}m ago", .{mins}) catch "";
     const hours = @divTrunc(mins, 60);
-    if (hours < 24) return std.fmt.bufPrint(buf, "{d}h ago", .{hours}) catch "";
+    if (hours < 24) return i18n.bufPrint(buf, "{d}h ago", .{hours}) catch "";
     const days = @divTrunc(hours, 24);
-    if (days < 7) return std.fmt.bufPrint(buf, "{d}d ago", .{days}) catch "";
+    if (days < 7) return i18n.bufPrint(buf, "{d}d ago", .{days}) catch "";
     const weeks = @divTrunc(days, 7);
-    if (days < 365) return std.fmt.bufPrint(buf, "{d}w ago", .{weeks}) catch "";
-    return std.fmt.bufPrint(buf, "{d}y ago", .{@divTrunc(days, 365)}) catch "";
+    if (days < 365) return i18n.bufPrint(buf, "{d}w ago", .{weeks}) catch "";
+    return i18n.bufPrint(buf, "{d}y ago", .{@divTrunc(days, 365)}) catch "";
 }
 
 /// The overlay for one frame, or null when it is not open.
