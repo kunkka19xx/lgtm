@@ -26,6 +26,7 @@ const Allocator = std.mem.Allocator;
 const proc = @import("../io/proc.zig");
 const gitobj = @import("gitobj.zig");
 const snapshot = @import("snapshot.zig");
+const i18n = @import("../i18n/i18n.zig");
 
 /// One turn, as a row wants it.
 pub const Turn = struct {
@@ -301,10 +302,10 @@ pub fn turnFor(pairs: []const gitobj.Entry, session: []const u8, oid: []const u8
 pub fn age(buf: []u8, when_s: i64, now_s: i64) []const u8 {
     const d = now_s - when_s;
     if (when_s == 0 or d < 0) return "";
-    if (d < 60) return "just now";
-    if (d < 3600) return std.fmt.bufPrint(buf, "{d}m ago", .{@divTrunc(d, 60)}) catch "";
-    if (d < 86400) return std.fmt.bufPrint(buf, "{d}h ago", .{@divTrunc(d, 3600)}) catch "";
-    return std.fmt.bufPrint(buf, "{d}d ago", .{@divTrunc(d, 86400)}) catch "";
+    if (d < 60) return i18n.t("just now");
+    if (d < 3600) return i18n.bufPrint(buf, "{d}m ago", .{@divTrunc(d, 60)}) catch "";
+    if (d < 86400) return i18n.bufPrint(buf, "{d}h ago", .{@divTrunc(d, 3600)}) catch "";
+    return i18n.bufPrint(buf, "{d}d ago", .{@divTrunc(d, 86400)}) catch "";
 }
 
 const testing = std.testing;

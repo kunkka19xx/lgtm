@@ -13,6 +13,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const event = @import("../core/event.zig");
 const fuzzy = @import("fuzzy.zig");
+const i18n = @import("../i18n/i18n.zig");
 const keymap = @import("keymap.zig");
 
 const Binding = keymap.Binding;
@@ -200,11 +201,12 @@ pub fn hints(bindings: []const Binding, mode: event.Mode, buf: []u8) []const u8 
                 e += keys.len;
             }
         }
-        if (e + 1 + label.len > entry.len) continue;
+        const shown = i18n.word(label);
+        if (e + 1 + shown.len > entry.len) continue;
         entry[e] = ' ';
         e += 1;
-        @memcpy(entry[e..][0..label.len], label);
-        e += label.len;
+        @memcpy(entry[e..][0..shown.len], shown);
+        e += shown.len;
 
         const sep: usize = if (n == 0) 0 else 2;
         if (n + sep + e > buf.len) break;
@@ -275,8 +277,9 @@ fn ranked(bindings: []const Binding, b: Binding, mode: event.Mode, group: ?keyma
     const keys = keysFor(bindings, b.command, mode, kbuf);
     // The filter runs over the keys as well as the description, so `spc` finds
     // the leader bindings and `ctrl` does not have to be spelled `<C-`.
-    var hay: [max_row_keys_bytes + 128]u8 = undefined;
-    const text = std.fmt.bufPrint(&hay, "{s} {s}", .{ keys, d }) catch keys;
+    var hay: [max_row_keys_bytes + 512]u8 = undefined;
+    const local = alsoShown(d);
+    const text = std.fmt.bufPrint(&hay, "{s} {s}{s}{s}", .{ keys, d, if (local.len > 0) " " else "", local }) catch keys;
     const tier = fuzzy.match(text, filter) orelse return null;
     return .{ .keys = keys, .desc = d, .tier = tier };
 }
@@ -323,19 +326,25 @@ fn composeShown(bindings: []const Binding, mode: event.Mode, group: ?keymap.Grou
         const d = b.desc orelse continue;
         const keys = keysFor(bindings, b.command, .note_input, &kbuf);
 
-        var hay: [200]u8 = undefined;
-        const text = std.fmt.bufPrint(&hay, "{s} {s}{s}", .{ keys, compose_prefix, d }) catch keys;
+        var hay: [max_row_keys_bytes + 512]u8 = undefined;
+        const local = alsoShown(d);
+        const text = std.fmt.bufPrint(&hay, "{s} {s}{s}{s}{s}", .{ keys, compose_prefix, d, if (local.len > 0) " " else "", local }) catch keys;
         if (fuzzy.match(text, filter) == null) continue;
         n += 1;
         if (out) |list| {
             const a2 = arena.?;
             try list.append(a2, .{
                 .keys = try a2.dupe(u8, keys),
-                .desc = try std.fmt.allocPrint(a2, "{s}{s}", .{ compose_prefix, d }),
+                .desc = try std.fmt.allocPrint(a2, "{s}{s}", .{ i18n.t(compose_prefix), i18n.word(d) }),
             });
         }
     }
     return n;
+}
+
+fn alsoShown(d: []const u8) []const u8 {
+    const w = i18n.word(d);
+    return if (w.ptr == d.ptr) "" else w;
 }
 
 pub fn helpCount(bindings: []const Binding, mode: event.Mode, group: ?keymap.Group, filter: []const u8) usize {
@@ -650,6 +659,29 @@ test "the count and the list agree, whatever the filter" {
         const list = try helpEntries(default_bindings, .normal, null, q, arena);
         try testing.expectEqual(list.len, helpCount(default_bindings, .normal, null, q));
     }
+}
+
+test "in japanese the strip and the compose rows are translated, the rest at the draw" {
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    var buf: [160]u8 = undefined;
+    try testing.expectEqualStrings("<Esc> 取消  :q 終了  ? ヘルプ", hints(default_bindings, .visual, &buf));
+
+    const rows = try helpEntries(default_bindings, .normal, .send, "", a.allocator());
+    var saw_newline = false;
+    for (rows) |e| {
+        if (std.mem.eql(u8, e.desc, "入力欄で: 改行")) saw_newline = true;
+        try testing.expect(!std.mem.eql(u8, e.desc, "参照をコピー"));
+    }
+    try testing.expect(saw_newline);
+    try testing.expectEqualStrings("参照をコピー", i18n.word("copy the reference"));
+
+    const hit = try helpEntries(default_bindings, .normal, null, "参照", a.allocator());
+    try testing.expect(hit.len > 0);
+    try testing.expectEqual(hit.len, helpCount(default_bindings, .normal, null, "参照"));
 }
 
 test "every advertised key also explains itself in the overlay" {

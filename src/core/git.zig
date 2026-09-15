@@ -621,10 +621,8 @@ pub fn fetchRef(gpa: Allocator, io: std.Io, remote: []const u8, ref: []const u8)
     out.deinit(gpa);
 }
 
-/// One commit of a static review, as a row wants it.
 pub const Commit = struct {
     oid: []const u8,
-    /// Committer date, seconds since the epoch.
     when_s: i64 = 0,
     subject: []const u8 = "",
     files: u32 = 0,
@@ -632,8 +630,7 @@ pub const Commit = struct {
     removed: u32 = 0,
 };
 
-/// The commits between two refs, oldest first, so commit N is `commits[N - 1]`.
-/// Every slice borrows from `text`.
+/// Oldest first; slices borrow from `text`.
 pub const Log = struct {
     text: []u8,
     commits: []Commit,
@@ -645,9 +642,6 @@ pub const Log = struct {
     }
 };
 
-/// `git log base..target` with line counts: one subprocess however many
-/// commits. A merge counts against its first parent, which is what showing it
-/// diffs against.
 pub fn commitLog(gpa: Allocator, io: std.Io, base: []const u8, target: []const u8) Error!Log {
     const range = try std.fmt.allocPrint(gpa, "{s}..{s}", .{ base, target });
     defer gpa.free(range);
@@ -661,8 +655,6 @@ pub fn commitLog(gpa: Allocator, io: std.Io, base: []const u8, target: []const u
     return .{ .text = out.stdout, .commits = try parseLog(gpa, out.stdout) };
 }
 
-/// `\0<oid> <ct> <subject>` then `<added>\t<removed>\t<path>` rows, per commit.
-/// A subject cannot hold a NUL, so the record boundary is never a guess.
 pub fn parseLog(gpa: Allocator, text: []const u8) Allocator.Error![]Commit {
     var out: std.ArrayList(Commit) = .empty;
     errdefer out.deinit(gpa);
@@ -684,7 +676,6 @@ pub fn parseLog(gpa: Allocator, text: []const u8) Allocator.Error![]Commit {
             const a = it.next() orelse continue;
             const r = it.next() orelse continue;
             if (it.next() == null) continue;
-            // `-` for a binary file: a file changed, with no lines to count.
             c.files += 1;
             c.added +|= std.fmt.parseInt(u32, a, 10) catch 0;
             c.removed +|= std.fmt.parseInt(u32, r, 10) catch 0;
@@ -753,11 +744,9 @@ test "a log reads as commits, oldest first, with their counts" {
     try testing.expectEqualStrings("aaa", got[0].oid);
     try testing.expectEqual(@as(i64, 100), got[0].when_s);
     try testing.expectEqualStrings("feat: first one", got[0].subject);
-    // The binary file is a file changed, and no lines.
     try testing.expectEqual(@as(u32, 2), got[0].files);
     try testing.expectEqual(@as(u32, 3), got[0].added);
     try testing.expectEqual(@as(u32, 1), got[0].removed);
-    // A commit that changed nothing is still a commit.
     try testing.expectEqual(@as(u32, 0), got[1].files);
     try testing.expectEqualStrings("fix: a subject  with  spaces", got[2].subject);
     try testing.expectEqual(@as(u32, 4), got[2].removed);
