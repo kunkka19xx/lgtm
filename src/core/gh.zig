@@ -36,7 +36,40 @@ pub const Error = error{
     /// the caller can do nothing different about any of them, and `gh` says
     /// which on stderr.
     GhFailed,
+    /// `gh` was still thinking when the deadline passed, and has been killed.
+    /// Its own error because the reader's next move differs: nothing is wrong
+    /// with the request or the login, and the key is worth pressing again.
+    GhTimedOut,
 } || Allocator.Error;
+
+/// Runs `gh` and folds every way it can go wrong into the two errors above,
+/// in one place: a deadline that fired and a missing `gh` are different facts.
+fn call(gpa: Allocator, io: std.Io, argv: []const []const u8, max_output: usize) Error!proc.Output {
+    const out = proc.runWithin(gpa, io, argv, max_output, proc.network_timeout) catch |err| return switch (err) {
+        error.Timeout => error.GhTimedOut,
+        else => error.GhFailed,
+    };
+    errdefer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
+    return out;
+}
+
+/// The same, for the calls that hand `gh` a JSON body on stdin.
+fn callWithInput(
+    gpa: Allocator,
+    io: std.Io,
+    argv: []const []const u8,
+    payload: []const u8,
+    max_output: usize,
+) Error!proc.Output {
+    const out = proc.runWithInputWithin(gpa, io, argv, payload, max_output, proc.network_timeout) catch |err| return switch (err) {
+        error.Timeout => error.GhTimedOut,
+        else => error.GhFailed,
+    };
+    errdefer out.deinit(gpa);
+    if (out.exit_code != 0) return error.GhFailed;
+    return out;
+}
 
 pub const Pr = struct {
     number: u32,
@@ -157,9 +190,8 @@ pub fn parseList(arena: Allocator, text: []const u8) Allocator.Error![]Pr {
 
 pub fn view(gpa: Allocator, arena: Allocator, io: std.Io, number: ?u32) Error!Pr {
     const argv = try viewArgv(arena, number);
-    const out = proc.run(gpa, io, argv, view_output_max) catch return error.GhFailed;
+    const out = try call(gpa, io, argv, view_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
     return parseView(try arena.dupe(u8, out.stdout)) orelse error.GhFailed;
 }
 
@@ -208,9 +240,8 @@ pub const ResolveError = Error || git.Error;
 
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all: bool) Error![]Pr {
     const argv = try listArgv(arena, all);
-    const out = proc.run(gpa, io, argv, list_output_max) catch return error.GhFailed;
+    const out = try call(gpa, io, argv, list_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
     return parseList(arena, try arena.dupe(u8, out.stdout));
 }
 
@@ -277,6 +308,15 @@ pub const Remark = struct {
     /// `null` for the line and keeps the original, which is the same fact
     /// `comments.State.stale` records.
     outdated: bool,
+    /// The remark this one answers, or zero when it starts a thread. Without
+    /// it, a reply is an unrelated row that happens to share a line.
+    reply_to: u64 = 0,
+    /// Seconds since the epoch, from `created_at`. What orders a thread: ids
+    /// rising with time is not a guarantee worth resting on.
+    created: i64 = 0,
+    /// The code the remark was written against, as the forge kept it: for a
+    /// stale remark our own diff no longer holds the line.
+    hunk: []const u8 = "",
 };
 
 /// The fields, in the order `parseRemarks` reads them, with the body last so
@@ -287,7 +327,8 @@ pub const Remark = struct {
 /// it back. That is the whole reason the rows can be tab-separated at all.
 const remark_query = ".[] | [(.id|tostring), .path, ((.line // .original_line // 0)|tostring), " ++
     "(if .line == null then \"1\" else \"0\" end), .user.login, " ++
-    "((.start_line // .original_start_line // 0)|tostring), .body] | @tsv";
+    "((.start_line // .original_start_line // 0)|tostring), ((.in_reply_to_id // 0)|tostring), " ++
+    "(.created_at // \"\"), (.diff_hunk // \"\"), .body] | @tsv";
 
 /// `gh api repos/{owner}/{repo}/pulls/{n}/comments`
 ///
@@ -328,6 +369,35 @@ fn unescapeTsv(arena: Allocator, text: []const u8) Allocator.Error![]const u8 {
     return out.toOwnedSlice(arena);
 }
 
+/// `2024-05-01T12:33:21Z` as seconds since the epoch, and zero for anything
+/// else - which sorts that remark to the front rather than refusing the
+/// import over a date. Seconds rather than text because all anything does
+/// with it is compare and subtract.
+pub fn parseTime(text: []const u8) i64 {
+    if (text.len < 19 or text[4] != '-' or text[7] != '-' or text[10] != 'T') return 0;
+    const y = std.fmt.parseInt(i64, text[0..4], 10) catch return 0;
+    const mo = std.fmt.parseInt(i64, text[5..7], 10) catch return 0;
+    const d = std.fmt.parseInt(i64, text[8..10], 10) catch return 0;
+    const h = std.fmt.parseInt(i64, text[11..13], 10) catch return 0;
+    const mi = std.fmt.parseInt(i64, text[14..16], 10) catch return 0;
+    const sec = std.fmt.parseInt(i64, text[17..19], 10) catch return 0;
+    if (mo < 1 or mo > 12 or d < 1 or d > 31) return 0;
+    return daysFromCivil(y, mo, d) * std.time.s_per_day + h * 3600 + mi * 60 + sec;
+}
+
+/// Days from 1970-01-01 to a civil date, by the shift-the-year-to-March
+/// method: the leap day lands at the end, so there is no table and no
+/// special case for February.
+fn daysFromCivil(y: i64, m: i64, d: i64) i64 {
+    const shifted = y - @intFromBool(m <= 2);
+    const era = @divFloor(shifted, 400);
+    const yoe = shifted - era * 400;
+    const mp = @mod(m + 9, 12);
+    const doy = @divTrunc(153 * mp + 2, 5) + d - 1;
+    const doe = yoe * 365 + @divTrunc(yoe, 4) - @divTrunc(yoe, 100) + doy;
+    return era * 146097 + doe - 719468;
+}
+
 pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark {
     var out: std.ArrayList(Remark) = .empty;
     var rows = std.mem.splitScalar(u8, text, '\n');
@@ -340,6 +410,9 @@ pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark
         const outdated = std.mem.eql(u8, it.next() orelse continue, "1");
         const author = it.next() orelse continue;
         const start = std.fmt.parseInt(u32, it.next() orelse continue, 10) catch 0;
+        const reply_to = std.fmt.parseInt(u64, it.next() orelse continue, 10) catch 0;
+        const created = parseTime(it.next() orelse "");
+        const code = try unescapeTsv(arena, it.next() orelse "");
         const body = try unescapeTsv(arena, it.rest());
         if (path.len == 0 or body.len == 0) continue;
         try out.append(arena, .{
@@ -352,6 +425,9 @@ pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark
             .author = author,
             .body = body,
             .outdated = outdated,
+            .reply_to = reply_to,
+            .created = created,
+            .hunk = code,
         });
     }
     return out.toOwnedSlice(arena);
@@ -359,9 +435,8 @@ pub fn parseRemarks(arena: Allocator, text: []const u8) Allocator.Error![]Remark
 
 pub fn remarks(gpa: Allocator, arena: Allocator, io: std.Io, repo: []const u8, number: u32) Error![]Remark {
     const argv = try remarksArgv(arena, repo, number);
-    const out = proc.run(gpa, io, argv, list_output_max) catch return error.GhFailed;
+    const out = try call(gpa, io, argv, list_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
     return parseRemarks(arena, try arena.dupe(u8, out.stdout));
 }
 
@@ -375,9 +450,8 @@ pub fn viewerArgv(arena: Allocator) Allocator.Error![]const []const u8 {
 /// things.
 pub fn viewer(gpa: Allocator, arena: Allocator, io: std.Io) Error![]const u8 {
     const argv = try viewerArgv(arena);
-    const out = proc.run(gpa, io, argv, view_output_max) catch return error.GhFailed;
+    const out = try call(gpa, io, argv, view_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
     return arena.dupe(u8, std.mem.trim(u8, out.stdout, " \t\r\n"));
 }
 
@@ -398,9 +472,49 @@ pub fn amend(
     payload: []const u8,
 ) Error!void {
     const argv = try amendArgv(arena, repo, id);
-    const out = proc.runWithInput(gpa, io, argv, payload, view_output_max) catch return error.GhFailed;
+    const out = try callWithInput(gpa, io, argv, payload, view_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
+}
+
+/// `gh api --method DELETE repos/{owner}/{repo}/pulls/comments/{id}`
+pub fn dropArgv(arena: Allocator, repo: []const u8, id: u64) Allocator.Error![]const []const u8 {
+    const path = try std.fmt.allocPrint(arena, "repos/{s}/pulls/comments/{d}", .{ repo, id });
+    return arena.dupe([]const u8, &.{ "gh", "api", "--method", "DELETE", path });
+}
+
+/// One remark of the reader's own, off the request. The store keeps it until
+/// this returns: a delete that failed must not take the only copy with it.
+pub fn drop(gpa: Allocator, arena: Allocator, io: std.Io, repo: []const u8, id: u64) Error!void {
+    const argv = try dropArgv(arena, repo, id);
+    const out = try call(gpa, io, argv, view_output_max);
+    defer out.deinit(gpa);
+}
+
+pub fn replyArgv(arena: Allocator, repo: []const u8, number: u32, root: u64) Allocator.Error![]const []const u8 {
+    const path = try std.fmt.allocPrint(arena, "repos/{s}/pulls/{d}/comments/{d}/replies", .{ repo, number, root });
+    // `--jq` so the answer is the new id and nothing else: it is the only
+    // field of the comment the store does not already know.
+    return arena.dupe([]const u8, &.{ "gh", "api", "--method", "POST", path, "--input", "-", "--jq", ".id" });
+}
+
+/// A message on an existing thread, answering with the id the forge gave it:
+/// a reply invisible until the request is reopened reads as one that failed.
+pub fn reply(
+    gpa: Allocator,
+    arena: Allocator,
+    io: std.Io,
+    repo: []const u8,
+    number: u32,
+    root: u64,
+    payload: []const u8,
+) Error!u64 {
+    const argv = try replyArgv(arena, repo, number, root);
+    const out = try callWithInput(gpa, io, argv, payload, view_output_max);
+    defer out.deinit(gpa);
+    const text = std.mem.trim(u8, out.stdout, " \t\r\n");
+    // Posted by the time this parses, so a surprising answer is a zero -
+    // "cannot show it here" - rather than an error.
+    return std.fmt.parseInt(u64, text, 10) catch 0;
 }
 
 /// What a review says when it is submitted.
@@ -518,12 +632,22 @@ pub fn post(
     payload: []const u8,
 ) Error!void {
     const argv = try postArgv(arena, repo, number);
-    const out = proc.runWithInput(gpa, io, argv, payload, view_output_max) catch return error.GhFailed;
+    const out = try callWithInput(gpa, io, argv, payload, view_output_max);
     defer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
 }
 
 const testing = std.testing;
+
+test "a delete names the one comment and the method that removes it" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    const argv = try dropArgv(a.allocator(), "o/r", 4242);
+    try testing.expectEqualStrings("DELETE", argv[3]);
+    // The comment's own endpoint, not the request's collection: the number
+    // the reader sees is the request, and this is keyed on the remark.
+    try testing.expectEqualStrings("repos/o/r/pulls/comments/4242", argv[4]);
+}
 
 test "a resolve names the pull request or the current branch's" {
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
@@ -722,10 +846,11 @@ test "the remarks already on a request come back with their lines" {
     defer a.deinit();
     const arena = a.allocator();
 
-    const rows = try parseRemarks(arena, "9001\tsrc/toml.zig\t221\t1\tkunkka19xx\t216\tthe list body is read as settings\n" ++
-        "9002\tdocs/CONFIG.md\t26\t0\tsomeone\t0\tline one\\nline two\ttabbed\n" ++
+    // id, path, line, outdated, author, start, in_reply_to, created, hunk, body.
+    const rows = try parseRemarks(arena, "9001\tsrc/toml.zig\t221\t1\tkunkka19xx\t216\t0\t2024-05-01T12:33:21Z\t@@ -1 +1 @@\tthe list body is read as settings\n" ++
+        "9002\tdocs/CONFIG.md\t26\t0\tsomeone\t0\t9001\t2024-05-02T12:33:21Z\t\tline one\\nline two\ttabbed\n" ++
         "\n" ++
-        "9003\tsrc/config.zig\t8\t0\tme\t0\tsafe to delete\n");
+        "9003\tsrc/config.zig\t8\t0\tme\t0\t0\t\t\tsafe to delete\n");
     try testing.expectEqual(@as(usize, 3), rows.len);
 
     // The id comes with it, because that is what an edit names.
@@ -745,6 +870,42 @@ test "the remarks already on a request come back with their lines" {
     try testing.expectEqualStrings("someone", rows[1].author);
     try testing.expect(!rows[1].outdated);
     try testing.expectEqual(@as(u32, 1), rows[1].span);
+
+    // A reply knows what it answers and when it was written.
+    try testing.expectEqual(@as(u64, 0), rows[0].reply_to);
+    try testing.expectEqual(@as(u64, 9001), rows[1].reply_to);
+    try testing.expect(rows[1].created > rows[0].created);
+    // The forge's own copy of the code, which is all there is to show for a
+    // remark whose line has since gone.
+    try testing.expectEqualStrings("@@ -1 +1 @@", rows[0].hunk);
+    try testing.expectEqualStrings("", rows[1].hunk);
+    // A date the forge did not give is zero rather than a refused import.
+    try testing.expectEqual(@as(i64, 0), rows[2].created);
+}
+
+test "a forge timestamp reads as seconds since the epoch" {
+    // The epoch itself, a leap day, and the turn of a century that is not a
+    // leap year - the three the shifted-year arithmetic exists to get right.
+    try testing.expectEqual(@as(i64, 0), parseTime("1970-01-01T00:00:00Z"));
+    try testing.expectEqual(@as(i64, 1), parseTime("1970-01-01T00:00:01Z"));
+    try testing.expectEqual(@as(i64, 1714566801), parseTime("2024-05-01T12:33:21Z"));
+    try testing.expectEqual(@as(i64, 1709164800), parseTime("2024-02-29T00:00:00Z"));
+    try testing.expectEqual(@as(i64, 951868800), parseTime("2000-03-01T00:00:00Z"));
+
+    // Anything that is not that shape is zero, which orders a remark to the
+    // front of its thread rather than failing the import over a date.
+    try testing.expectEqual(@as(i64, 0), parseTime(""));
+    try testing.expectEqual(@as(i64, 0), parseTime("yesterday"));
+    try testing.expectEqual(@as(i64, 0), parseTime("2024-13-01T00:00:00Z"));
+}
+
+test "the query asks for the fields a thread is made of, body last" {
+    // Body last is load-bearing: `it.rest()` is what lets it keep its own
+    // tabs, and it can only be the rest if nothing follows it.
+    try testing.expect(std.mem.indexOf(u8, remark_query, ".in_reply_to_id") != null);
+    try testing.expect(std.mem.indexOf(u8, remark_query, ".created_at") != null);
+    try testing.expect(std.mem.indexOf(u8, remark_query, ".diff_hunk") != null);
+    try testing.expect(std.mem.endsWith(u8, remark_query, ".body] | @tsv"));
 }
 
 test "a remark full of backslashes survives the round trip" {
@@ -755,7 +916,7 @@ test "a remark full of backslashes survives the round trip" {
     // A suggestion block of Zig multi-line strings, which is the shape of a
     // real review remark on this codebase. Only the four escapes `@tsv`
     // writes are escapes; everything else after a backslash is content.
-    const rows = try parseRemarks(arena, "77\ta.zig\t1\t0\tme\t0\t```suggestion\\n    \\\\\\\\ a doc line\\n```\n");
+    const rows = try parseRemarks(arena, "77\ta.zig\t1\t0\tme\t0\t0\t\t\t```suggestion\\n    \\\\\\\\ a doc line\\n```\n");
     try testing.expectEqual(@as(usize, 1), rows.len);
     try testing.expectEqualStrings("```suggestion\n    \\\\ a doc line\n```", rows[0].body);
 }
@@ -827,4 +988,21 @@ test "an edit names the one comment and the method that changes it" {
     const who = try viewerArgv(a.allocator());
     try testing.expectEqualStrings("user", who[2]);
     try testing.expectEqualStrings(".login", who[4]);
+}
+
+test "a reply is keyed on the thread's root, and asks for the new id alone" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const argv = try replyArgv(a.allocator(), "o/r", 16, 900);
+
+    try testing.expectEqualStrings("POST", argv[3]);
+    // The root's id, not the pull request's comments collection: a POST to
+    // that one starts a thread rather than joining this one.
+    try testing.expectEqualStrings("repos/o/r/pulls/16/comments/900/replies", argv[4]);
+    // The body arrives on stdin, so a remark containing anything a shell
+    // would read never reaches one.
+    try testing.expectEqualStrings("--input", argv[5]);
+    try testing.expectEqualStrings("-", argv[6]);
+    try testing.expectEqualStrings("--jq", argv[7]);
+    try testing.expectEqualStrings(".id", argv[8]);
 }

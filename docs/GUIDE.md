@@ -209,7 +209,8 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>gc` | suggest a change: a comment already holding the selected lines in a suggestion block |
 | | the box's title says what the comment covers: `a.txt:5` for one line, `a.txt:5-6` for a range |
 | `]c` `[c` | walk them |
-| `<Space>vc` | open the nearest one to read or edit. A remark from the request opens to be read only |
+| `<Space>vc` | open the nearest one to read or edit. On a line carrying a conversation it opens the thread instead |
+| `<Space>rc` | reply to the one here, on the request |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send just this one, now |
 | `<Space>dc` | delete the one here |
@@ -242,12 +243,48 @@ spelling, and `:pr 16` still goes straight to one you already know.
 
 **Opening one reads the review that is already there.** Every inline remark
 anybody left comes down with the diff and sits in the gutter beside your own,
-in the comment list, and on `]c`. They carry the author's name, and one whose
-line has gone from the diff arrives stale rather than silently placed somewhere
-plausible. `<Space>vc` opens one to read, in the same box your own comments use
-and with the same motions, titled `@author path:line - VIEW`; `<Esc>` closes it.
-Somebody else's you cannot edit or delete: it lives on the request, and a
-changed copy here would say something its author never wrote.
+in the comment list, and on `]c`. Replies come down with the remarks they
+answer, so a thread arrives as a thread: the messages are in the order they
+were written, and `]c` walks every one of them rather than stopping at the
+first on a line. They carry the author's name, and one whose line has gone from
+the diff arrives stale rather than silently placed somewhere plausible. Where a
+line carries several remarks the gutter dot shows the worst state on it, so a
+stale remark under an open one is still visible.
+
+**`<Space>vc` on a line carrying a conversation opens the thread.** Every
+message stacked, author and how long ago on each, the code the first one was
+written against above them, and your own marked `(you)` and selected when there
+is one. `j` and `k` move between messages, `<C-d>` and `<C-u>` scroll a taller
+thread half a box at a time, `gg` and `G` reach the ends, `<CR>` opens the
+selected message to edit, `r` answers the conversation, `d` deletes the
+selected message, and `<Esc>` closes. `d` rather than `<C-d>`, which is the
+half page here as it is in the diff.
+
+The thread is also how you say *which* remark you mean. A line on an open
+request commonly carries somebody else's and your own; the selection is a
+comment rather than a line, and it stays behind when the overlay closes, so
+`<Space>dc` afterwards deletes the one you had highlighted. On a line carrying
+one remark `<Space>vc` still opens the box directly, titled
+`@author path:line - VIEW`. Somebody else's you cannot edit or delete: it lives
+on the request, and a changed copy here would say something its author never
+wrote.
+
+**`r` replies.** A review is a conversation, so the overlay is not only a
+reading view: `r` on any message opens an empty box aimed at the thread, titled
+`reply to @author on #16 path:line`, and `<CR>` says `reply on the request`. It
+goes to GitHub as a reply to the remark that started the conversation, however
+deep in the thread you pressed it, which is the same thing the web does. The
+message appears on the thread as soon as the forge answers with an id for it,
+so there is no reopening the request to see what you just wrote. `<C-p>` does
+the same thing as `<CR>` here, because on a box that only ever goes to the
+forge the key that means "post this" has nowhere else to mean.
+
+`<Space>rc` is the same key outside the overlay, for the ordinary case of one
+remark alone on a line: that never opens a thread, and it is the remark most
+worth answering. A reply lives on the request and nowhere else, so `save + send`
+and `save + post` are not offered, `.lgtm/` never writes it, and a call that
+fails leaves the thread exactly as GitHub still has it. A remark you wrote here
+and have not posted yet has no thread to answer, and says so.
 
 **Your own remarks on the request you can edit.** `lgtm` asks `gh` who you are
 when it opens a request, so one you left on GitHub opens in the box the ordinary
@@ -255,12 +292,30 @@ way, titled `your remark on #16 path:line`, and `<CR>` says `save on the
 request`. The text goes to the forge and the copy in the pane waits to hear that
 it landed, so a call that fails leaves a remark here saying exactly what GitHub
 still says. `save + send` and `save + post` are not offered: it is already
-posted, and `<Space>sc` is how it reaches your agent. Deleting one is still
-GitHub's to do. If `gh` cannot say who you are, every remark on the request
+posted, and `<Space>sc` is how it reaches your agent.
+
+**Deleting one takes it off the request.** `d` in the thread, `<C-d>` in the
+comment list and `<Space>dc` in the diff all reach the same place: your own
+remark on a request is deleted where it lives, with `DELETE` to the forge,
+because removing only the copy here would leave it on GitHub and bring it back
+on the next read. It asks first - `y` deletes, any other key cancels - since
+nothing here can undo it and everybody watching the request sees it go. Asked
+from a box - the thread or the comment list - the question takes its top border
+rather than the status row under it, which is the row the box is covering. The
+copy in the pane waits for the forge either way, so a call that fails leaves
+the remark exactly where it still is. Somebody else's is refused: it lives on
+the request, and it is not yours to take down. If `gh` cannot say who you are, every remark on the request
 opens to be read, which errs the safe way. They are never posted
 back, and they are not written to `.lgtm/`, so opening the request again reads
 them fresh rather than showing you yesterday's. If `gh` cannot reach the forge
 the diff still opens and the tool says only that it could not read them.
+
+**The review file says who asked for what.** `<C-s>` on a request writes the
+remarks already on it alongside your own, so the agent gets the whole review -
+and each one carries its author, with your own left unattributed. A thread is
+written as one conversation rather than as unrelated bullets that happen to
+share a line, and the sentence handed to the agent gives the split rather than
+one total: `3 of mine, 4 from the request`.
 
 **Your own remarks get a second home.** `:post` hands the collected ones to the
 request as one review; `:approve` and `:request-changes` are the same batch with
@@ -481,7 +536,8 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 |---|---|
 | `<Space>c` | write one here |
 | `<Space>gc` | suggest a change: a comment holding the selected lines |
-| `<Space>vc` | open the nearest to read or edit |
+| `<Space>vc` | open the nearest to read or edit, or its thread |
+| `<Space>rc` | reply to the one here, on the request |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send this one on its own |
 | `<Space>dc` | delete the one here |

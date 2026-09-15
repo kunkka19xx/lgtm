@@ -79,6 +79,11 @@ pub const Command = enum {
     comment_drop,
     comment_view,
     comment_delete,
+    /// Inside the thread overlay, where movement is the list's own commands:
+    /// only acting on the selected message and closing are its own.
+    thread_select,
+    thread_close,
+    thread_reply,
     comment_suggest,
     next_comment,
     prev_comment,
@@ -297,7 +302,10 @@ pub const Modes = packed struct(u8) {
     /// Inside the compose box. Only its feature keys live here; every other
     /// key is text or a motion over text.
     compose: bool = false,
-    _pad: u3 = 0,
+    /// The thread overlay. It has no filter line, so unlike the two lists it
+    /// can have `j` and `k` themselves rather than their capitals.
+    thread: bool = false,
+    _pad: u2 = 0,
 
     pub const both: Modes = .{ .normal = true, .visual = true };
     pub const normal_only: Modes = .{ .normal = true };
@@ -316,6 +324,9 @@ pub const Modes = packed struct(u8) {
     /// Inside the compose box, and nowhere else: these keys have to stay free
     /// for the review, and the review's keys have to stay typeable in a box.
     pub const compose_only: Modes = .{ .compose = true };
+    /// Inside the thread overlay. Nothing else is live while it is up, the
+    /// way nothing else is live under `?`.
+    pub const thread_only: Modes = .{ .thread = true };
 
     pub fn has(self: Modes, mode: event.Mode) bool {
         return switch (mode) {
@@ -324,6 +335,7 @@ pub const Modes = packed struct(u8) {
             .help => self.help,
             .finder => self.finder,
             .note_input => self.compose,
+            .thread => self.thread,
             // The prompt modes never reach the keymap: `prompt.zig` takes the
             // keys, because they are text rather than actions.
             else => false,
@@ -511,6 +523,9 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('p'), c('c') }, .command = .prev_comment, .group = .comment },
     .{ .chords = &.{ leader, c('g'), c('c') }, .command = .comment_suggest, .desc = "suggest a change to these lines, as a comment holding them", .group = .comment },
     .{ .chords = &.{ leader, c('v'), c('c') }, .command = .comment_view, .desc = "open the nearest comment to read or edit", .group = .comment },
+    // Outside the overlay too: one remark on a line opens in the box rather
+    // than in a thread, and that is exactly the remark most worth answering.
+    .{ .chords = &.{ leader, c('r'), c('c') }, .command = .thread_reply, .desc = "reply to the comment here, on the request", .group = .comment },
     .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
     .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
     .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .comment },
@@ -648,6 +663,30 @@ pub const default_bindings: []const Binding = &.{
 
     .{ .chords = &.{c(event.code.tab)}, .command = .list_down, .modes = Modes.lists },
     .{ .chords = &.{shift(event.code.tab)}, .command = .list_up, .modes = Modes.lists },
+
+    // The thread overlay. `j` and `k` themselves rather than their capitals:
+    // unlike the two lists, this box has no filter line eating the letters.
+    .{ .chords = &.{c('j')}, .command = .list_down, .modes = Modes.thread_only, .desc = "move", .group = .comment },
+    .{ .chords = &.{c('k')}, .command = .list_up, .modes = Modes.thread_only, .desc = "move", .group = .comment },
+    .{ .chords = &.{c(event.code.enter)}, .command = .thread_select, .modes = Modes.thread_only, .desc = "edit", .group = .comment },
+    .{ .chords = &.{c('r')}, .command = .thread_reply, .modes = Modes.thread_only, .desc = "reply", .group = .comment },
+    // `d`, not `<C-d>`: that is the half page here as it is in the diff, and
+    // the list only spells delete as a chord because every letter in it is
+    // filter text. This box has no filter line, which is why `j` and `k` are
+    // themselves too.
+    .{ .chords = &.{c('d')}, .command = .comment_delete, .modes = Modes.thread_only, .desc = "delete", .group = .comment },
+    .{ .chords = &.{c(event.code.escape)}, .command = .thread_close, .modes = Modes.thread_only, .desc = "close", .group = .comment },
+    // Unadvertised: the footer has room for the three above on an
+    // eighty-column pane, and these are the keys that need no telling.
+    .{ .chords = &.{c('q')}, .command = .thread_close, .modes = Modes.thread_only },
+    .{ .chords = &.{c(event.code.down)}, .command = .list_down, .modes = Modes.thread_only },
+    .{ .chords = &.{c(event.code.up)}, .command = .list_up, .modes = Modes.thread_only },
+    // By rows, not by messages: one reply can be taller than the box, and a
+    // key that moved the selection would skip what is still being read.
+    .{ .chords = &.{ctrl('d')}, .command = .page_down, .modes = Modes.thread_only },
+    .{ .chords = &.{ctrl('u')}, .command = .page_up, .modes = Modes.thread_only },
+    .{ .chords = &.{ c('g'), c('g') }, .command = .top, .modes = Modes.thread_only },
+    .{ .chords = &.{c('G')}, .command = .bottom, .modes = Modes.thread_only },
 };
 
 pub const Match = union(enum) {
@@ -899,7 +938,7 @@ test "every binding is live in at least one mode" {
     // one that was.
     for (default_bindings) |b| {
         try testing.expect(b.modes.normal or b.modes.visual or b.modes.help or
-            b.modes.finder or b.modes.compose);
+            b.modes.finder or b.modes.compose or b.modes.thread);
     }
 }
 

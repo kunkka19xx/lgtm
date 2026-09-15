@@ -39,6 +39,9 @@ pub const Highlight = frame_mod.Highlight;
 pub const CommentMark = frame_mod.CommentMark;
 pub const FileEntry = frame_mod.FileEntry;
 pub const HelpLayout = frame_mod.HelpLayout;
+pub const ThreadView = frame_mod.ThreadView;
+pub const ThreadMessage = frame_mod.ThreadMessage;
+pub const ThreadLayout = frame_mod.ThreadLayout;
 pub const Theme = frame_mod.Theme;
 pub const Glyphs = frame_mod.Glyphs;
 pub const chrome_rows = frame_mod.chrome_rows;
@@ -46,6 +49,7 @@ pub const bodyHeight = frame_mod.bodyHeight;
 pub const drawHelpPopup = popup.draw;
 pub const drawFileList = popup.drawFiles;
 pub const drawCompose = popup.drawCompose;
+pub const drawThread = popup.drawThread;
 pub const drawPromptLine = drawPrompt;
 pub const composeBox = popup.composeBox;
 
@@ -60,6 +64,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
         // drawing an input line with nothing to anchor it.
         try body_mod.draw(f, v, 0, h);
         if (v.compose) |cv| try popup.drawCompose(f, cv, 0, h);
+        if (v.thread) |tv| try popup.drawThread(f, tv, 0, h);
         if (v.help) |hv| try popup.draw(f, hv, 0, h);
         if (v.files) |fv| {
             const r = roomFor(f, v, 0, h);
@@ -89,6 +94,7 @@ pub fn draw(f: Frame, v: View) Allocator.Error!void {
     // picker is a layer on the box, and drawing the box last painted it over
     // the list it had just opened.
     if (v.compose) |cv| try popup.drawCompose(f, cv, 2, bodyHeight(h, false));
+    if (v.thread) |tv| try popup.drawThread(f, tv, 2, bodyHeight(h, false));
     if (v.help) |hv| try popup.draw(f, hv, 2, bodyHeight(h, false));
     if (v.files) |fv| {
         const r = roomFor(f, v, 2, bodyHeight(h, false));
@@ -111,7 +117,7 @@ fn roomFor(f: Frame, v: View, top: u16, height: u16) struct { top: u16, height: 
 /// blinking on top of the popup points at nothing.
 fn hideCursorUnder(f: Frame, v: View) void {
     // The compose box is the exception: it parks the cursor on its own caret.
-    if (v.help != null or v.files != null) f.win.hideCursor();
+    if (v.help != null or v.files != null or v.thread != null) f.win.hideCursor();
 }
 
 /// The `/`, `?` or `:` line, with the terminal's own cursor parked at its end.
@@ -156,6 +162,7 @@ fn modeLabel(mode: event.Mode) []const u8 {
         .visual => "VISUAL",
         .command => "COMMAND",
         .help => "HELP",
+        .thread => "THREAD",
         .note_input => "NOTE",
         .finder => "FIND",
         .insert => "INSERT",

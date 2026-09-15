@@ -55,6 +55,12 @@ pub const Table = struct {
     /// makes a tool look unfinished.
     submit_review: []const u8 = "review ready: {path} ({count} comment{s})",
 
+    /// The same, when the file also carries the remarks already on a pull
+    /// request. Its own template because the difference is a sentence rather
+    /// than a number, and worth saying because the agent otherwise acts on
+    /// the reviewers' asks as if the reader had made them.
+    submit_review_mixed: []const u8 = "review ready: {path} ({mine} of mine, {theirs} from the request)",
+
     /// The ask presets. `{ref}` is whichever of the above
     /// the cursor produced.
     ask_why: []const u8 = "{ref} - why this approach?",
@@ -149,6 +155,16 @@ test "the review handover is a template like everything else" {
     });
     defer testing.allocator.free(one);
     try testing.expectEqualStrings("review ready: .lgtm/review-1.md (1 comment)", one);
+
+    // On a pull request the file is two things at once, and one total says
+    // they are all the reader's.
+    const mixed = try expand(default.submit_review_mixed, &.{
+        .{ .name = "path", .value = ".lgtm/review-2.md" },
+        .{ .name = "mine", .value = "3" },
+        .{ .name = "theirs", .value = "4" },
+    });
+    defer testing.allocator.free(mixed);
+    try testing.expectEqualStrings("review ready: .lgtm/review-2.md (3 of mine, 4 from the request)", mixed);
 }
 
 test "a reference expands from its parts" {

@@ -92,9 +92,26 @@ pub const Comment = struct {
     /// The forge's id, when it came from the request. What a `PATCH` names.
     /// Zero for a remark written in this pane.
     remote: u64 = 0,
+    /// The remark on the request this one answers, or zero when it starts a
+    /// thread. Without it, a reply is a row that happens to share a line.
+    reply_to: u64 = 0,
+    /// Seconds since the epoch, and zero for a remark written here: the
+    /// reader was there, so there is no time worth showing.
+    created: i64 = 0,
+    /// The code it was written against, as the forge kept it. Owned, under
+    /// rule 4 like every other string here - and carried rather than rebuilt,
+    /// because a stale remark is one our diff no longer holds the line for.
+    hunk: []const u8 = "",
 
     pub fn theirs(self: Comment) bool {
         return self.author.len > 0;
+    }
+
+    /// Which conversation it belongs to: the remark it answers, or itself.
+    /// Zero in this pane, where two remarks on a line are two remarks rather
+    /// than a conversation.
+    pub fn thread(self: Comment) u64 {
+        return if (self.reply_to != 0) self.reply_to else self.remote;
     }
 
     pub fn end(self: Comment) u32 {
@@ -106,6 +123,7 @@ pub const Comment = struct {
         gpa.free(self.body);
         gpa.free(self.anchor);
         if (self.author.len > 0) gpa.free(self.author);
+        if (self.hunk.len > 0) gpa.free(self.hunk);
     }
 };
 
@@ -181,28 +199,81 @@ pub const Store = struct {
         return id;
     }
 
+    /// One remark already on the request, as the forge describes it. A struct
+    /// rather than ten positional arguments, which is what this had grown to.
+    pub const Remote = struct {
+        path: []const u8,
+        line: u32,
+        span: u32 = 1,
+        body: []const u8,
+        author: []const u8,
+        outdated: bool = false,
+        remote: u64 = 0,
+        reply_to: u64 = 0,
+        created: i64 = 0,
+        hunk: []const u8 = "",
+    };
+
     /// Takes in a remark somebody else left on the request.
     ///
     /// Posted by definition, so `:post` never sends it back; stale when the
     /// forge says the line it was written against has gone, which is the same
     /// fact under the same name.
-    pub fn adopt(
-        self: *Store,
-        path: []const u8,
-        line: u32,
-        span: u32,
-        body: []const u8,
-        author: []const u8,
-        outdated: bool,
-        remote: u64,
-    ) Allocator.Error!u32 {
-        const id = try self.addFull(path, line, body, "", false, span);
+    pub fn adopt(self: *Store, r: Remote) Allocator.Error!u32 {
+        const id = try self.addFull(r.path, r.line, r.body, "", false, r.span);
         const n = self.find(id).?;
-        n.author = try self.gpa.dupe(u8, author);
+        n.author = try self.gpa.dupe(u8, r.author);
+        n.hunk = if (r.hunk.len > 0) try self.gpa.dupe(u8, r.hunk) else "";
         n.posted = true;
-        n.remote = remote;
-        if (outdated) n.state = .stale;
+        n.remote = r.remote;
+        n.reply_to = r.reply_to;
+        n.created = r.created;
+        if (r.outdated) n.state = .stale;
         return id;
+    }
+
+    /// Drops this checkout's copy of a remark the forge now holds.
+    ///
+    /// Posting leaves two of it: the one written here and the one that comes
+    /// back with the request. Only the second can be edited - it is the one
+    /// with an id the forge answers to - so the first is what goes. `follow`
+    /// is moved onto the survivor, so a selection is not left pointing at a
+    /// remark that is gone.
+    pub fn dropPostedDuplicates(self: *Store, login: []const u8, follow: ?*u32) usize {
+        var dropped: usize = 0;
+        var i: usize = 0;
+        while (i < self.list.items.len) {
+            const n = self.list.items[i];
+            if (!n.posted or n.theirs()) {
+                i += 1;
+                continue;
+            }
+            const twin = self.remoteTwin(n, login) orelse {
+                i += 1;
+                continue;
+            };
+            if (follow) |sel| {
+                if (sel.* == n.id) sel.* = twin;
+            }
+            self.list.items[i].deinit(self.gpa);
+            _ = self.list.orderedRemove(i);
+            self.dirty = true;
+            dropped += 1;
+        }
+        return dropped;
+    }
+
+    /// The forge's copy of a remark written here: same place, same words, and
+    /// the reader's own name on it where the login is known.
+    fn remoteTwin(self: *Store, n: Comment, login: []const u8) ?u32 {
+        for (self.list.items) |o| {
+            if (!o.theirs() or o.id == n.id) continue;
+            if (o.line != n.line or !std.mem.eql(u8, o.path, n.path)) continue;
+            if (!std.mem.eql(u8, o.body, n.body)) continue;
+            if (login.len > 0 and !std.mem.eql(u8, o.author, login)) continue;
+            return o.id;
+        }
+        return null;
     }
 
     /// Forgets every remark that came from the forge, so a fresh read of the
@@ -226,6 +297,18 @@ pub const Store = struct {
         return null;
     }
 
+    /// The remark the forge calls `id`, when this checkout holds a copy. A
+    /// thread is keyed on the forge's id throughout - `reply_to`, `thread()`
+    /// and the replies endpoint - and the store's means nothing outside this
+    /// process.
+    pub fn findRemote(self: *Store, id: u64) ?*Comment {
+        if (id == 0) return null;
+        for (self.list.items) |*n| {
+            if (n.remote == id) return n;
+        }
+        return null;
+    }
+
     /// The comment on a line, if there is one. First match wins: two comments on one
     /// line is possible and the gutter can only mark it once.
     pub fn at(self: *Store, path: []const u8, line: u32) ?*Comment {
@@ -233,6 +316,56 @@ pub const Store = struct {
             if (n.line == line and std.mem.eql(u8, n.path, path)) return n;
         }
         return null;
+    }
+
+    /// Every comment on a line, in store order, written into `buf`.
+    ///
+    /// `at` cannot be this: its first-match contract is what the gutter and
+    /// the anchor lookups want. A caller's buffer rather than an allocation,
+    /// because this is asked on a keystroke and the count is small; what does
+    /// not fit is dropped.
+    pub fn allAt(self: *Store, path: []const u8, line: u32, buf: []*Comment) []*Comment {
+        var n: usize = 0;
+        for (self.list.items) |*c| {
+            if (n == buf.len) break;
+            if (c.line != line or !std.mem.eql(u8, c.path, path)) continue;
+            buf[n] = c;
+            n += 1;
+        }
+        return buf[0..n];
+    }
+
+    /// Every remark in the conversation at a line: the ones sitting on it and
+    /// the rest of any thread one of those belongs to, in store order.
+    ///
+    /// The union of the two, because a thread's later messages can land on a
+    /// different line once the code moves, and a remark written in this pane
+    /// belongs to no thread at all.
+    pub fn conversationAt(self: *Store, path: []const u8, line: u32, buf: []*Comment) []*Comment {
+        // Gathered first so the pass below stays in store order: appending
+        // stragglers after would put a reply above what it answers.
+        var threads: [16]u64 = undefined;
+        var tn: usize = 0;
+        for (self.list.items) |*c| {
+            if (c.line != line or !std.mem.eql(u8, c.path, path)) continue;
+            const t = c.thread();
+            if (t == 0 or tn == threads.len) continue;
+            if (std.mem.indexOfScalar(u64, threads[0..tn], t) != null) continue;
+            threads[tn] = t;
+            tn += 1;
+        }
+
+        var n: usize = 0;
+        for (self.list.items) |*c| {
+            if (n == buf.len) break;
+            const here = c.line == line and std.mem.eql(u8, c.path, path);
+            const t = c.thread();
+            const joined = t != 0 and std.mem.indexOfScalar(u64, threads[0..tn], t) != null;
+            if (!here and !joined) continue;
+            buf[n] = c;
+            n += 1;
+        }
+        return buf[0..n];
     }
 
     pub fn edit(self: *Store, id: u32, body: []const u8) Allocator.Error!void {
@@ -659,14 +792,103 @@ test "editing reopens a sent comment, because the agent has the old text" {
     try testing.expectEqual(@as(u32, 1), store.openCount());
 }
 
+test "the copy that was posted gives way to the forge's" {
+    // Posting leaves two of the same remark on the line: this one, and the
+    // one that comes back with the request carrying the id an edit needs.
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    const local = try store.add("a.zig", 26, "that retry never backs off");
+    store.markPosted(&.{local});
+    const unposted = try store.add("a.zig", 26, "and this one is still a draft");
+    const theirs = try store.adopt(.{ .path = "a.zig", .line = 26, .body = "that retry never backs off", .author = "me", .remote = 4242 });
+    _ = try store.adopt(.{ .path = "a.zig", .line = 40, .body = "somebody else's", .author = "someone", .remote = 4243 });
+
+    var sel: u32 = local;
+    try testing.expectEqual(@as(usize, 1), store.dropPostedDuplicates("me", &sel));
+    // The selection followed the survivor rather than pointing at nothing.
+    try testing.expectEqual(theirs, sel);
+    try testing.expect(store.find(local) == null);
+    // A draft that was never posted is nobody's duplicate.
+    try testing.expect(store.find(unposted) != null);
+
+    // Same words, somebody else's name: not this checkout's copy coming back.
+    var other: Store = .init(gpa);
+    defer other.deinit();
+    const ours = try other.add("a.zig", 26, "same words");
+    other.markPosted(&.{ours});
+    _ = try other.adopt(.{ .path = "a.zig", .line = 26, .body = "same words", .author = "someone", .remote = 7 });
+    try testing.expectEqual(@as(usize, 0), other.dropPostedDuplicates("me", null));
+}
+
+test "every remark on a line is reachable, not only the first" {
+    // `at` answers with whichever the forge listed first, which is the wrong
+    // one half the time and the only one either way.
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+    _ = try store.adopt(.{ .path = "a.zig", .line = 26, .span = 1, .body = "that's nice", .author = "someone", .outdated = false, .remote = 4242 });
+    const mine = try store.add("a.zig", 26, "fixed in the follow-up");
+    _ = try store.add("a.zig", 40, "elsewhere");
+
+    var buf: [8]*Comment = undefined;
+    const on = store.allAt("a.zig", 26, &buf);
+    try testing.expectEqual(@as(usize, 2), on.len);
+    try testing.expectEqualStrings("that's nice", on[0].body);
+    try testing.expectEqual(mine, on[1].id);
+
+    // The first-match contract stays what it was.
+    try testing.expectEqualStrings("that's nice", store.at("a.zig", 26).?.body);
+    try testing.expectEqual(@as(usize, 0), store.allAt("b.zig", 26, &buf).len);
+
+    // A buffer too small takes what fits rather than reading past its end.
+    var one: [1]*Comment = undefined;
+    try testing.expectEqual(@as(usize, 1), store.allAt("a.zig", 26, &one).len);
+}
+
+test "a conversation is the line's remarks and the rest of their threads" {
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    // A thread of three whose last reply landed elsewhere, an unrelated
+    // remark on the same line, and one somewhere else entirely.
+    _ = try store.adopt(.{ .path = "a.zig", .line = 26, .body = "root", .author = "someone", .remote = 10 });
+    _ = try store.adopt(.{ .path = "a.zig", .line = 26, .body = "reply", .author = "other", .remote = 11, .reply_to = 10 });
+    _ = try store.adopt(.{ .path = "a.zig", .line = 31, .body = "late reply", .author = "me", .remote = 12, .reply_to = 10 });
+    const mine = try store.add("a.zig", 26, "mine, unrelated");
+    _ = try store.add("a.zig", 40, "elsewhere");
+
+    var buf: [16]*Comment = undefined;
+    const on = store.conversationAt("a.zig", 26, &buf);
+    try testing.expectEqual(@as(usize, 4), on.len);
+    // Store order throughout, so a reply never floats above what it answers.
+    try testing.expectEqualStrings("root", on[0].body);
+    try testing.expectEqualStrings("reply", on[1].body);
+    try testing.expectEqualStrings("late reply", on[2].body);
+    try testing.expectEqual(mine, on[3].id);
+
+    // From the straggler's line the thread comes back whole, without the
+    // unrelated remark sharing the root's line.
+    const from_31 = store.conversationAt("a.zig", 31, &buf);
+    try testing.expectEqual(@as(usize, 3), from_31.len);
+    try testing.expectEqualStrings("root", from_31[0].body);
+
+    // A remark written in this pane belongs to no thread, so a line carrying
+    // only one is a conversation of one rather than of every local remark.
+    try testing.expectEqual(@as(usize, 1), store.conversationAt("a.zig", 40, &buf).len);
+    try testing.expectEqual(@as(usize, 0), store.conversationAt("b.zig", 40, &buf).len);
+}
+
 test "somebody else's remark is theirs and stays theirs" {
     const gpa = testing.allocator;
     var store: Store = .init(gpa);
     defer store.deinit();
 
     const mine = try store.add("a.zig", 10, "I would rename this");
-    const theirs = try store.adopt("a.zig", 47, 3, "this retry never backs off", "kunkka19xx", false, 4242);
-    const gone = try store.adopt("b.zig", 12, 1, "the line this was on has moved", "someone", true, 4243);
+    const theirs = try store.adopt(.{ .path = "a.zig", .line = 47, .span = 3, .body = "this retry never backs off", .author = "kunkka19xx", .outdated = false, .remote = 4242 });
+    const gone = try store.adopt(.{ .path = "b.zig", .line = 12, .span = 1, .body = "the line this was on has moved", .author = "someone", .outdated = true, .remote = 4243 });
 
     // Posted by definition, so a review never sends it back to its author.
     try testing.expect(store.find(theirs).?.posted);

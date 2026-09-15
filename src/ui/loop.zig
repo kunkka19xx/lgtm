@@ -27,6 +27,7 @@ const bridge = @import("../bridge/bridge.zig");
 
 const config = @import("../config.zig");
 const app_mod = @import("app.zig");
+const thread_mod = @import("thread.zig");
 const turns_mod = @import("turns.zig");
 const pr_mod = @import("pr.zig");
 const finder_mod = @import("finder.zig");
@@ -89,13 +90,21 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     defer vx.deinit(gpa, w);
 
     try vx.enterAltScreen(w);
+    // Nothing vaxis believes is on the screen is: the buffer we just switched
+    // to holds whatever the last program to use it left there, and a render
+    // that writes only changed cells would leave every one of them showing
+    // through wherever this frame is blank.
+    vx.queueRefresh();
     // `--once` renders one frame and never reads a key.
     const wheel = opts.cfg.ui.scroll_lines > 0 and !opts.once;
     if (wheel) try tty_mod.enableMouse(w);
     try w.flush();
+    // Mouse only. Leaving the alt screen is `vx.deinit`'s job, which runs
+    // after this and takes the alt-screen path only while vaxis still believes
+    // it is on one: calling `exitAltScreen` here cleared that belief, and the
+    // reset then reverse-indexed and erased its way up the *shell's* screen.
     defer {
         if (wheel) tty_mod.disableMouse(w) catch {};
-        vx.exitAltScreen(w) catch {};
         w.flush() catch {};
     }
 
@@ -171,6 +180,10 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // it brings back.
     var forge: ?*Forge = null;
     var prep: std.heap.ArenaAllocator = .init(gpa);
+    // Quitting joins the worker, so a call still running holds the exit until
+    // it ends. Bounded rather than unbounded now that every subprocess has a
+    // deadline; cancelling outright would mean detaching the thread rather
+    // than joining it, and detaching means the arena below cannot be freed.
     defer {
         if (forge) |job| job.finish();
         prep.deinit();
@@ -192,6 +205,13 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     const live = opts.target == null;
     if (!opts.once) {
         winsize.register() catch {};
+        // How wide every row is measured, before the thread that reads and the
+        // first frame - `io/input.zig` says why. `caps` as well as the screen,
+        // because a resize copies the one into the other.
+        if (reader.clusters(w)) {
+            vx.caps.unicode = .unicode;
+            vx.screen.width_method = .unicode;
+        }
         try reader.start();
         if (live) watcher.start() catch {};
     }
@@ -288,12 +308,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
             const want: ?pr_mod.Want = if (app.pr.want) |armed| blk: {
                 app.pr.want = null;
                 break :blk armed;
-            } else if (app.pr.want_post) |req| blk: {
-                app.pr.want_post = null;
-                break :blk pr_mod.preparePost(&app, prep.allocator(), req);
-            } else if (app.pr.want_amend) |req| blk: {
-                app.pr.want_amend = null;
-                break :blk pr_mod.prepareAmend(&app, prep.allocator(), req);
+            } else if (app.pr.pending) |req| blk: {
+                app.pr.pending = null;
+                break :blk pr_mod.prepare(&app, prep.allocator(), req);
             } else null;
 
             if (want) |job| {
@@ -302,9 +319,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
                     app.notice.set("could not start that", .{});
                     break :blk null;
                 };
-            } else if (app.busy != null and app.pr.want == null and
-                app.pr.want_post == null and app.pr.want_amend == null)
-            {
+            } else if (app.busy != null and app.pr.want == null and app.pr.pending == null) {
                 // Preparing refused and said why, so the spinner must go.
                 app.busy = null;
             }
@@ -536,7 +551,7 @@ const Forge = struct {
             .thread = undefined,
             .done = .init(false),
             .want = want,
-            .got = .failed,
+            .got = .{ .failed = .failed },
             .gpa = gpa,
             .arena = arena,
             .io = io,
@@ -663,6 +678,8 @@ fn openEditor(
 
     term.resumeRaw();
     vx.enterAltScreen(w) catch {};
+    // The editor owned the screen; none of what is on it is ours.
+    vx.queueRefresh();
     if (wheel) tty_mod.enableMouse(w) catch {};
     w.flush() catch {};
     if (!opts.once) try reader.start();
@@ -739,7 +756,8 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         shown.hints = try arena.dupe(u8, keytext.hints(app.km.bindings, app.mode, &hint_buf));
         shown.bindings = app.km.bindings;
         shown.help = try app.help.view(app.mode, app.km.bindings, arena);
-        shown.files = try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, arena);
+        shown.thread = try thread_mod.view(app, arena);
+        shown.files = try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, try pr_mod.askText(app, arena), arena);
         try render.draw(frameOf(app, win, arena), shown);
     } else {
         win.clear();
@@ -763,6 +781,12 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
         if (try app.help.view(app.mode, app.km.bindings, arena)) |hv| {
             try render.drawHelpPopup(frameOf(app, win, arena), hv, 0, win.height);
         }
+        // And the thread, for the same reason: a comment outlives the change
+        // it was written against, so a review with nothing in it can still
+        // have a conversation to read.
+        if (try thread_mod.view(app, arena)) |tv| {
+            try render.drawThread(frameOf(app, win, arena), tv, 0, win.height);
+        }
         // The compose box floats here too: with nothing to review there is
         // still an agent to talk to, and the box opens empty rather than
         // refusing. Drawn *before* the overlays it opens, the same order the
@@ -778,7 +802,7 @@ fn drawFrame(app: *App, vx: *vaxis.Vaxis, w: *std.Io.Writer, body: u16) !void {
                 room = box.room(0, win.height);
             }
         }
-        if (try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, arena)) |fv| {
+        if (try app.file_list.view(app.mode, app.pick_list.items, finder_mod.listCurrent(app), app.km.bindings, try pr_mod.askText(app, arena), arena)) |fv| {
             try render.drawFileList(frameOf(app, win, arena), fv, room_top, room);
         }
         // The bottom row is the prompt when one is open, and whatever the last

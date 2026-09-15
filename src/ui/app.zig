@@ -41,6 +41,7 @@ const motion = @import("motion.zig");
 const compose_mod = @import("compose.zig");
 const prompt_mod = @import("prompt.zig");
 const pr_mod = @import("pr.zig");
+const thread_mod = @import("thread.zig");
 const turns_mod = @import("turns.zig");
 const walks = @import("walks.zig");
 const finder_mod = @import("finder.zig");
@@ -197,17 +198,16 @@ pub const App = struct {
     /// Every note in the session. Session-lived and owning its own bytes, so
     /// a re-diff resetting the arena cannot take a remark with it (rule 4).
     comments: comments_mod.Store = undefined,
-    /// What the compose box will do with what is typed: send it, or attach it
-    /// to a line as a note. The box itself does not know or care.
-    compose_comment: ?u32 = null,
-    /// The forge's id of the comment in the box, when the reader left it on
-    /// the request. Saving one is a call, not a store write. Zero otherwise.
-    compose_remote: u64 = 0,
-    /// Where the comment being written belongs, captured when the box opened.
-    /// Opening it clears the selection, so asking again at save time would
-    /// give a range of one line.
-    compose_spot: ?notes.Spot2 = null,
-    compose_is_comment: bool = false,
+    /// What the compose box will do with what is typed. The box itself does
+    /// not know or care; everything that acts on the text reads this.
+    compose_for: ComposeFor = .agent,
+    /// Where closing the box goes back to. One opened from the overlay
+    /// returns to it, rather than dropping the reader out to the diff.
+    compose_from: event.Mode = .normal,
+    /// Which remark on the cursor's line the reader has settled on, or zero
+    /// for "whichever is first". Set by `]c`, the overlay and the list, and
+    /// ignored the moment the cursor is somewhere else.
+    comment_sel: u32 = 0,
     /// How many reviews have been submitted this session, for the file name.
     review_n: u32 = 0,
     /// Whether the stored notes have been placed against the files as they
@@ -237,6 +237,8 @@ pub const App = struct {
     /// differs, which is one field rather than a second overlay.
     /// The timeline, the mark walk and the restore, in `ui/turns.zig`.
     turns: turns_mod.State = .{},
+    /// One line's conversation, in `ui/thread.zig`.
+    thread: thread_mod.State = .{},
 
     files_purpose: enum {
         /// `<Space>f`: the changed files, and Enter goes to one.
@@ -780,6 +782,10 @@ pub const App = struct {
     // -- commands ------------------------------------------------------------
 
     pub fn run(self: *App, cmd: keymap.Command, body: u16) !void {
+        // The overlay reuses the list's movement commands over its own
+        // messages. Taken here rather than at six cases below, where
+        // forgetting one would scroll the diff behind it.
+        if (self.mode == .thread) return thread_mod.run(self, cmd, body);
         const was_at = self.vp.scroll;
         const was_in = self.file_index;
         // Anything that is not itself a jump arrives at once: an animation the
@@ -1084,6 +1090,12 @@ pub const App = struct {
                 self.notice.set("soft wrap {s}", .{if (self.wrap) "on" else "off"});
             },
             .help => self.toggleHelp(),
+            // Handled in `ui/thread.zig` before reaching here; listed so the
+            // switch stays exhaustive.
+            .thread_select, .thread_close => {},
+            // Reachable from outside: a line carrying one remark opens in
+            // the box rather than the overlay, and is still worth answering.
+            .thread_reply => thread_mod.replyHere(self),
             .file_list => {
                 self.clearPreview();
                 finder_mod.toggleFiles(self);
@@ -1371,7 +1383,7 @@ pub const App = struct {
         const line = f.lines.new_no[0];
 
         _ = try fx.app.comments.add(f.path(), line, "mine");
-        _ = try fx.app.comments.adopt(f.path(), line, 1, "theirs", "someone", false, 0);
+        _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 0 });
         try fx.app.rebuildRows(.line);
 
         var seen: usize = 0;
@@ -1589,7 +1601,9 @@ pub const App = struct {
 
     // -- notes ---------------------------------------------------------------
 
-    pub const Spot = struct { bucket: u8, fi: u32, path: []const u8, line: u32 };
+    /// Where a comment sits in the order `]c` walks. `id` is the tiebreak, or
+    /// the second remark on a line is never "after" the first.
+    pub const Spot = struct { bucket: u8, fi: u32, path: []const u8, line: u32, id: u32 = 0 };
 
     // -- $EDITOR -------------------------------------------------------------
 
@@ -2006,6 +2020,14 @@ pub const App = struct {
         switch (ev) {
             .quit => self.quit = true,
             .key => |k| {
+                // A delete on the request is asked before it is made, and the
+                // next key is the answer - above the mode branches, because
+                // the question is asked from the diff, the list and the
+                // overlay alike, and in a list every letter is filter text.
+                if (self.pr.dropping != null) {
+                    pr_mod.dropAnswer(self, k);
+                    return;
+                }
                 // While a prompt is open the keys are text, not actions, so
                 // they never reach the keymap.
                 if (self.mode == .command) return cmdline.feedPrompt(self, k, body);
@@ -2160,6 +2182,64 @@ test {
 /// repository, a terminal or a subprocess. The lines are chosen so each token
 /// appears in exactly one file, which is what makes the cross-file search
 /// assertions unambiguous.
+/// What the compose box is for, and the whole of it. Five fields said this
+/// before, and every reader of them was an if-chain testing in its own order;
+/// two that disagreed are how `<C-s>` in a reply box saved a remark instead.
+/// These are the combinations that mean anything.
+pub const ComposeFor = union(enum) {
+    /// On its way to the agent, which is what the box was built for.
+    agent,
+    /// A new remark, on the spot the box opened over. Held rather than asked
+    /// for again at save time, when the selection is already cleared.
+    fresh: notes.Spot2,
+    /// One of this checkout's own, being changed. Saving is a store write.
+    edit: u32,
+    /// One of the reader's own that lives on the request. Saving is a call to
+    /// the forge, and the copy here waits for it.
+    amend: struct { id: u32, remote: u64 },
+    /// A message on a thread, keyed on the root the forge numbers. It has no
+    /// remark here and never gets one until the forge answers.
+    reply: u64,
+    /// Somebody else's, open to be read. A changed copy would say something
+    /// its author never wrote.
+    view: u32,
+
+    /// Whether what is typed belongs to a comment rather than to the agent.
+    pub fn isComment(self: ComposeFor) bool {
+        return switch (self) {
+            .fresh, .edit, .amend, .reply => true,
+            .agent, .view => false,
+        };
+    }
+
+    /// Whether saving writes a remark here, as against calling the forge or
+    /// handing the text to the agent.
+    pub fn savesHere(self: ComposeFor) bool {
+        return switch (self) {
+            .fresh, .edit => true,
+            .agent, .amend, .reply, .view => false,
+        };
+    }
+
+    /// Whether it lives on the request, which is what makes saving a call and
+    /// makes "save and send it too" a promise nothing here can keep.
+    pub fn onForge(self: ComposeFor) bool {
+        return switch (self) {
+            .amend, .reply => true,
+            .agent, .fresh, .edit, .view => false,
+        };
+    }
+
+    /// The store id the box is pointed at, when it is pointed at one.
+    pub fn commentId(self: ComposeFor) ?u32 {
+        return switch (self) {
+            .edit, .view => |id| id,
+            .amend => |a| a.id,
+            .agent, .fresh, .reply => null,
+        };
+    }
+};
+
 pub const Fixture = struct {
     threaded: std.Io.Threaded,
     queue: event.Queue,
@@ -2187,6 +2267,16 @@ pub const Fixture = struct {
             l.text[i] = t;
         }
         return l;
+    }
+
+    /// Standing in a pull request: the number, the repository posting needs,
+    /// and who the reader is.
+    pub fn onPr(self: *Fixture, number: u32, repo: []const u8, login: []const u8) void {
+        self.app.pr.number = number;
+        self.app.pr.repo_len = @intCast(@min(repo.len, self.app.pr.repo.len));
+        @memcpy(self.app.pr.repo[0..self.app.pr.repo_len], repo[0..self.app.pr.repo_len]);
+        self.app.pr.login_len = @intCast(@min(login.len, self.app.pr.login.len));
+        @memcpy(self.app.pr.login[0..self.app.pr.login_len], login[0..self.app.pr.login_len]);
     }
 
     /// The ordinary review: two files, three lines each, nothing deleted.

@@ -10,6 +10,7 @@ const Allocator = std.mem.Allocator;
 const app_mod = @import("app.zig");
 const App = app_mod.App;
 const comments_mod = @import("../core/comments.zig");
+const event_mod = @import("../core/event.zig");
 const compose_mod = @import("compose.zig");
 const finder_mod = @import("finder.zig");
 const fs_mod = @import("../io/fs.zig");
@@ -18,6 +19,7 @@ const review_file = @import("../core/review.zig");
 const template = @import("../bridge/template.zig");
 const walks = @import("walks.zig");
 const pr_mod = @import("pr.zig");
+const thread_mod = @import("thread.zig");
 
 /// The line the cursor points at, as the note store counts them: the new
 /// file's line, which is what survives a re-diff and what a reference
@@ -136,9 +138,7 @@ pub fn commentAdd(app: *App) Allocator.Error!void {
         app.notice.set("nothing here to comment on", .{});
         return;
     };
-    app.compose_is_comment = true;
-    app.compose_comment = null;
-    app.compose_spot = at;
+    app.compose_for = .{ .fresh = at };
     app.compose_to = .copy;
     app.outgoing.clearRetainingCapacity();
     app.compose.start("");
@@ -166,9 +166,7 @@ pub fn commentSuggest(app: *App) Allocator.Error!void {
     }
     try seed.appendSlice(app.gpa, "```");
 
-    app.compose_is_comment = true;
-    app.compose_comment = null;
-    app.compose_spot = at;
+    app.compose_for = .{ .fresh = at };
     app.compose_to = .copy;
     app.outgoing.clearRetainingCapacity();
     app.compose.start(seed.items);
@@ -187,6 +185,18 @@ pub fn commentSuggest(app: *App) Allocator.Error!void {
     }
 }
 
+/// `<Space>vc`: the overlay where the line carries a conversation, which is
+/// the only thing that can say *which* remark is meant. One remark alone
+/// opens in the box as it always has.
+pub fn commentOpen(app: *App) Allocator.Error!void {
+    const n = commentUnderCursor(app) orelse {
+        app.notice.set("no comment here", .{});
+        return;
+    };
+    if (thread_mod.worthOpening(app, n)) return thread_mod.open(app, n);
+    return commentEdit(app);
+}
+
 /// The same box, seeded with what the comment already says.
 pub fn commentEdit(app: *App) Allocator.Error!void {
     const n = commentUnderCursor(app) orelse {
@@ -196,9 +206,10 @@ pub fn commentEdit(app: *App) Allocator.Error!void {
     // Somebody else's opens to be read. Refusing to open it at all left the
     // only full copy of it in a gutter marker.
     if (n.theirs() and !mine(app, n.*)) return commentRead(app, n);
-    if (n.theirs()) app.compose_remote = n.remote;
-    app.compose_is_comment = true;
-    app.compose_comment = n.id;
+    app.compose_for = if (n.theirs())
+        .{ .amend = .{ .id = n.id, .remote = n.remote } }
+    else
+        .{ .edit = n.id };
     app.compose_to = .copy;
     app.compose.start(n.body);
     app.preset_index = null;
@@ -208,10 +219,7 @@ pub fn commentEdit(app: *App) Allocator.Error!void {
 /// A remark from the request, in the box with no way to change it: editing a
 /// copy would say something its author never wrote.
 pub fn commentRead(app: *App, n: *comments_mod.Comment) void {
-    app.compose_is_comment = false;
-    app.compose_remote = 0;
-    app.compose_comment = n.id;
-    app.compose_spot = null;
+    app.compose_for = .{ .view = n.id };
     app.compose_to = .copy;
     app.compose.startView(n.body);
     app.preset_index = null;
@@ -236,6 +244,11 @@ pub fn commentUnderCursor(app: *App) ?*comments_mod.Comment {
         }
     }
     const at = commentLine(app) orelse return null;
+    // The one the reader picked: `]c`, the list and the overlay all leave a
+    // selection behind, and store order would act on somebody else's.
+    if (selectedOn(app, at.path, at.line) != 0) {
+        if (app.comments.find(app.comment_sel)) |n| return n;
+    }
     return app.comments.at(at.path, at.line);
 }
 
@@ -247,7 +260,7 @@ pub fn commentUnderCursor(app: *App) ?*comments_mod.Comment {
 /// caught their eye a few lines away. The one under the cursor still wins
 /// when there is one.
 pub fn commentView(app: *App, body: u16) !void {
-    if (commentUnderCursor(app) != null) return commentEdit(app);
+    if (commentUnderCursor(app) != null) return commentOpen(app);
 
     const f = app.current() orelse {
         noComments(app);
@@ -271,7 +284,7 @@ pub fn commentView(app: *App, body: u16) !void {
     };
     _ = walks.gotoNewLine(app, line);
     app.clampScroll(body);
-    try commentEdit(app);
+    try commentOpen(app);
 }
 
 /// The comment the overlay is highlighting, or null when it is not the
@@ -311,7 +324,7 @@ pub fn listSendOne(app: *App) !void {
 
 pub fn listDrop(app: *App) void {
     const n = listSelected(app) orelse return;
-    if (notYours(app, n.*)) return;
+    if (n.theirs()) return dropTheirs(app, n);
     app.comments.remove(n.id);
     saveComments(app);
     finder_mod.buildPickList(app);
@@ -340,8 +353,7 @@ pub fn commentSend(app: *App) !void {
     const body = compose_mod.flatten(&flat, n.body);
     const seed = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, body }) catch n.body;
 
-    app.compose_is_comment = false;
-    app.compose_comment = null;
+    app.compose_for = .agent;
     app.compose_to = .send;
     app.compose.start(seed);
     app.preset_index = null;
@@ -353,7 +365,7 @@ pub fn commentDelete(app: *App) void {
         app.notice.set("no comment here", .{});
         return;
     };
-    if (notYours(app, n.*)) return;
+    if (n.theirs()) return dropTheirs(app, n);
     app.comments.remove(n.id);
     saveComments(app);
     app.rebuildRows(.line) catch {};
@@ -369,17 +381,34 @@ pub fn mine(app: *App, n: comments_mod.Comment) bool {
     return who.len > 0 and std.ascii.eqlIgnoreCase(who, n.author);
 }
 
+/// Why somebody else's remark does not open to be changed, and what does work
+/// on it. One sentence, said from the overlay and the diff alike.
+pub fn sayTheirs(app: *App, n: comments_mod.Comment, mode: event_mod.Mode) void {
+    var key: [32]u8 = undefined;
+    app.notice.set("{s} wrote that one - {s} answers it", .{
+        n.author, app.keyFor(.thread_reply, mode, &key),
+    });
+}
+
+/// Deleting a remark that lives on the request: the reader's own goes off the
+/// request itself, and somebody else's goes nowhere. Removing only the copy
+/// here would leave it on the request and bring it back on the next read.
+fn dropTheirs(app: *App, n: *comments_mod.Comment) void {
+    if (!mine(app, n.*)) return sayTheirs(app, n.*, app.mode);
+    pr_mod.dropAsk(app, n);
+}
+
 /// A remark nothing here may delete, and why. Either way it lives on the
 /// request, and that is where it changes.
 pub fn notYours(app: *App, n: comments_mod.Comment) bool {
     if (!n.theirs()) return false;
-    var key: [32]u8 = undefined;
     if (mine(app, n)) {
+        var key: [32]u8 = undefined;
         app.notice.set("that one is on the request - {s} edits it there", .{
             app.keyFor(.comment_view, .normal, &key),
         });
     } else {
-        app.notice.set("{s} wrote that one - reply on the request", .{n.author});
+        sayTheirs(app, n, .normal);
     }
     return true;
 }
@@ -387,18 +416,29 @@ pub fn notYours(app: *App, n: comments_mod.Comment) bool {
 pub fn spotOf(app: *App, n: comments_mod.Comment) App.Spot {
     for (app.review.files(), 0..) |f, i| {
         if (std.mem.eql(u8, f.path(), n.path)) {
-            return .{ .bucket = 0, .fi = @intCast(i), .path = n.path, .line = n.line };
+            return .{ .bucket = 0, .fi = @intCast(i), .path = n.path, .line = n.line, .id = n.id };
         }
     }
-    return .{ .bucket = 1, .fi = 0, .path = n.path, .line = n.line };
+    return .{ .bucket = 1, .fi = 0, .path = n.path, .line = n.line, .id = n.id };
 }
 
 /// Where the cursor is, in the same order, so "next" means next from here.
 pub fn spotHere(app: *App) App.Spot {
     const f = app.current() orelse return .{ .bucket = 0, .fi = 0, .path = "", .line = 0 };
     const line = if (commentLine(app)) |at| at.line else 0;
-    if (app.preview != null) return .{ .bucket = 1, .fi = 0, .path = f.path(), .line = line };
-    return .{ .bucket = 0, .fi = app.file_index, .path = f.path(), .line = line };
+    const id = selectedOn(app, f.path(), line);
+    if (app.preview != null) return .{ .bucket = 1, .fi = 0, .path = f.path(), .line = line, .id = id };
+    return .{ .bucket = 0, .fi = app.file_index, .path = f.path(), .line = line, .id = id };
+}
+
+/// Which remark on this line the reader has settled on, and zero unless it is
+/// still the line they are on. Without it `]c` walks back onto the first
+/// remark of the line, because "here" would be the line rather than a remark.
+pub fn selectedOn(app: *App, path: []const u8, line: u32) u32 {
+    if (app.comment_sel == 0) return 0;
+    const n = app.comments.find(app.comment_sel) orelse return 0;
+    if (n.line != line or !std.mem.eql(u8, n.path, path)) return 0;
+    return n.id;
 }
 
 pub fn lessSpot(a: App.Spot, b: App.Spot) bool {
@@ -408,7 +448,10 @@ pub fn lessSpot(a: App.Spot, b: App.Spot) bool {
         const c = std.mem.order(u8, a.path, b.path);
         if (c != .eq) return c == .lt;
     }
-    return a.line < b.line;
+    if (a.line != b.line) return a.line < b.line;
+    // Ordered by line alone, the second remark on a line is never "after"
+    // the first, so `]c` stopped dead there.
+    return a.id < b.id;
 }
 
 /// `Ctrl-s`: the review as one file, and one line telling the agent where
@@ -451,19 +494,36 @@ pub fn submitReview(app: *App) !void {
     // a `bufPrint` here for a long time, which made the sentence the agent
     // receives most the only one a reader could not change.
     var count_buf: [16]u8 = undefined;
-    const count = std.fmt.bufPrint(&count_buf, "{d}", .{written}) catch "?";
+    var mine_buf: [16]u8 = undefined;
+    var theirs_buf: [16]u8 = undefined;
+    const total = written.total();
+    const count = std.fmt.bufPrint(&count_buf, "{d}", .{total}) catch "?";
     app.outgoing.clearRetainingCapacity();
-    try template.render(app.gpa, &app.outgoing, app.templates.submit_review, &.{
-        .{ .name = "path", .value = rel },
-        .{ .name = "count", .value = count },
-        .{ .name = "s", .value = if (written == 1) "" else "s" },
-    });
+    // Two sentences: a single total would say the reviewers' asks are all
+    // the reader's own.
+    if (written.theirs > 0) {
+        try template.render(app.gpa, &app.outgoing, app.templates.submit_review_mixed, &.{
+            .{ .name = "path", .value = rel },
+            .{ .name = "mine", .value = std.fmt.bufPrint(&mine_buf, "{d}", .{written.mine}) catch "?" },
+            .{ .name = "theirs", .value = std.fmt.bufPrint(&theirs_buf, "{d}", .{written.theirs}) catch "?" },
+            .{ .name = "count", .value = count },
+        });
+    } else {
+        try template.render(app.gpa, &app.outgoing, app.templates.submit_review, &.{
+            .{ .name = "path", .value = rel },
+            .{ .name = "count", .value = count },
+            .{ .name = "s", .value = if (total == 1) "" else "s" },
+        });
+    }
     app.want_send = .send;
 }
 
 /// A comment's panel: the remark as written, then the hunk it sits in.
 pub fn commentPanel(app: *const App, arena: Allocator, n: comments_mod.Comment) []const u8 {
-    const code = commentCode(app, arena, n.path, n.line);
+    var code = commentCode(app, arena, n.path, n.line);
+    // Stale means our diff no longer holds the line, which is when seeing
+    // the code matters most - and the forge kept the version it was about.
+    if (code.len == 0) code = n.hunk;
     if (code.len == 0) return arena.dupe(u8, n.body) catch "";
     return std.fmt.allocPrint(arena, "{s}\n\n{s}", .{ n.body, code }) catch code;
 }
@@ -579,18 +639,75 @@ pub fn dist(a: u32, b: u32) u32 {
 
 const testing = std.testing;
 
+test "the walk reaches every remark on a line, not only the first" {
+    // Ordered by line alone, the second remark on a line is never "after"
+    // the first, so the walk stops dead there.
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    const f = fx.app.current().?;
+
+    const first = try fx.app.comments.adopt(.{ .path = f.path(), .line = 1, .span = 1, .body = "that's nice", .author = "someone", .outdated = false, .remote = 4242 });
+    const second = try fx.app.comments.add(f.path(), 1, "fixed in the follow-up");
+
+    const a: App.Spot = spotOf(&fx.app, fx.app.comments.find(first).?.*);
+    const b: App.Spot = spotOf(&fx.app, fx.app.comments.find(second).?.*);
+    try testing.expect(lessSpot(a, b));
+    try testing.expect(!lessSpot(b, a));
+
+    // From the line with nothing chosen, both are still ahead.
+    const here: App.Spot = .{ .bucket = a.bucket, .fi = a.fi, .path = a.path, .line = 1, .id = 0 };
+    try testing.expect(lessSpot(here, a));
+    try testing.expect(lessSpot(here, b));
+
+    // Once the first is the selection, only the second is.
+    fx.app.comment_sel = first;
+    const from = spotHere(&fx.app);
+    try testing.expectEqual(first, from.id);
+    try testing.expect(!lessSpot(from, a));
+    try testing.expect(lessSpot(from, b));
+}
+
+test "a selection that is not on this line claims nothing" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    const f = fx.app.current().?;
+
+    const id = try fx.app.comments.add(f.path(), 2, "mine");
+    fx.app.comment_sel = id;
+    try testing.expectEqual(id, selectedOn(&fx.app, f.path(), 2));
+    // Another line, another file, and a remark that has since been deleted.
+    try testing.expectEqual(@as(u32, 0), selectedOn(&fx.app, f.path(), 3));
+    try testing.expectEqual(@as(u32, 0), selectedOn(&fx.app, "other.zig", 2));
+    fx.app.comments.remove(id);
+    try testing.expectEqual(@as(u32, 0), selectedOn(&fx.app, f.path(), 2));
+}
+
+test "the remark the reader picked is the one that opens" {
+    // The store's first match is whichever the forge listed first, which is
+    // the wrong one half the time.
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    const f = fx.app.current().?;
+
+    _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = 1, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 4242 });
+    const mine_id = try fx.app.comments.add(f.path(), 1, "mine");
+
+    try testing.expectEqualStrings("theirs", commentUnderCursor(&fx.app).?.body);
+    fx.app.comment_sel = mine_id;
+    try testing.expectEqualStrings("mine", commentUnderCursor(&fx.app).?.body);
+}
+
 test "a remark from the request opens to be read, never to be edited" {
     var fx = try app_mod.Fixture.init(testing.allocator);
     defer fx.deinit();
 
     const body = "this retry never backs off";
-    _ = try fx.app.comments.adopt("a.zig", 2, 1, body, "someone", false, 0);
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = body, .author = "someone", .outdated = false, .remote = 0 });
     try commentView(&fx.app, 20);
 
     // It used to refuse to open at all.
     try testing.expect(fx.app.mode == .note_input);
-    try testing.expect(fx.app.compose.read_only);
-    try testing.expect(!fx.app.compose_is_comment);
+    try testing.expect(fx.app.compose_for == .view);
     try testing.expectEqualStrings(body, fx.app.compose.text());
 
     // Nothing typed reaches the text, and `i` finds no way in.
@@ -611,21 +728,20 @@ test "a remark of the reader's own on the request opens to be edited there" {
     fx.app.pr.number = 16;
     fx.app.pr.login_len = @intCast("kunkka19xx".len);
     @memcpy(fx.app.pr.login[0..fx.app.pr.login_len], "kunkka19xx");
-    const id = try fx.app.comments.adopt("a.zig", 2, 1, "mine, posted", "Kunkka19xx", false, 777);
+    const id = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "mine, posted", .author = "Kunkka19xx", .remote = 777 });
 
     try commentView(&fx.app, 20);
     // Editable, and `<CR>` knows it has to reach the forge.
     try testing.expect(!fx.app.compose.read_only);
-    try testing.expect(fx.app.compose_is_comment);
-    try testing.expectEqual(@as(u64, 777), fx.app.compose_remote);
-    try testing.expectEqual(@as(?u32, id), fx.app.compose_comment);
+    try testing.expectEqual(id, fx.app.compose_for.amend.id);
+    try testing.expectEqual(@as(u64, 777), fx.app.compose_for.amend.remote);
 
     // Somebody else's on the same request is read and no more.
     fx.app.comments.remove(id);
-    _ = try fx.app.comments.adopt("a.zig", 2, 1, "theirs", "someone", false, 778);
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 778 });
     try commentView(&fx.app, 20);
-    try testing.expect(fx.app.compose.read_only);
-    try testing.expectEqual(@as(u64, 0), fx.app.compose_remote);
+    // Read, and not an amend: one field cannot be both.
+    try testing.expect(fx.app.compose_for == .view);
 }
 
 test "without a login nothing is claimed, so a remark stays read only" {
@@ -633,7 +749,7 @@ test "without a login nothing is claimed, so a remark stays read only" {
     defer fx.deinit();
 
     // `gh` could not be asked. Guessing would offer an edit that 404s.
-    _ = try fx.app.comments.adopt("a.zig", 2, 1, "mine, posted", "kunkka19xx", false, 777);
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "mine, posted", .author = "kunkka19xx", .remote = 777 });
     try commentView(&fx.app, 20);
     try testing.expect(fx.app.compose.read_only);
 }
@@ -645,8 +761,7 @@ test "the reader's own remark still opens to be edited" {
     _ = try fx.app.comments.add("a.zig", 2, "mine");
     try commentView(&fx.app, 20);
 
-    try testing.expect(!fx.app.compose.read_only);
-    try testing.expect(fx.app.compose_is_comment);
+    try testing.expect(fx.app.compose_for == .edit);
     _ = fx.app.compose.feed(.{ .codepoint = '!', .mods = .{} });
     try testing.expectEqualStrings("mine!", fx.app.compose.text());
 }

@@ -8,6 +8,21 @@ const Io = std.Io;
 
 pub const RunError = std.process.RunError || error{ ProcessFailed, WriteFailure, ReadFailure };
 
+/// How long a subprocess may take before it is killed. Every one of these
+/// runs while the reader waits, and one that never answers hangs the pane.
+/// Generous, because it is a backstop rather than a budget.
+pub const default_timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(30), .clock = .awake } };
+
+/// What a call over somebody else's network gets. `gh` past ten seconds is a
+/// rate limit or a host that is not answering; neither improves with thirty.
+pub const network_timeout: Io.Timeout = .{ .duration = .{ .raw = .fromSeconds(15), .clock = .awake } };
+
+/// A deadline in seconds, for a caller whose budget is neither of the two
+/// above.
+pub fn seconds(n: i64) Io.Timeout {
+    return .{ .duration = .{ .raw = .fromSeconds(n), .clock = .awake } };
+}
+
 pub const Output = struct {
     stdout: []u8,
     stderr: []u8,
@@ -49,11 +64,27 @@ pub fn gitArgv(
 
 /// Runs argv to completion and captures stdout. Used for `git diff` and the
 /// bridge backends, which are the only subprocesses lgtm spawns.
+///
+/// The module default applies: forty call sites, almost none with an opinion.
+/// `runWithin` is for the few that have one.
 pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) RunError!Output {
+    return runWithin(gpa, io, argv, max_output, default_timeout);
+}
+
+/// As `run`, with the caller's own deadline. `gh` over a network and
+/// `git diff` on a large repository do not want the same budget.
+pub fn runWithin(
+    gpa: Allocator,
+    io: Io,
+    argv: []const []const u8,
+    max_output: usize,
+    timeout: Io.Timeout,
+) RunError!Output {
     const result = try std.process.run(gpa, io, .{
         .argv = argv,
         .stdout_limit = .limited(max_output),
         .stderr_limit = .limited(64 << 10),
+        .timeout = timeout,
     });
     return .{
         .stdout = result.stdout,
@@ -86,6 +117,7 @@ pub fn runEnv(
         .environ_map = environ,
         .stdout_limit = .limited(max_output),
         .stderr_limit = .limited(64 << 10),
+        .timeout = default_timeout,
     });
     return .{
         .stdout = result.stdout,
@@ -159,7 +191,8 @@ test "runInherit waits for the child and reports its status" {
 /// Runs argv, writes `stdin_data` to its standard input, and collects stdout.
 ///
 /// Needed for `git cat-file --batch`, which is how many blobs are fetched in
-/// one subprocess instead of one per file.
+/// one subprocess instead of one per file, and for every `gh` call that takes
+/// a JSON body on stdin.
 pub fn runWithInput(
     gpa: Allocator,
     io: Io,
@@ -167,13 +200,35 @@ pub fn runWithInput(
     stdin_data: []const u8,
     max_output: usize,
 ) RunError!Output {
+    return runWithInputWithin(gpa, io, argv, stdin_data, max_output, default_timeout);
+}
+
+/// As `runWithInput`, with the caller's own deadline.
+///
+/// Built on a `MultiReader` over stdout and stderr the way `std.process.run`
+/// is: a drain that reads only stdout blocks forever on a child that fills
+/// the stderr pipe first. The stdin write is all that is its own.
+///
+/// Known and not fixed: stdin is written in full before any output is read,
+/// so a child that fills its output pipe meanwhile can still deadlock. The
+/// payloads are small everywhere but the batch blob reads.
+pub fn runWithInputWithin(
+    gpa: Allocator,
+    io: Io,
+    argv: []const []const u8,
+    stdin_data: []const u8,
+    max_output: usize,
+    timeout: Io.Timeout,
+) RunError!Output {
     var child = try std.process.spawn(io, .{
         .argv = argv,
         .stdin = .pipe,
         .stdout = .pipe,
         .stderr = .pipe,
     });
-    errdefer _ = child.wait(io) catch {};
+    // What makes the deadline a deadline: a child still running when this
+    // returns is killed rather than left behind.
+    defer child.kill(io);
 
     // Feed stdin and close it before draining, so the child sees EOF and
     // finishes rather than both sides waiting on each other.
@@ -186,25 +241,39 @@ pub fn runWithInput(
         child.stdin = null;
     }
 
-    var out_buf: [64 << 10]u8 = undefined;
-    var reader = child.stdout.?.reader(io, &out_buf);
-    var collected: std.ArrayList(u8) = .empty;
-    errdefer collected.deinit(gpa);
-    reader.interface.appendRemaining(gpa, &collected, .limited(max_output)) catch |err| switch (err) {
-        error.ReadFailed => return error.ReadFailure,
+    var streams: Io.File.MultiReader.Buffer(2) = undefined;
+    var multi: Io.File.MultiReader = undefined;
+    multi.init(gpa, io, streams.toStreams(), &.{ child.stdout.?, child.stderr.? });
+    defer multi.deinit();
+
+    const out_r = multi.reader(0);
+    const err_r = multi.reader(1);
+    while (multi.fill(64, timeout)) |_| {
+        if (out_r.buffered().len > max_output) return error.StreamTooLong;
+        if (err_r.buffered().len > stderr_max) return error.StreamTooLong;
+    } else |err| switch (err) {
+        error.EndOfStream => {},
         else => |e| return e,
-    };
+    }
+    try multi.checkAnyError();
 
     const term = try child.wait(io);
+    const out = try multi.toOwnedSlice(0);
+    errdefer gpa.free(out);
+    const err_text = try multi.toOwnedSlice(1);
     return .{
-        .stdout = try collected.toOwnedSlice(gpa),
-        .stderr = try gpa.dupe(u8, ""),
+        .stdout = out,
+        .stderr = err_text,
         .exit_code = switch (term) {
             .exited => |code| code,
             else => 1,
         },
     };
 }
+
+/// What a child may say about itself before we stop listening. A diagnostic,
+/// not an answer: anything past this is a program in a loop.
+const stderr_max: usize = 64 << 10;
 
 test "runWithInput feeds stdin and collects stdout" {
     const testing = std.testing;
@@ -216,4 +285,52 @@ test "runWithInput feeds stdin and collects stdout" {
 
     try testing.expectEqual(@as(u8, 0), out.exit_code);
     try testing.expectEqualStrings("hello\nworld\n", out.stdout);
+}
+
+test "a noisy child comes back rather than blocking on its own stderr" {
+    // A child that fills the stderr pipe before touching stdout used to block
+    // forever. It now ends at the cap, and the test is that it ends at all.
+    const testing = std.testing;
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
+    defer threaded.deinit();
+
+    try testing.expectError(error.StreamTooLong, runWithInput(
+        testing.allocator,
+        threaded.io(),
+        &.{ "sh", "-c", "yes loud | head -c 200000 >&2; cat" },
+        "quiet\n",
+        1 << 20,
+    ));
+
+    // Under the cap it is read whole, alongside stdout, which the old drain
+    // never returned at all.
+    const out = try runWithInput(testing.allocator, threaded.io(), &.{
+        "sh", "-c", "printf 'warned' >&2; cat",
+    }, "quiet\n", 1 << 20);
+    defer out.deinit(testing.allocator);
+    try testing.expectEqualStrings("quiet\n", out.stdout);
+    try testing.expectEqualStrings("warned", out.stderr);
+}
+
+test "a child that never answers hits the deadline instead of the pane" {
+    const testing = std.testing;
+    var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
+    defer threaded.deinit();
+
+    const quick: Io.Timeout = .{ .duration = .{ .raw = .fromMilliseconds(150), .clock = .awake } };
+    try testing.expectError(error.Timeout, runWithin(
+        testing.allocator,
+        threaded.io(),
+        &.{ "sleep", "30" },
+        1 << 16,
+        quick,
+    ));
+    try testing.expectError(error.Timeout, runWithInputWithin(
+        testing.allocator,
+        threaded.io(),
+        &.{ "sh", "-c", "cat >/dev/null; sleep 30" },
+        "x",
+        1 << 16,
+        quick,
+    ));
 }

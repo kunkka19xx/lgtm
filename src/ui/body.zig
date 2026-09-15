@@ -483,15 +483,18 @@ fn drawLine(
     var note_style: ?vaxis.Style = null;
     const no_new = lines.new_no[li];
     if (!old and no_new != 0 and col > 0) {
+        // The worst state on the line, not the first found: one dot is all
+        // the gutter has, so a stale remark must not hide under an open one.
+        var worst: ?frame_mod.CommentMark.State = null;
         for (v.notes) |m| {
             if (m.line != no_new) continue;
-            note_style = withBg(switch (m.state) {
-                .open => t.comment_open,
-                .sent => t.comment_sent,
-                .stale => t.comment_stale,
-            }, bg);
-            break;
+            if (worst == null or m.state.worseThan(worst.?)) worst = m.state;
         }
+        if (worst) |st| note_style = withBg(switch (st) {
+            .open => t.comment_open,
+            .sent => t.comment_sent,
+            .stale => t.comment_stale,
+        }, bg);
     }
 
     // The sign, the number and the note's dot go on the first row only. A

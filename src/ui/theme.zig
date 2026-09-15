@@ -285,6 +285,11 @@ pub const Theme = struct {
     comment_open: Style,
     comment_sent: Style,
     comment_stale: Style,
+    /// Who wrote a remark, in the thread overlay: somebody else's name only,
+    /// because the reader's own is the accent that means "yours" everywhere
+    /// else. A weight rather than a hue by elimination - every free colour is
+    /// either some theme's accent or a diff sign.
+    comment_author: Style,
     /// A change newer than the mark. The accent hue, because that is the slot
     /// meaning "look here" and a fourth colour with its own opinion would make
     /// the gutter a legend to memorise.
@@ -366,6 +371,7 @@ pub fn fromPalette(p: Palette) Theme {
         .comment_open = .{ .fg = p.cyan, .bold = true },
         .comment_sent = .{ .fg = p.muted },
         .comment_stale = .{ .fg = p.red },
+        .comment_author = .{ .fg = p.fg, .bold = true },
         .fresh = .{ .fg = p.accent, .bold = true },
         .path = .{ .fg = p.fg, .bold = true },
         .added_count = .{ .fg = p.green },
@@ -617,6 +623,10 @@ test "every bundled theme keeps the relationships the default has" {
         // Text has to survive being drawn on the cursor line, which covers
         // the full width of the pane.
         try std.testing.expect(!eq(t.text.fg, t.cursor_line.bg));
+        // The two names are what tells a thread's messages apart, so they may
+        // not share a colour, or read as the dim time beside them.
+        try std.testing.expect(!eq(t.comment_author.fg, t.accent.fg));
+        try std.testing.expect(!eq(t.comment_author.fg, t.dim.fg));
     }
 }
 

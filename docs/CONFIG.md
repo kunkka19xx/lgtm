@@ -156,6 +156,7 @@ ask_test      = "{ref}: a table test, not a unit test"
 | `ref_file_line` / `_range` / `_span` | `{path}:{line}` … | a file with no hunks at all, opened and read rather than reviewed, so no `#id` |
 | `ref_prefix` | `PR #{pr} ` | put before every reference while a pull request is on screen, and nothing at all otherwise |
 | `submit_review` | `review ready: {path} ({count} comment{s})` | `path` `count` `s` |
+| `submit_review_mixed` | `review ready: {path} ({mine} of mine, {theirs} from the request)` | `path` `mine` `theirs` `count` |
 | `ask_why` `ask_revert` `ask_test` `ask_explain` | `{ref} - why this approach?` … | `ref`, whichever of the above the cursor produced |
 
 `ref_prefix` exists because a pull request is somebody else's tree.
@@ -166,6 +167,12 @@ available to it, plus `{pr}`.
 `{s}` on `submit_review` is the plural: empty for one comment, `s` otherwise.
 It is a variable rather than a branch, because a template language with an `if`
 in it is a template language.
+
+`submit_review_mixed` is sent instead whenever the review file also carries
+remarks that were already on the pull request. Two templates rather than one
+with a variable in it, for the same reason: the difference is a sentence, not a
+number. Without it the agent is handed the reviewers' asks mixed in with your
+own, with no way to tell which is which.
 
 **An unknown placeholder is left verbatim rather than dropped.** Write
 `{lines}` where the table offers `{line}` and you will see the typo in the
@@ -276,7 +283,7 @@ The slots:
 | Accents | `accent` `popup_border` |
 | Files | `file_plain` `file_added` `file_deleted` `file_modified` `file_renamed` `file_binary` |
 | Diff | `add_sign` `del_sign` `add_line` `del_line` `filler` `hunk_id` `line_no` `added_count` `removed_count` |
-| Comments | `comment_open` `comment_sent` `comment_stale` |
+| Comments | `comment_open` `comment_sent` `comment_stale` `comment_author` |
 | The mark | `fresh` |
 | Chrome | `rule` `dim` `path` `hint` `notice` `prompt` `mode_badge` `turn_badge` |
 | Selection | `cursor_line` `selection` `search_match` |
@@ -389,13 +396,16 @@ rule is easier to hold than fourteen more rows.
 | `comment_view` | `<Space>vc` |
 | `comment_list` | `<Space>lc` |
 | `comment_send` | `<Space>sc` |
-| `comment_delete` | `<Space>dc` |
+| `comment_delete` | `<Space>dc`, and `d` in the thread |
 | `comment_suggest` | `<Space>gc` |
 | `comment_send_one` | `<C-s>` |
 | `comment_send_all` | `<C-x>` |
 | `comment_drop` | `<C-d>` |
 | `comment_post_one` | `<C-p>` |
 | `compose_post_now` | `<C-p>` |
+| `thread_reply` | `<Space>rc`, and `r` in the thread |
+| `thread_select` | `<CR>` in the thread |
+| `thread_close` | `<Esc>` or `q` in the thread |
 
 **Pull requests**
 
