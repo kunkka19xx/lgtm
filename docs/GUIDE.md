@@ -763,8 +763,8 @@ application "Ghostty" to get id of every terminal'` lists them.
 | | |
 |---|---|
 | `lgtm` | HEAD against the working tree: the default, and what the tool is about |
-| `lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
-| `lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
+| `lgtm diff main`<br>`lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
+| `lgtm diff main HEAD`<br>`lgtm diff main..HEAD`<br>`lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
 | `lgtm --pr 123` | a pull request, the way GitHub shows one: the head against the commit it branched from, not against the tip of the base branch. Bare `--pr` takes the current branch's. **Static**, and it needs `gh` installed and logged in |
 
 The badge says which: `main` or `main..HEAD` in the accent instead of `NORMAL`,
@@ -778,7 +778,7 @@ half-second of a session are part of the starting state rather than a turn.
 ### Reading the numbers without opening the screen
 
 ```
-lgtm status      # or: lgtm --status
+lgtm status
 ```
 
 One table, printed and gone: what changed, by how much, and when each file was
@@ -816,3 +816,118 @@ It takes the same flags the review does, and means the same things by them:
 the patterns kept out is counted in the last line rather than left silent. With
 `--target` or `--pr` the ages go: the file on disk is not the file being
 reported, and its mtime would be answering a question nobody asked.
+
+### Using it instead of git
+
+```sh
+lgtm diff          # lgtm's own, and the reason this tool exists
+lgtm status        # lgtm's own
+lgtm log -p        # git's, unchanged
+lgtm commit -m x   # git's
+lgtm git diff      # git's diff, when that is the one you want
+```
+
+Any word `lgtm` has no command of its own for is handed to git with the
+arguments exactly as typed, and `lgtm` exits with git's exit code. The terminal
+is git's while it runs, so a pager still pages, a prompt still prompts, commit
+still opens your editor, and the colours are git's own.
+
+The words `lgtm` answers itself are `diff`, `status`, `risk`, `themes`, `help`
+and `version`. Six, and the list grows only where the answer here is better
+than the answer there - or, as with `risk`, where there is no answer there at
+all. `lgtm git <command>` reaches past them.
+
+`lgtm diff` is the review this tool opens with no word at all, and it takes
+refs the way git writes them: `lgtm diff main`, `lgtm diff main HEAD`,
+`lgtm diff main..HEAD`.
+
+**What it cannot express, it hands to git.** `lgtm diff --stat`,
+`lgtm diff -- src/auth.zig`, `lgtm status --porcelain`, `lgtm diff a...b` - none
+of those are things this tool has an answer for, and all of them are questions
+git was going to be asked anyway. They run, with git's output and git's exit
+code. The rule is one sentence: **lgtm answers what it can, and everything else
+is git's, verbatim.**
+
+`git init` is not among them, on purpose: writing an `lgtm` config is
+`lgtm --init`, so `lgtm init` makes a repository, the way a hand that typed it
+expected.
+
+**The first word decides.** `lgtm log --once` sends `--once` to git, not to
+`lgtm` - once a word is git's, everything after it is too. A leading *flag* is
+never git's: `lgtm --once` is `lgtm`, and `lgtm git -c core.pager=cat log` is
+how an exotic git invocation gets through.
+
+### What the change did to the tests
+
+```
+lgtm risk
+```
+
+The one question here that git cannot answer. `git diff` shows a deleted test
+and an added skip exactly the way it shows a renamed variable - as lines - and
+that is the part of a diff people skim. Weakening a test is the cheapest way
+to turn a red build green, and it is the change a reviewer is least likely to
+catch.
+
+```
+ src/auth.zig  2 tests removed, 3 fewer assertions
+    5  − test "rejects an expired token" {
+   10  − test "rejects a token from another issuer" {
+
+ src/parse.go  1 skip added
+    4  + t.Skip("flaky in CI")
+
+ 2 files check less than they did: 2 tests removed, 1 skip added, 3 fewer assertions
+```
+
+**It exits 1 when something was weakened**, so a build can ask too:
+
+```yaml
+- run: lgtm risk --base origin/main
+```
+
+A removed test and an added skip fail it. A fallen assertion count does not,
+because a refactor that merges two checks into one looks the same from here,
+and a check that cries wolf is a check somebody switches off. `--strict` makes
+it fail on that too.
+
+It reads content, never paths: Zig keeps its tests inside the source file, so a
+rule that only looked in `tests/` would miss almost all of them. A rename nets
+to zero - one declaration left, one arrived - and a language nobody has
+described is silent rather than guessed at. It misses things rather than
+inventing them, which is the side to err on.
+
+Inside the pane this is the same scan `]w` walks, so a finding printed here is
+a place you can go and read.
+
+### Aliasing git to lgtm
+
+```sh
+alias git=lgtm
+```
+
+This works, and it is what the fall-through above is for. Everything git does,
+`lgtm` does - `add -p`, `commit`, `rebase -i`, `push`, `log -p`, `stash list` -
+with the terminal handed over, so pagers page and prompts prompt. What changes
+is the handful of questions `lgtm` answers better:
+
+| you type | you get |
+|---|---|
+| `git diff` | the review, in the pane |
+| `git diff --stat`, `git diff -- path` | git's, unchanged |
+| `git status` | the table, with counts and ages |
+| `git status -s`, `git status --porcelain` | git's, unchanged |
+| `git risk` | what the change did to the tests |
+| `git help rebase` | git's man page |
+| `git add -p`, everything else | git's, unchanged |
+
+Two differences worth knowing before you put it in your shell rc:
+
+- `git --version` and `git -v` print **lgtm's** banner, not git's. `lgtm git
+  --version` gets git's. Scripts are unaffected - a shell alias is not seen by
+  scripts, by other programs, or by non-interactive shells.
+- `git diff` opens a full-screen pane instead of printing. If you wanted the
+  text, `git diff --stat` and friends still print, and `lgtm git diff` prints
+  the whole thing.
+
+`lgtm git <command>` always reaches the real one, whatever the alias says.

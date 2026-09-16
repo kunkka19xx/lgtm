@@ -96,8 +96,19 @@ make dev            # install as lgtm-dev, beside a packaged lgtm
 make clean-dev      # remove that one
 ```
 
-You also need `git`. `tmux` is optional: without it, references go to the
-clipboard over OSC 52, which works over SSH.
+You also need `git` - and you can type it through `lgtm`. Any word `lgtm` has
+no command of its own for goes straight to git with your arguments untouched,
+so `lgtm log -p` and `lgtm commit -m x` work, while `lgtm diff`, `lgtm status`
+and `lgtm risk` are the ones `lgtm` answers itself - the last of those being a
+question git has no answer to at all:
+
+```sh
+lgtm risk      # did the agent quietly delete a test, or skip one? exits 1 if so
+```
+
+`alias git=lgtm` holds: what `lgtm` cannot express it hands to git verbatim,
+exit code and all. `tmux` is optional: without it, references go to
+the clipboard over OSC 52, which works over SSH.
 
 ## Configure
 
@@ -119,7 +130,7 @@ icons = "nerd"        # or "unicode", "ascii"
 comments = "inline"   # or "marker": just the gutter dot
 
 [theme]
-name = "gruvbox"      # seven bundled; `lgtm --theme-preview` shows them all
+name = "gruvbox"      # seven bundled; `lgtm themes` shows them all
 
 [keys]
 next_hunk = ["]h", "<Space>nh"]
