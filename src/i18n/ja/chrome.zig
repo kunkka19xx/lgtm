@@ -72,6 +72,13 @@ pub const entries: []const Entry = &.{
     .{ "(you)", "(自分)" },
 
     .{ "Read what your agent wrote - before you say LGTM.", "エージェントが書いたものを読もう - LGTM と言う前に" },
+    .{ "the working tree", "作業ツリー" },
+    .{ "could not read the diff", "差分を取得できません" },
+    .{ "nothing to review: {s} matches {s}", "レビュー対象なし: {s}と{s}に差分なし" },
+    .{ "{d} file{s}", "{d}ファイル{[1]-}" },
+    .{ "against {s}", "{s} との比較" },
+    .{ "against {s}, {d} ignored", "{s} との比較、{d}件を除外" },
+    .{ "{s}..{s}, {d} ignored", "{s}..{s}、{d}件を除外" },
     .{ "no changes against HEAD", "HEAD からの変更はありません" },
     .{ "not a git repository", "git リポジトリではありません" },
     .{ "cd to a repository, or git init here", "リポジトリへ cd するか、ここで git init" },

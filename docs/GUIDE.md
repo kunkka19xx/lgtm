@@ -774,3 +774,33 @@ reading one as the other is the mistake worth preventing.
 **Snapshots are not happening.** They need a git repository, and a turn is
 taken ten seconds after the agent *stops* writing. Changes made in the first
 half-second of a session are part of the starting state rather than a turn.
+
+### Reading the numbers without opening the screen
+
+```
+lgtm status      # or: lgtm --status
+```
+
+One table, printed and gone: what changed, by how much, and when each file was
+last written.
+
+```
+ B  logo.png                                  1d ago
+ R  src/core/{old => new}/app.zig    +3   −3  2h ago
+ M  src/ui/app.zig                  +12   −4  27m ago
+ D  src/ui/app_old.zig                0  −99
+ A  src/ui/status.zig              +210    0  just now
+
+    5 files  +225  −106  against HEAD
+```
+
+`M A D R B` is modified, added, deleted, renamed, binary - a letter as well as
+a colour, because this output is usually a pipe and a pipe has no colours. A
+deleted file has no age: there is nothing left on disk to ask. A binary one has
+no counts: it has no lines.
+
+It takes the same flags the review does, and means the same things by them:
+`lgtm status --base main`, `lgtm status --pr 123`, and `[review] ignore` - what
+the patterns kept out is counted in the last line rather than left silent. With
+`--target` or `--pr` the ages go: the file on disk is not the file being
+reported, and its mtime would be answering a question nobody asked.
