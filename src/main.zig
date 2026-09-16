@@ -12,6 +12,7 @@ pub const tty = @import("io/tty.zig");
 pub const app = @import("ui/app.zig");
 pub const loop = @import("ui/loop.zig");
 pub const splash = @import("ui/splash.zig");
+pub const status = @import("ui/status.zig");
 const metrics = lib.metrics;
 const gh = lib.gh;
 
@@ -19,7 +20,10 @@ const usage =
     \\lgtm - read what your agent wrote
     \\
     \\usage: lgtm [options]
+    \\       lgtm status [options]
     \\
+    \\  status           print the review as a table and exit: what changed,
+    \\                   by how much, and when - also spelled --status
     \\  --base <ref>     review against this ref instead of HEAD
     \\  --target <ref>   review this ref instead of the working tree (static)
     \\  --config <path>  read this file instead of the usual two
@@ -68,6 +72,7 @@ pub fn main(init: std.process.Init) !void {
     var want_preview = false;
     var want_version = false;
     var want_init = false;
+    var want_status = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     // `--pr` takes an optional value, so it has to be able to look at the next
@@ -95,6 +100,10 @@ pub fn main(init: std.process.Init) !void {
             want_init = true;
         } else if (std.mem.eql(u8, arg, "--theme-preview")) {
             want_preview = true;
+        } else if (std.mem.eql(u8, arg, "status") or std.mem.eql(u8, arg, "--status")) {
+            // The only word this tool takes that is not a flag: `lgtm status`
+            // is what a hand types next to `git status`.
+            want_status = true;
         } else if (std.mem.eql(u8, arg, "--theme")) {
             theme_name = args.next() orelse {
                 try w.print("lgtm: --theme needs a name\n\n{s}", .{usage});
@@ -225,6 +234,26 @@ pub fn main(init: std.process.Init) !void {
         pr_repo = refs.repo;
     }
 
+    // After `--pr` resolves, so `lgtm status --pr 42` reports the pull request
+    // rather than the working tree. No terminal is touched: this prints and
+    // exits.
+    if (want_status) {
+        lib.i18n.lang = cfg.cfg.ui.language;
+        const term = tty.stdoutIsTerminal(io);
+        try status.run(gpa, io, w, .{
+            .theme = cfg.cfg.theme,
+            .glyphs = glyphs,
+            .colour = term,
+            .cols = if (term) tty.stdoutColumns() else null,
+            .tree = term,
+            .base = base orelse "HEAD",
+            .target = target,
+            .ignore = cfg.cfg.ignore,
+        });
+        try w.flush();
+        return;
+    }
+
     try loop.run(gpa, io, init.environ_map, .{
         .once = want_once,
         .cfg = cfg.cfg,
@@ -283,4 +312,5 @@ test {
     _ = theme;
     _ = tty;
     _ = app;
+    _ = status;
 }

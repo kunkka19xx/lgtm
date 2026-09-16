@@ -774,3 +774,45 @@ reading one as the other is the mistake worth preventing.
 **Snapshots are not happening.** They need a git repository, and a turn is
 taken ten seconds after the agent *stops* writing. Changes made in the first
 half-second of a session are part of the starting state rather than a turn.
+
+### Reading the numbers without opening the screen
+
+```
+lgtm status      # or: lgtm --status
+```
+
+One table, printed and gone: what changed, by how much, and when each file was
+last written.
+
+```
+ B  logo.png                                  1d ago
+ R  src/core/{old => new}/app.zig    +3   −3  2h ago
+    src/ui/
+ M    ├─ app.zig                    +12   −4  27m ago
+ D    ├─ app_old.zig                  0  −99
+ A    └─ status.zig                +210    0  just now
+
+    5 files  +225  −106  against HEAD
+```
+
+`M A D R B` is modified, added, deleted, renamed, binary - a letter as well as
+a colour, because this output is usually a pipe and a pipe has no colours. A
+deleted file has no age: there is nothing left on disk to ask. A binary one has
+no counts: it has no lines.
+
+A directory holding more than one changed file becomes a header with its files
+under it - which is what makes the shape of a turn visible: six files under
+`src/ui/` is one piece of work, six files in six directories is another. A lone
+file keeps its whole path, because one file is not a tree, and so does a rename
+that left its directory: `src/{ui => core}/app.zig` belongs to neither end.
+
+**Piped, the table stays flat** - every row carries its whole path again, so
+`lgtm status | grep src/ui` and copying a path out of a row both keep working.
+Same rule as the colours. On a pane too narrow for everything, the ages go
+before the paths do.
+
+It takes the same flags the review does, and means the same things by them:
+`lgtm status --base main`, `lgtm status --pr 123`, and `[review] ignore` - what
+the patterns kept out is counted in the last line rather than left silent. With
+`--target` or `--pr` the ages go: the file on disk is not the file being
+reported, and its mtime would be answering a question nobody asked.

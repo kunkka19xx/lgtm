@@ -59,6 +59,12 @@ pub const Glyphs = struct {
     heavy_bl: []const u8,
     heavy_br: []const u8,
 
+    /// The rail down a directory's files in `lgtm status`, and the last of
+    /// them. Whole two-column strings rather than pieces, so every name under
+    /// a header starts at the same place.
+    tree_branch: []const u8,
+    tree_last: []const u8,
+
     /// Stands in for the part of a path there was no room to draw.
     /// The gutter mark for a line carrying a comment.
     comment_mark: []const u8,
@@ -140,6 +146,8 @@ pub const Glyphs = struct {
         .heavy_tr = "\u{2513}",
         .heavy_bl = "\u{2517}",
         .heavy_br = "\u{251b}",
+        .tree_branch = "\u{251c}\u{2500}",
+        .tree_last = "\u{2514}\u{2500}",
         .comment_mark = "\u{25cf}",
         .fresh_mark = "\u{2503}",
         .revert_mark = "\u{21ba}",
@@ -196,6 +204,8 @@ pub const Glyphs = struct {
         .heavy_tr = "+",
         .heavy_bl = "+",
         .heavy_br = "+",
+        .tree_branch = "|-",
+        .tree_last = "\\-",
         .comment_mark = "*",
         .fresh_mark = "|",
         .revert_mark = "<-",
