@@ -253,7 +253,7 @@ Seven are bundled: `terminal`, `catppuccin`, `tokyo-night`, `gruvbox`,
 `dracula`, `rose-pine`, `kanagawa`. `terminal` paints nothing and lets your
 emulator's own sixteen colours through.
 
-`lgtm --theme-preview` shows them all, and `:theme <Tab>` cycles them inside a
+`lgtm themes` shows them all, and `:theme <Tab>` cycles them inside a
 running lgtm - which is the quicker way to choose one. That lasts for the
 session; this file is what makes it stick.
 

@@ -763,8 +763,8 @@ application "Ghostty" to get id of every terminal'` lists them.
 | | |
 |---|---|
 | `lgtm` | HEAD against the working tree: the default, and what the tool is about |
-| `lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
-| `lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
+| `lgtm diff main`<br>`lgtm --base main` | your whole branch, **including what you have not committed**. Live: the tree is still the right-hand side, so it still updates as the agent writes |
+| `lgtm diff main HEAD`<br>`lgtm diff main..HEAD`<br>`lgtm --base main --target HEAD` | committed work only, as two trees. **Static:** nothing can move, so the watcher, the snapshots and the mark are all off |
 | `lgtm --pr 123` | a pull request, the way GitHub shows one: the head against the commit it branched from, not against the tip of the base branch. Bare `--pr` takes the current branch's. **Static**, and it needs `gh` installed and logged in |
 
 The badge says which: `main` or `main..HEAD` in the accent instead of `NORMAL`,
@@ -778,7 +778,7 @@ half-second of a session are part of the starting state rather than a turn.
 ### Reading the numbers without opening the screen
 
 ```
-lgtm status      # or: lgtm --status
+lgtm status
 ```
 
 One table, printed and gone: what changed, by how much, and when each file was
@@ -816,3 +816,37 @@ It takes the same flags the review does, and means the same things by them:
 the patterns kept out is counted in the last line rather than left silent. With
 `--target` or `--pr` the ages go: the file on disk is not the file being
 reported, and its mtime would be answering a question nobody asked.
+
+### Using it instead of git
+
+```sh
+lgtm diff          # lgtm's own, and the reason this tool exists
+lgtm status        # lgtm's own
+lgtm log -p        # git's, unchanged
+lgtm commit -m x   # git's
+lgtm git diff      # git's diff, when that is the one you want
+```
+
+Any word `lgtm` has no command of its own for is handed to git with the
+arguments exactly as typed, and `lgtm` exits with git's exit code. The terminal
+is git's while it runs, so a pager still pages, a prompt still prompts, commit
+still opens your editor, and the colours are git's own.
+
+The words `lgtm` answers itself are `diff`, `status`, `themes`, `help` and
+`version`. Five, and the list grows only where the answer here is better than
+the answer there. `lgtm git <command>` reaches past all five.
+
+`lgtm diff` is the review this tool opens with no word at all, and it takes
+refs the way git writes them: `lgtm diff main`, `lgtm diff main HEAD`,
+`lgtm diff main..HEAD`. Two things git's `diff` does that this one does not -
+a path (`-- src/auth.zig`) and the index alone (`--staged`) - say so and point
+at `lgtm git diff`, rather than quietly reviewing something else.
+
+`git init` is not among them, on purpose: writing an `lgtm` config is
+`lgtm --init`, so `lgtm init` makes a repository, the way a hand that typed it
+expected.
+
+**The first word decides.** `lgtm log --once` sends `--once` to git, not to
+`lgtm` - once a word is git's, everything after it is too. A leading *flag* is
+never git's: `lgtm --once` is `lgtm`, and `lgtm git -c core.pager=cat log` is
+how an exotic git invocation gets through.

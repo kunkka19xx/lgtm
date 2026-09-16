@@ -177,6 +177,15 @@ pub fn runInherit(io: Io, argv: []const []const u8) RunError!u8 {
     };
 }
 
+/// Ends the process with a status of the caller's choosing.
+///
+/// Here rather than at its one call site because this file is where
+/// `std.process` is allowed to be. `lgtm <git command>` is a hand-off, and
+/// what a hand-off owes the shell is the code the child exited with.
+pub fn exit(status: u8) noreturn {
+    std.process.exit(status);
+}
+
 test "runInherit waits for the child and reports its status" {
     const testing = std.testing;
     var threaded: Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
