@@ -73,6 +73,11 @@ pub const entries: []const Entry = &.{
 
     .{ "Read what your agent wrote - before you say LGTM.", "エージェントが書いたものを読もう - LGTM と言う前に" },
     .{ "the working tree", "作業ツリー" },
+    .{ "nothing weakened: the tests check as much as they did", "テストの弱化なし: 検査量は以前と同じ" },
+    .{ "1 file checks less than it did", "1ファイルで検査量が減少" },
+    .{ "{d} files check less than they did", "{d}ファイルで検査量が減少" },
+    .{ "{d} more like these", "他に{d}件" },
+    .{ "the file it tested is gone", "テストしていたファイルが削除されました" },
     .{ "could not read the diff", "差分を取得できません" },
     .{ "nothing to review: {s} matches {s}", "レビュー対象なし: {s}と{s}に差分なし" },
     .{ "{d} file{s}", "{d}ファイル{[1]-}" },

@@ -13,6 +13,7 @@ pub const app = @import("ui/app.zig");
 pub const loop = @import("ui/loop.zig");
 pub const splash = @import("ui/splash.zig");
 pub const status = @import("ui/status.zig");
+pub const risk = @import("ui/risk.zig");
 const metrics = lib.metrics;
 const gh = lib.gh;
 
@@ -22,6 +23,7 @@ const usage =
     \\usage: lgtm [options]           review the working tree
     \\       lgtm diff [a] [b]        the same, against a ref or between two
     \\       lgtm status [options]    what changed, as a table
+    \\       lgtm risk [options]      what the change did to the tests
     \\       lgtm themes              draw every bundled theme
     \\       lgtm <git command> ...   anything lgtm has no word for is git's
     \\       lgtm git <command> ...   git's own, even where lgtm has the word
@@ -36,6 +38,7 @@ const usage =
     \\  --pane <id>      send here: a tmux pane (%3), a herdr pane (w1:p1),
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
+    \\  --strict         risk: fail on a fallen assertion count too
     \\  --once           render one frame and exit, for screenshots and CI
     \\  --profile        print timing spans on exit (requires -Dprofile build)
     \\  -v, --version    print the banner and exit
@@ -53,11 +56,11 @@ const usage =
 /// tool that answered it by writing a config file into a directory with no
 /// repository in it would be worse than no tool. Writing that config is
 /// `--init`, which is the spelling it has always had.
-const Verb = enum { status, diff, themes, help, version };
+const Verb = enum { status, diff, risk, themes, help, version };
 
 /// Which of them was asked for. `help` and `version` are not here: they beat
 /// every other word, so they are answered where they are read.
-const Command = enum { review, status, init, themes };
+const Command = enum { review, status, risk, init, themes };
 
 /// A panic still says what went wrong; what this drops in a release build is
 /// the stack trace under it, and with it the DWARF reader, the inflate for
@@ -82,25 +85,11 @@ pub fn main(init: std.process.Init) !void {
     // `lgtm` is what you type instead of `git`, so a subcommand it has not
     // grown yet is handed over rather than refused - and it is the *first*
     // word that decides, so everything after it reaches git untouched.
-    if (gitWord(init.minimal.args)) |skip| {
-        var argv: std.ArrayList([]const u8) = .empty;
-        defer argv.deinit(gpa);
-        try argv.append(gpa, "git");
-        var rest = init.minimal.args.iterate();
-        for (0..skip) |_| _ = rest.next();
-        while (rest.next()) |a| try argv.append(gpa, a);
-
-        try w.flush();
-        const code = lib.proc.runInherit(io, argv.items) catch {
-            try w.print("lgtm: cannot run git - is it installed?\n", .{});
-            try w.flush();
-            return;
-        };
-        lib.proc.exit(code);
-    }
+    if (gitWord(init.minimal.args)) |skip| try handToGit(gpa, io, w, init.minimal.args, skip);
 
     var want_profile = false;
     var want_once = false;
+    var want_strict = false;
     var config_path: ?[]const u8 = null;
     var theme_name: ?[]const u8 = null;
     var pane: ?[]const u8 = null;
@@ -112,6 +101,11 @@ pub fn main(init: std.process.Init) !void {
     var cmd: Command = .review;
     var refs: Refs = .{};
     var taking_refs = false;
+    // Whether the word this run began with is one git has too. If it is, then
+    // anything lgtm cannot express is not an error - it is the question git
+    // was going to be asked anyway, and `alias git=lgtm` only holds if it
+    // gets asked.
+    var shadowing = false;
     var args = init.minimal.args.iterate();
     _ = args.next();
     // `--pr` takes an optional value, so it has to be able to look at the next
@@ -135,41 +129,36 @@ pub fn main(init: std.process.Init) !void {
             want_profile = true;
         } else if (std.mem.eql(u8, arg, "--once")) {
             want_once = true;
+        } else if (std.mem.eql(u8, arg, "--strict")) {
+            want_strict = true;
         } else if (taking_refs and arg.len > 0 and arg[0] != '-') {
             // After `diff`, a word is a ref - git's own rule, and the reason
             // `lgtm diff status` reviews a branch called status rather than
             // complaining about a second command.
-            refs.add(arg) catch |err| {
-                switch (err) {
-                    error.Symmetric => try w.print(
-                        "lgtm: lgtm takes 'a..b'; for 'a...b' use lgtm git diff {s}\n",
-                        .{arg},
-                    ),
-                    error.AlreadyRanged => try w.print("lgtm: '{s}' is already two refs\n\n{s}", .{ arg, usage }),
-                    error.TooMany => try w.print(
-                        "lgtm: diff takes two refs at most, not '{s}'\n\n{s}",
-                        .{ arg, usage },
-                    ),
-                }
-                try w.flush();
-                return;
-            };
+            // `a...b`, a third ref, a path after `--`: all things git's diff
+            // says something about and this one cannot.
+            refs.add(arg) catch try handToGit(gpa, io, w, init.minimal.args, 1);
         } else if (arg.len > 0 and arg[0] != '-') {
             // The first word already decided whether this run is lgtm's or
             // git's, above. A word here is a second command on one line, or an
             // argument for something that does not take one.
             const verb = std.meta.stringToEnum(Verb, arg) orelse {
+                if (shadowing) try handToGit(gpa, io, w, init.minimal.args, 1);
                 try w.print("lgtm: unexpected '{s}'\n\ntry: lgtm git {s} ...\n\n{s}", .{ arg, arg, usage });
                 try w.flush();
                 return;
             };
             if (cmd != .review) {
+                if (shadowing) try handToGit(gpa, io, w, init.minimal.args, 1);
                 try w.print("lgtm: unexpected '{s}'\n\n{s}", .{ arg, usage });
                 try w.flush();
                 return;
             }
             switch (verb) {
                 .help => {
+                    // `git help rebase` is git's; bare `help` is this tool's,
+                    // because this tool is what was typed.
+                    if (args.next() != null) try handToGit(gpa, io, w, init.minimal.args, 1);
                     try w.writeAll(usage);
                     try w.flush();
                     return;
@@ -178,21 +167,16 @@ pub fn main(init: std.process.Init) !void {
                 // `diff` is the review this tool already opens with no word at
                 // all, so it names the default rather than a command of its
                 // own - what it adds is the refs that may follow it.
-                .diff => taking_refs = true,
+                .diff => {
+                    taking_refs = true;
+                    shadowing = true;
+                },
+                .status => {
+                    cmd = .status;
+                    shadowing = true;
+                },
                 inline else => |v| cmd = @field(Command, @tagName(v)),
             }
-        } else if (std.mem.eql(u8, arg, "--")) {
-            // git's separator, and the point where lgtm runs out: it reviews
-            // whatever changed, and has no way to be told about one path.
-            try w.print("lgtm: lgtm reviews every changed file; for one path use lgtm git diff -- ...\n", .{});
-            try w.flush();
-            return;
-        } else if (std.mem.eql(u8, arg, "--cached") or std.mem.eql(u8, arg, "--staged")) {
-            // A review is staged and unstaged together, always: what the agent
-            // wrote is the question, and the index is not part of it.
-            try w.print("lgtm: lgtm shows staged and unstaged together; for the index alone use lgtm git diff {s}\n", .{arg});
-            try w.flush();
-            return;
         } else if (std.mem.eql(u8, arg, "--init")) {
             // The three verbs in their older spelling. Still accepted, no
             // longer listed: `--init` is in every copy of the README that
@@ -246,6 +230,10 @@ pub fn main(init: std.process.Init) !void {
                 return;
             };
         } else {
+            // `--stat`, `--porcelain`, `-s`: lgtm's `diff` and `status` answer
+            // the bare question and the flags they know. Everything else was
+            // always git's question.
+            if (shadowing) try handToGit(gpa, io, w, init.minimal.args, 1);
             try w.print("lgtm: unknown option '{s}'\n\n{s}", .{ arg, usage });
             try w.flush();
             return;
@@ -348,6 +336,26 @@ pub fn main(init: std.process.Init) !void {
     // After `--pr` resolves, so `lgtm status --pr 42` reports the pull request
     // rather than the working tree. No terminal is touched: this prints and
     // exits.
+    if (cmd == .risk) {
+        lib.i18n.lang = cfg.cfg.ui.language;
+        const term = tty.stdoutIsTerminal(io);
+        const code = try risk.run(gpa, io, w, .{
+            .theme = cfg.cfg.theme,
+            .glyphs = glyphs,
+            .colour = term,
+            .cols = if (term) tty.stdoutColumns() else null,
+            .base = base orelse "HEAD",
+            .target = target,
+            .ignore = cfg.cfg.ignore,
+            .strict = want_strict,
+        });
+        try w.flush();
+        // The answer is the exit code as much as the text: this one is meant
+        // to be asked by a build as well as by a person.
+        if (code != 0) lib.proc.exit(code);
+        return;
+    }
+
     if (cmd == .status) {
         lib.i18n.lang = cfg.cfg.ui.language;
         const term = tty.stdoutIsTerminal(io);
@@ -379,6 +387,36 @@ pub fn main(init: std.process.Init) !void {
 
     if (want_profile) try metrics.report(w);
     try w.flush();
+}
+
+/// Runs git with everything that was typed and exits with its status.
+///
+/// `skip` is how many leading argv entries to drop: one for the program name,
+/// two when the word after it was a literal `git`.
+///
+/// Nothing comes back from here. Stdio is inherited rather than piped, so a
+/// pager still pages, a prompt still prompts and the colours are git's own.
+fn handToGit(
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    w: *std.Io.Writer,
+    args: std.process.Args,
+    skip: usize,
+) !noreturn {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.append(gpa, "git");
+    var rest = args.iterate();
+    for (0..skip) |_| _ = rest.next();
+    while (rest.next()) |a| try argv.append(gpa, a);
+
+    try w.flush();
+    const code = lib.proc.runInherit(io, argv.items) catch {
+        try w.print("lgtm: cannot run git - is it installed?\n", .{});
+        try w.flush();
+        lib.proc.exit(1);
+    };
+    lib.proc.exit(code);
 }
 
 /// The refs written after `diff`, in the order they arrived.
@@ -427,16 +465,46 @@ const Refs = struct {
 /// Two also drops a literal `git`, which was the reader asking for *the real
 /// one* - passing it on would make `git git status`.
 ///
-/// A leading flag is never git's. `--once` is far more likely a typo of an
-/// lgtm option than an attempt at `git --once`, and `lgtm git` is right there
-/// for the exotic ones.
+/// A leading flag is lgtm's unless it is one of git's own, which are a closed
+/// set and come before the subcommand: `--once` is far more likely a typo of
+/// an lgtm option than an attempt at `git --once`, but `-c` and `-C` are
+/// nobody's but git's, and `alias git=lgtm` does not survive without them.
 fn gitWord(args: std.process.Args) ?usize {
     var it = args.iterate();
     _ = it.next();
     const first = it.next() orelse return null;
     if (std.mem.eql(u8, first, "git")) return 2;
-    if (first.len == 0 or first[0] == '-') return null;
+    if (first.len == 0) return null;
+    if (first[0] == '-') return if (gitGlobal(first)) 1 else null;
     return if (std.meta.stringToEnum(Verb, first) == null) 1 else null;
+}
+
+/// git's options that come before a subcommand. Listed rather than guessed at,
+/// because the guess in either direction is wrong: treat every leading flag as
+/// git's and a mistyped lgtm option becomes a confusing git error, treat none
+/// of them as git's and `git -c user.name=x commit` stops working under the
+/// alias.
+///
+/// `-h` and `-v` are deliberately absent. Under the alias they are being asked
+/// of lgtm, because lgtm is what the name now means; `lgtm git --version`
+/// still reaches git's.
+const git_globals: []const []const u8 = &.{
+    "-c",                   "-C",                  "-p",               "-P",
+    "--paginate",           "--no-pager",          "--bare",           "--git-dir",
+    "--work-tree",          "--namespace",         "--exec-path",      "--config-env",
+    "--no-optional-locks",  "--literal-pathspecs", "--glob-pathspecs", "--icase-pathspecs",
+    "--no-replace-objects", "--attr-source",       "--html-path",      "--man-path",
+    "--info-path",
+};
+
+fn gitGlobal(arg: []const u8) bool {
+    for (git_globals) |g| {
+        if (std.mem.eql(u8, arg, g)) return true;
+        // `--git-dir=/path` attaches its value rather than taking the next
+        // argument, and both spellings are in use.
+        if (arg.len > g.len and arg[g.len] == '=' and std.mem.startsWith(u8, arg, g)) return true;
+    }
+    return false;
 }
 
 /// `--init`. Writes the starter config to `--config <path>` if one was named,
@@ -471,6 +539,25 @@ fn writeStarter(
         return;
     };
     try w.print("wrote {s}\n\nEvery line is commented out, so nothing changed yet.\n", .{path});
+}
+
+test "git's own leading options are git's, and lgtm's are not" {
+    const testing = std.testing;
+
+    try testing.expect(gitGlobal("-c"));
+    try testing.expect(gitGlobal("-C"));
+    try testing.expect(gitGlobal("--no-pager"));
+    // The attached-value spelling, which is what a script writes.
+    try testing.expect(gitGlobal("--git-dir=/tmp/x/.git"));
+
+    // lgtm's own, and the two every tool answers for itself.
+    try testing.expect(!gitGlobal("--once"));
+    try testing.expect(!gitGlobal("--base"));
+    try testing.expect(!gitGlobal("-h"));
+    try testing.expect(!gitGlobal("-v"));
+    try testing.expect(!gitGlobal("--version"));
+    // A prefix of one is not one.
+    try testing.expect(!gitGlobal("--git"));
 }
 
 test "diff takes its refs the way git writes them" {
@@ -539,4 +626,5 @@ test {
     _ = tty;
     _ = app;
     _ = status;
+    _ = risk;
 }
