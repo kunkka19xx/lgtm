@@ -368,6 +368,30 @@ pub const Store = struct {
         return buf[0..n];
     }
 
+    /// How many more messages follow `n` in its conversation on its own line,
+    /// or null when an earlier message leads it there.
+    ///
+    /// Per line, unlike `conversationAt`: a reply re-anchors on its own once
+    /// the code moves, and the diff draws each message where it actually
+    /// sits. A remark written in this pane threads with nothing and leads.
+    pub fn threadHead(self: *const Store, n: Comment) ?u16 {
+        const t = n.thread();
+        if (t == 0) return 0;
+        var more: u16 = 0;
+        var seen = false;
+        for (self.list.items) |*c| {
+            if (c.thread() != t) continue;
+            if (c.line != n.line or !std.mem.eql(u8, c.path, n.path)) continue;
+            if (c.id == n.id) {
+                seen = true;
+                continue;
+            }
+            if (!seen) return null;
+            more += 1;
+        }
+        return more;
+    }
+
     pub fn edit(self: *Store, id: u32, body: []const u8) Allocator.Error!void {
         const n = self.find(id) orelse return;
         const b = try self.gpa.dupe(u8, body);
@@ -790,6 +814,44 @@ test "editing reopens a sent comment, because the agent has the old text" {
     try testing.expectEqual(State.open, store.find(id).?.state);
     try testing.expectEqualStrings("second thought", store.find(id).?.body);
     try testing.expectEqual(@as(u32, 1), store.openCount());
+}
+
+test "a conversation on a line has one head, and it counts the rest" {
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    const root = try store.adopt(.{ .path = "docs/CONFIG.md", .line = 26, .body = "that's nice", .author = "someone", .remote = 10 });
+    const reply = try store.adopt(.{ .path = "docs/CONFIG.md", .line = 26, .body = "fixed", .author = "kunkka19xx", .remote = 11, .reply_to = 10 });
+    const later = try store.adopt(.{ .path = "docs/CONFIG.md", .line = 26, .body = "thanks", .author = "someone", .remote = 12, .reply_to = 10 });
+
+    try testing.expectEqual(@as(?u16, 2), store.threadHead(store.find(root).?.*));
+    try testing.expectEqual(@as(?u16, null), store.threadHead(store.find(reply).?.*));
+    try testing.expectEqual(@as(?u16, null), store.threadHead(store.find(later).?.*));
+}
+
+test "a reply that drifted to another line leads there" {
+    // Collapsing across lines would take the reply off the line it sits on.
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    const root = try store.adopt(.{ .path = "a.zig", .line = 4, .body = "why this way?", .author = "someone", .remote = 10 });
+    const moved = try store.adopt(.{ .path = "a.zig", .line = 9, .body = "because", .author = "someone", .remote = 11, .reply_to = 10 });
+
+    try testing.expectEqual(@as(?u16, 0), store.threadHead(store.find(root).?.*));
+    try testing.expectEqual(@as(?u16, 0), store.threadHead(store.find(moved).?.*));
+}
+
+test "two remarks written in this pane are two conversations" {
+    const gpa = testing.allocator;
+    var store: Store = .init(gpa);
+    defer store.deinit();
+
+    const a = try store.add("a.zig", 4, "one");
+    const b = try store.add("a.zig", 4, "two");
+    try testing.expectEqual(@as(?u16, 0), store.threadHead(store.find(a).?.*));
+    try testing.expectEqual(@as(?u16, 0), store.threadHead(store.find(b).?.*));
 }
 
 test "the copy that was posted gives way to the forge's" {

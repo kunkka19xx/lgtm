@@ -40,7 +40,9 @@ pub const Row = union(enum) {
     /// The inset rule drawn between two hunks of the same file.
     gap,
     /// A note, drawn under the line it was written against - the way a review
-    /// comment sits under its code. Index into the frame's note list.
+    /// comment sits under its code. A `Comment.id`, not a position: the store
+    /// is rebuilt on every re-diff, and counting back to a remark named a
+    /// different one as soon as an earlier one was deleted.
     ///
     /// A row of its own rather than something painted over the line, because
     /// everything that counts rows already works: it scrolls, it wraps, and
@@ -290,9 +292,9 @@ pub const Side = enum { old, new };
 
 /// Builds the rows for one file: each hunk's header, then its lines, with a
 /// rule between hunks but never before the first or after the last.
-/// A note as the row builder needs it: which line it hangs under, and where
-/// to find its text when the row is drawn.
-pub const CommentAt = struct { line: u32, index: u32 };
+/// A note as the row builder needs it: which line it hangs under, and which
+/// remark it is. An id, for the reason `Row.note` gives.
+pub const CommentAt = struct { line: u32, id: u32 };
 
 pub fn build(gpa: Allocator, f: *const diff.FileDiff) Allocator.Error!Rows {
     return buildWith(gpa, f, &.{}, .flow);
@@ -438,7 +440,7 @@ fn appendComments(
     const no = f.lines.new_no[li];
     if (no == 0) return;
     for (notes) |n| {
-        if (n.line == no) try items.append(gpa, .{ .note = n.index });
+        if (n.line == no) try items.append(gpa, .{ .note = n.id });
     }
 }
 

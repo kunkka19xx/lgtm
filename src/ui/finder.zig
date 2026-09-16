@@ -17,10 +17,12 @@ const frame_mod = @import("frame.zig");
 const render = @import("render.zig");
 const wrap_mod = @import("wrap.zig");
 const compose_mod = @import("compose.zig");
+const comments_mod = @import("../core/comments.zig");
 const diff = @import("../core/diff.zig");
 const hunk = @import("../core/hunk.zig");
 const event = @import("../core/event.zig");
 const git = @import("../core/git.zig");
+const thread_mod = @import("thread.zig");
 const turns_mod = @import("turns.zig");
 const pr_mod = @import("pr.zig");
 const walks = @import("walks.zig");
@@ -276,12 +278,12 @@ pub fn buildPickList(app: *App) void {
         }) catch return;
     }
     if (app.files_purpose == .comments) {
-        // One row per comment, in store order, so the index the overlay
-        // hands back is the comment it names. The label carries the file,
-        // the line and the text, which means the filter reaches all three:
-        // typing part of a remark finds it.
+        // One row per conversation, in store order, each naming the remark
+        // it leads. The label carries the file, the line and the text, so the
+        // filter reaches all three - and every message of a conversation.
         app.pick_list.clearRetainingCapacity();
         for (app.comments.items()) |n| {
+            const replies = app.comments.threadHead(n) orelse continue;
             var one: [256]u8 = undefined;
             const body = compose_mod.flatten(&one, n.body);
             // A stale or already-sent comment has no dot on screen - one
@@ -305,16 +307,26 @@ pub fn buildPickList(app: *App) void {
                 i18n.t("[posted] ")
             else
                 "";
-            const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}", .{
-                n.path, n.line, mark, whose,
+            // Without this a conversation and a single remark are the same
+            // row, and the list would be hiding rather than folding.
+            const more = if (replies > 0)
+                std.fmt.allocPrint(arena, "  +{d}", .{replies}) catch ""
+            else
+                "";
+            const label = std.fmt.allocPrint(arena, "{s}:{d}  {s}{s}{s}", .{
+                n.path, n.line, mark, whose, more,
             }) catch continue;
             // The author is searchable too: "what did they say" is a
             // question a reader asks of a request with several reviewers.
-            const searchable = std.fmt.allocPrint(arena, "{s}:{d}  {s} {s}", .{
-                n.path, n.line, n.author, body,
-            }) catch label;
+            const searchable = if (replies > 0)
+                conversationText(app, arena, n) orelse label
+            else
+                std.fmt.allocPrint(arena, "{s}:{d}  {s} {s}", .{
+                    n.path, n.line, n.author, body,
+                }) catch label;
             app.pick_list.append(app.gpa, .{
                 .path = std.mem.trimEnd(u8, label, " "),
+                .id = n.id,
                 .filter = searchable,
                 .added = 0,
                 .removed = 0,
@@ -454,21 +466,21 @@ pub fn feedFiles(app: *App, key: event.Key, body: u16) !void {
                     closeFiles(app);
                     return;
                 };
-                const list = app.comments.items();
-                var want_path: [4096]u8 = undefined;
-                var want_line: u32 = 0;
-                var have = false;
-                if (i < list.len) {
-                    const n = list[i];
-                    @memcpy(want_path[0..n.path.len], n.path);
-                    want_line = n.line;
-                    have = true;
-                    // Which remark, not only which line: the row picked may
-                    // be the second on its line.
-                    app.comment_sel = n.id;
-                    closeFiles(app);
-                    try walks.showComment(app, want_path[0..n.path.len], want_line, body);
-                    return;
+                // By id: a row may stand for a conversation, so its position
+                // is not the store's.
+                if (i < app.pick_list.items.len) {
+                    if (app.comments.find(app.pick_list.items[i].id)) |n| {
+                        var want_path: [4096]u8 = undefined;
+                        const len = @min(n.path.len, want_path.len);
+                        @memcpy(want_path[0..len], n.path[0..len]);
+                        const want_line = n.line;
+                        // Which remark, not only which line: the row picked
+                        // may be the second on its line.
+                        app.comment_sel = n.id;
+                        closeFiles(app);
+                        try walks.showComment(app, want_path[0..len], want_line, body);
+                        return;
+                    }
                 }
                 closeFiles(app);
                 app.clampScroll(body);
@@ -548,6 +560,22 @@ pub fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
 /// As `diffHead`, from the hunk that contains `at` rather than the first.
 /// What a comment is *about*, which is the one thing its row does not
 /// already say.
+/// Everything said in one conversation, for the filter to reach. The row
+/// shows only the message leading it, and a word from a reply must still find
+/// it, or folding would be hiding.
+fn conversationText(app: *App, arena: Allocator, n: comments_mod.Comment) ?[]const u8 {
+    var buf: [thread_mod.max_messages]*comments_mod.Comment = undefined;
+    var out: std.ArrayList(u8) = .empty;
+    out.print(arena, "{s}:{d}", .{ n.path, n.line }) catch return null;
+    const t = n.thread();
+    for (app.comments.allAt(n.path, n.line, &buf)) |c| {
+        if (c.thread() != t) continue;
+        var one: [256]u8 = undefined;
+        out.print(arena, "  {s} {s}", .{ c.author, compose_mod.flatten(&one, c.body) }) catch break;
+    }
+    return out.items;
+}
+
 pub fn diffText(arena: Allocator, f: diff.FileDiff, at: ?u32) []const u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines: usize = 0;
@@ -908,6 +936,46 @@ test "previews can be turned off, and then no list builds one" {
     try testing.expectEqualStrings("", fx.app.pick_list.items[0].detail);
     // The row itself is untouched: the label is what the filter reads.
     try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "a remark") != null);
+}
+
+test "a conversation is one row, and every message in it is still findable" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    const root = try fx.app.comments.adopt(.{ .path = "src/net.zig", .line = 47, .span = 1, .body = "that retry never backs off", .author = "someone", .outdated = false, .remote = 10 });
+    _ = try fx.app.comments.adopt(.{ .path = "src/net.zig", .line = 47, .span = 1, .body = "jittered in the follow-up", .author = "kunkka19xx", .outdated = false, .remote = 11, .reply_to = 10 });
+    const elsewhere = try fx.app.comments.add("src/net.zig", 90, "unrelated");
+
+    fx.app.files_purpose = .comments;
+    buildPickList(&fx.app);
+
+    try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
+    try testing.expectEqual(root, fx.app.pick_list.items[0].id);
+    try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].path, "+1") != null);
+    try testing.expectEqual(elsewhere, fx.app.pick_list.items[1].id);
+    try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[1].path, "+") == null);
+
+    // Folding must not hide: a word only the reply says still finds it.
+    try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "jittered") != null);
+    try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "backs off") != null);
+}
+
+test "the list acts on the remark a row names, not on its position" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    const first = try fx.app.comments.add("a.zig", 1, "first");
+    const second = try fx.app.comments.add("a.zig", 2, "second");
+    fx.app.files_purpose = .comments;
+    buildPickList(&fx.app);
+    try testing.expectEqual(@as(usize, 2), fx.app.pick_list.items.len);
+
+    fx.app.file_list.index = 1;
+    try testing.expectEqual(second, notes.listSelected(&fx.app).?.id);
+
+    // The store moves and the rows do not.
+    fx.app.comments.remove(first);
+    try testing.expectEqual(second, notes.listSelected(&fx.app).?.id);
 }
 
 test "a comment's panel starts at the hunk it sits in" {

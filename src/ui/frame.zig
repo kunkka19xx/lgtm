@@ -372,6 +372,10 @@ pub const HelpView = struct {
 /// One row of the `F` overlay: a changed file, as the reader picks it out.
 pub const FileEntry = struct {
     path: []const u8,
+    /// What the row stands for when it is not a file: a `Comment.id` in the
+    /// comment list, where a row may stand for a whole conversation. Zero in
+    /// a file list, where the path is the identity.
+    id: u32 = 0,
     added: u32,
     removed: u32,
     /// What happened to the file. Modified draws no mark: it is the majority,
@@ -535,12 +539,21 @@ pub const Busy = struct {
 
 pub const CommentMark = struct {
     line: u32,
+    /// Which remark this is. `Row.note` carries the same id, which is how a
+    /// note row finds its mark without two walks agreeing on a numbering.
+    id: u32 = 0,
     /// What it says, drawn under the line. The gutter marker says a note is
     /// there; this is the note.
     body: []const u8 = "",
     /// Drawn differently, because "I still mean this" and "the code moved out
     /// from under it" are different things to know at a glance.
+    /// On a mark leading a conversation, the worst state in it: a stale reply
+    /// must not read as open because the message above it still is.
     state: State,
+    /// How many more messages follow this one on this line. Non-zero only on
+    /// the mark a row points at; the rest are here for the gutter dot, which
+    /// still needs every remark on the line.
+    replies: u16 = 0,
 
     pub const State = enum {
         sent,
