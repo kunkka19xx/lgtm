@@ -231,6 +231,9 @@ every list; the footer names only the keys you could not guess. The rows are
 addresses, `path:line`, and the panel beside them carries the remark itself
 followed by the hunk it sits in: a remark squeezed into a column is a remark you
 cannot read, so it is not in the column. Typing part of one still finds it.
+A conversation is one row there too, marked `+2` for the messages it stands for,
+and typing a word from any of them finds it - folding a conversation must not
+hide what was said in it.
 
 #### On a pull request
 
@@ -256,6 +259,15 @@ first on a line. They carry the author's name, and one whose line has gone from
 the diff arrives stale rather than silently placed somewhere plausible. Where a
 line carries several remarks the gutter dot shows the worst state on it, so a
 stale remark under an open one is still visible.
+
+**A conversation is one row under the line, not one per message.** With
+`comments = "inline"` the message that starts it is shown with
+`2 more in this thread - <Space>vc to read` under it, and the row wears the
+worst state in the conversation for the same reason the gutter dot does. Five
+messages stacked would be most of an eighty-column pane spent saying there are
+five. Two remarks you wrote yourself on one line are two conversations and stay
+two rows. A reply that re-anchored to a different line is drawn on the line it
+actually sits on, not folded away under the message it answers.
 
 **`<Space>vc` on a line carrying a conversation opens the thread.** Every
 message stacked, author and how long ago on each, the code the first one was

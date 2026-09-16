@@ -231,17 +231,9 @@ pub fn commentRead(app: *App, n: *comments_mod.Comment) void {
 /// whose own row the cursor is sitting on. Both are "this note" to a
 /// reader looking at it, and only one of them was reachable before.
 pub fn commentUnderCursor(app: *App) ?*comments_mod.Comment {
-    const f = app.current() orelse return null;
     if (app.vp.cursor < app.rows.len()) {
         if (app.rows.items[app.vp.cursor] == .note) {
-            const ni = app.rows.items[app.vp.cursor].note;
-            var i: u32 = 0;
-            for (app.comments.list.items) |*n| {
-                if (!std.mem.eql(u8, n.path, f.path())) continue;
-                if (i == ni) return n;
-                i += 1;
-            }
-            return null;
+            return app.comments.find(app.rows.items[app.vp.cursor].note);
         }
     }
     const at = commentLine(app) orelse return null;
@@ -293,8 +285,10 @@ pub fn commentView(app: *App, body: u16) !void {
 pub fn listSelected(app: *App) ?*comments_mod.Comment {
     if (app.files_purpose != .comments) return null;
     const i = app.file_list.selected(app.pick_list.items) orelse return null;
-    const list = app.comments.list.items;
-    return if (i < list.len) &list[i] else null;
+    if (i >= app.pick_list.items.len) return null;
+    // By id: a row may stand for a conversation, so its position is not the
+    // store's.
+    return app.comments.find(app.pick_list.items[i].id);
 }
 
 /// Send the highlighted comment straight from the list, without a detour
@@ -598,20 +592,50 @@ pub fn commentMarks(app: *App) []const render.CommentMark {
     const arena = app.frame_arena.allocator();
     for (app.comments.items()) |n| {
         if (!std.mem.eql(u8, n.path, f.path())) continue;
-        // Whose it is, in the remark rather than beside it: a reader
-        // scrolling past needs to know without opening a list, and the
-        // wrap has to measure the name along with the words.
-        const body = if (n.theirs())
-            std.fmt.allocPrint(arena, "@{s}  {s}", .{ n.author, n.body }) catch n.body
-        else
-            n.body;
-        out.append(arena, .{ .line = n.line, .body = body, .state = switch (n.state) {
-            .open => .open,
-            .sent => .sent,
-            .stale => .stale,
-        } }) catch return out.items;
+        // Every remark, not only the ones a row points at: the gutter dot
+        // reads this list, and a folded reply would take its state with it.
+        const head = app.comments.threadHead(n);
+        out.append(arena, .{
+            .line = n.line,
+            .id = n.id,
+            .body = markBody(arena, n),
+            .state = if (head != null and head.? > 0) worstOn(app, n) else markState(n),
+            .replies = head orelse 0,
+        }) catch return out.items;
     }
     return out.items;
+}
+
+/// The worst state in the conversation `n` leads. The gutter dot's ranking,
+/// and deliberately the same function on it, so a line and the row under it
+/// cannot disagree.
+fn worstOn(app: *App, n: comments_mod.Comment) render.CommentMark.State {
+    var buf: [thread_mod.max_messages]*comments_mod.Comment = undefined;
+    var worst = markState(n);
+    const t = n.thread();
+    for (app.comments.allAt(n.path, n.line, &buf)) |c| {
+        if (c.thread() != t) continue;
+        const st = markState(c.*);
+        if (st.worseThan(worst)) worst = st;
+    }
+    return worst;
+}
+
+/// What a note row says. Whose it is goes in the remark rather than beside
+/// it: a reader scrolling past needs to know without opening a list, and the
+/// wrap has to measure the name along with the words. Shared, because the row
+/// that draws a note and the pass that measures it must agree to the byte.
+pub fn markBody(arena: Allocator, n: comments_mod.Comment) []const u8 {
+    if (!n.theirs()) return n.body;
+    return std.fmt.allocPrint(arena, "@{s}  {s}", .{ n.author, n.body }) catch n.body;
+}
+
+pub fn markState(n: comments_mod.Comment) render.CommentMark.State {
+    return switch (n.state) {
+        .open => .open,
+        .sent => .sent,
+        .stale => .stale,
+    };
 }
 
 pub fn lineCount(text: []const u8) u16 {
@@ -640,6 +664,41 @@ pub fn dist(a: u32, b: u32) u32 {
 }
 
 const testing = std.testing;
+
+test "a note row names its remark rather than counting to it" {
+    // An ordinal is only right while the rows are rebuilt the instant the
+    // store changes. Every path does that today, so this deliberately does
+    // not: the point is that the row no longer depends on it.
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    const f = fx.app.current().?;
+    const line = f.lines.new_no[0];
+
+    const first = try fx.app.comments.add(f.path(), line, "first");
+    _ = try fx.app.comments.add(f.path(), line, "second");
+    try fx.app.rebuildRows(.line);
+
+    var rows: [2]u32 = undefined;
+    var found: usize = 0;
+    for (fx.app.rows.items, 0..) |r, i| {
+        if (r != .note) continue;
+        rows[found] = @intCast(i);
+        found += 1;
+        if (found == rows.len) break;
+    }
+    try testing.expectEqual(rows.len, found);
+
+    fx.app.vp.cursor = rows[1];
+    try testing.expectEqualStrings("second", commentUnderCursor(&fx.app).?.body);
+
+    // The store moves and the rows do not.
+    fx.app.comments.remove(first);
+    fx.app.vp.cursor = rows[1];
+    try testing.expectEqualStrings("second", commentUnderCursor(&fx.app).?.body);
+    // And a row whose remark is gone names nothing, not whatever slid in.
+    fx.app.vp.cursor = rows[0];
+    try testing.expect(commentUnderCursor(&fx.app) == null);
+}
 
 test "the walk reaches every remark on a line, not only the first" {
     // Ordered by line alone, the second remark on a line is never "after"

@@ -133,7 +133,7 @@ fn drawRow(f: Frame, v: View, row: i32, r: rows_mod.Row, mark: Mark) Allocator.E
     switch (r) {
         .line => |li| return drawLine(f, v, row, li, mark, .{}),
         .pair => |pi| return drawPair(f, v, row, pi, mark),
-        .note => |ni| return drawComment(f, v, row, ni),
+        .note => |id| return drawComment(f, v, row, id),
         // Chrome is one screen row and never wraps, so it is drawn or it is
         // not; only a line and a note can straddle the top of the body.
         else => {},
@@ -203,12 +203,20 @@ fn drawRenamed(f: Frame, v: View, at: u16) Allocator.Error!void {
     _ = try f.print(at, 2, f.theme.dim, "moved  {s}", .{shown});
 }
 
+/// The mark a note row names. A scan, not an index: the row carries an id,
+/// and the marks are however many remarks the file has.
+fn markFor(v: View, id: u32) ?frame_mod.CommentMark {
+    for (v.notes) |n| {
+        if (n.id == id) return n;
+    }
+    return null;
+}
+
 /// A note under the line it belongs to, indented past the gutter and wrapped
 /// the way the code above it is - a review comment, in the place a review
 /// comment goes.
-fn drawComment(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
-    if (ni >= v.notes.len) return 1;
-    const n = v.notes[ni];
+fn drawComment(f: Frame, v: View, row: i32, id: u32) Allocator.Error!i32 {
+    const n = markFor(v, id) orelse return 1;
     const t = f.theme;
     const style = switch (n.state) {
         .open => t.comment_open,
@@ -237,6 +245,19 @@ fn drawComment(f: Frame, v: View, row: i32, ni: u32) Allocator.Error!i32 {
             if (row + rows >= f.win.height) break;
         }
     }
+    // What the row stands for beyond the message it shows. The key comes from
+    // the keymap, or a remapped one makes this a lie.
+    if (n.replies > 0) {
+        if (onScreen(f, row + rows)) |at| {
+            var key: [32]u8 = undefined;
+            _ = try f.print(at, col, f.theme.dim, "{d} more in this thread - {s} to read", .{
+                n.replies,
+                keytext.firstKeyFor(v.bindings, .comment_view, .normal, &key),
+            });
+        }
+        rows += 1;
+    }
+
     // A note that says nothing still takes a row, or the row model and the
     // screen disagree about where everything below it is.
     return @max(rows, 1);
@@ -790,6 +811,80 @@ pub fn runsIn(runs: []const lexer.Run, lo: u32, hi: u32) []const lexer.Run {
 }
 
 const testing = std.testing;
+
+test "a collapsed conversation says how many more there are, and which key reads them" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = 80, .rows = 8, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    screen.width_method = .unicode;
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 8, .screen = &screen };
+    const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = frame_mod.Glyphs.unicode };
+
+    const file: @import("../core/diff.zig").FileDiff = .{ .old_path = "a.zig", .new_path = "a.zig", .status = .modified };
+    const marks = [_]frame_mod.CommentMark{
+        .{ .line = 1, .id = 7, .body = "that's nice", .state = .open, .replies = 2 },
+    };
+    const v: View = .{
+        .file = &file,
+        .rows = .empty,
+        .file_index = 0,
+        .file_count = 1,
+        .cursor = 0,
+        .scroll = 0,
+        .notes = &marks,
+        .bindings = @import("keymap.zig").default_bindings,
+    };
+
+    try testing.expectEqual(@as(i32, 2), try drawComment(f, v, 0, 7));
+
+    var line: [80]u8 = undefined;
+    var n: usize = 0;
+    for (0..80) |c| {
+        const cell = screen.readCell(@intCast(c), 1) orelse break;
+        const g = cell.char.grapheme;
+        if (n + g.len > line.len) break;
+        @memcpy(line[n..][0..g.len], g);
+        n += g.len;
+    }
+    const drawn = std.mem.trim(u8, line[0..n], " ");
+    try testing.expect(std.mem.startsWith(u8, drawn, "2 more in this thread"));
+    var key: [32]u8 = undefined;
+    const want = keytext.firstKeyFor(@import("keymap.zig").default_bindings, .comment_view, .normal, &key);
+    try testing.expect(std.mem.indexOf(u8, drawn, want) != null);
+}
+
+test "a remark that leads nothing keeps the height it always had" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = 80, .rows = 8, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    screen.width_method = .unicode;
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 8, .screen = &screen };
+    const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = frame_mod.Glyphs.unicode };
+
+    const file: @import("../core/diff.zig").FileDiff = .{ .old_path = "a.zig", .new_path = "a.zig", .status = .modified };
+    const marks = [_]frame_mod.CommentMark{
+        .{ .line = 1, .id = 7, .body = "that's nice", .state = .open },
+    };
+    const v: View = .{
+        .file = &file,
+        .rows = .empty,
+        .file_index = 0,
+        .file_count = 1,
+        .cursor = 0,
+        .scroll = 0,
+        .notes = &marks,
+        .bindings = @import("keymap.zig").default_bindings,
+    };
+    try testing.expectEqual(@as(i32, 1), try drawComment(f, v, 0, 7));
+    // A row naming no mark is one blank row, not whatever sits at its index.
+    try testing.expectEqual(@as(i32, 1), try drawComment(f, v, 0, 99));
+}
 
 test "match highlighting splits segments without losing or duplicating bytes" {
     var a: std.heap.ArenaAllocator = .init(testing.allocator);

@@ -597,12 +597,12 @@ pub const App = struct {
         var at: std.ArrayList(rows_mod.CommentAt) = .empty;
         defer at.deinit(self.gpa);
         if (self.comments_inline) {
-            var i: u32 = 0;
             for (self.comments.items()) |n| {
-                if (std.mem.eql(u8, n.path, f.path())) {
-                    at.append(self.gpa, .{ .line = n.line, .index = i }) catch {};
-                    i += 1;
-                }
+                if (!std.mem.eql(u8, n.path, f.path())) continue;
+                // One row per conversation, not per message: five boxes
+                // stacked under a line is most of an eighty-column pane.
+                if (self.comments.threadHead(n) == null) continue;
+                at.append(self.gpa, .{ .line = n.line, .id = n.id }) catch {};
             }
         }
         self.split = self.effectiveSplit();
@@ -1408,6 +1408,57 @@ pub const App = struct {
         try testing.expectEqual(@as(usize, 2), seen);
     }
 
+    test "a conversation on a line is one row, not one row per message" {
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const f = fx.app.current().?;
+        const line = f.lines.new_no[0];
+
+        _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "that's nice", .author = "someone", .outdated = false, .remote = 10 });
+        _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "fixed", .author = "kunkka19xx", .outdated = false, .remote = 11, .reply_to = 10 });
+        _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "thanks", .author = "someone", .outdated = false, .remote = 12, .reply_to = 10 });
+        try fx.app.rebuildRows(.line);
+
+        var seen: usize = 0;
+        for (fx.app.rows.items) |r| {
+            if (r == .note) seen += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), seen);
+
+        for (fx.app.rows.items) |r| {
+            if (r != .note) continue;
+            try testing.expectEqualStrings("that's nice", fx.app.comments.find(r.note).?.body);
+        }
+    }
+
+    test "the row that stands for a conversation is a row taller" {
+        // Two functions, one geometry: a disagreement is a row of overdraw.
+        var fx = try Fixture.init(testing.allocator);
+        defer fx.deinit();
+        const f = fx.app.current().?;
+        const line = f.lines.new_no[0];
+        fx.app.vp.cols = 80;
+
+        const alone = try fx.app.comments.add(f.path(), line, "short");
+        try fx.app.rebuildRows(.line);
+        const one = rowFor(&fx.app, alone).?;
+        try testing.expectEqual(@as(u16, 1), fx.app.commentHeight(one, 40));
+
+        fx.app.comments.remove(alone);
+        const root = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "short", .author = "someone", .outdated = false, .remote = 10 });
+        _ = try fx.app.comments.adopt(.{ .path = f.path(), .line = line, .span = 1, .body = "ok", .author = "someone", .outdated = false, .remote = 11, .reply_to = 10 });
+        try fx.app.rebuildRows(.line);
+        const led = rowFor(&fx.app, root).?;
+        try testing.expectEqual(@as(u16, 2), fx.app.commentHeight(led, 40));
+    }
+
+    fn rowFor(app: *App, id: u32) ?u32 {
+        for (app.rows.items, 0..) |r, i| {
+            if (r == .note and r.note == id) return @intCast(i);
+        }
+        return null;
+    }
+
     test "a charwise selection across lines still covers those lines" {
         // `v` is what a reader reaches for as often as `V`, and a comment
         // anchors to whole lines either way: there is no half a line to
@@ -1845,18 +1896,21 @@ pub const App = struct {
     }
 
     fn commentHeight(self: *App, row: u32, cap: u16) u16 {
-        const ni = self.rows.items[row].note;
-        const marks = notes.commentMarks(self);
-        if (ni >= marks.len) return 1;
+        // The one remark measured, not the whole mark list: this runs per
+        // note row the viewport measures, and building the list was quadratic.
+        const n = self.comments.find(self.rows.items[row].note) orelse return 1;
         const col: u16 = if (self.vp.cols > 8) 6 else 0;
         const width = self.vp.cols -| col -| 2;
         if (width == 0) return 1;
 
         var rows: u16 = 0;
-        var lines = std.mem.splitScalar(u8, marks[ni].body, '\n');
+        var lines = std.mem.splitScalar(u8, notes.markBody(self.frame_arena.allocator(), n.*), '\n');
         while (lines.next()) |line| {
             rows +|= wrap_mod.height(line, width, self.vp.metrics, cap, .flush);
         }
+        // The line saying how many more there are. `drawComment` adds the
+        // same row; a disagreement misplaces every line below it.
+        if ((self.comments.threadHead(n.*) orelse 0) > 0) rows +|= 1;
         return @max(@min(rows, cap), 1);
     }
 

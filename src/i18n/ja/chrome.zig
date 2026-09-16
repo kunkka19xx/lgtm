@@ -97,6 +97,7 @@ pub const entries: []const Entry = &.{
     .{ "you have read enough for today", "今日はもう十分読んだ" },
 
     .{ "  {d} lines changed - too large to render inline. {s} opens it", "  {d}行の変更 - 大きすぎて表示できません - {s} で開く" },
+    .{ "{d} more in this thread - {s} to read", "このスレッドにあと{d}件 - {s} で表示" },
     .{ " {s} removed", " {s} 削除済み" },
     .{ "moved  {s}", "移動  {s}" },
 
