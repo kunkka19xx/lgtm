@@ -245,6 +245,7 @@ pub fn main(init: std.process.Init) !void {
             .glyphs = glyphs,
             .colour = term,
             .cols = if (term) tty.stdoutColumns() else null,
+            .tree = term,
             .base = base orelse "HEAD",
             .target = target,
             .ignore = cfg.cfg.ignore,

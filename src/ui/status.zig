@@ -28,6 +28,10 @@ const Theme = theme_mod.Theme;
 const margin = 1;
 const gap = 2;
 
+/// Where the path column starts: the margin, the status letter, the gap after
+/// it. A directory header and the totals line both hang off it.
+const head = margin + gap + 1;
+
 /// The narrowest the path column gets before there is no path left to read.
 const min_text = 12;
 
@@ -37,7 +41,14 @@ pub const Error = Allocator.Error || std.Io.Writer.Error;
 
 /// One file's line.
 pub const Row = struct {
-    /// The path, or git's `src/{old => new}.zig` when it moved.
+    /// The directory line to print above this row, set on the first file of a
+    /// group. Empty otherwise.
+    header: []const u8 = "",
+    /// The tree rail and the indent around it, or empty when the row is not
+    /// in a group.
+    rail: []const u8 = "",
+    /// The name as shown: the base name inside a group, the whole path
+    /// outside one - or git's `src/{old => new}.zig` when it moved.
     text: []const u8,
     status: diff.Status,
     added: u32,
@@ -62,6 +73,9 @@ pub const Options = struct {
     hidden: u32 = 0,
     /// Now, in seconds since the epoch. `run` reads the clock; a test pins it.
     now: i64 = 0,
+    /// Group files by directory. Off for a pipe, where a row has to carry its
+    /// whole path for `grep` to find it.
+    tree: bool = false,
 };
 
 /// Diffs, stats and prints. The whole of the subcommand.
@@ -141,23 +155,38 @@ pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Option
         return;
     }
 
-    const col = fitted(measure(rows, opts), opts.cols);
+    const shown = if (opts.tree) try grouped(arena, rows, opts.glyphs) else rows;
+    const col = fitted(measure(shown, opts), opts.cols);
     var total_added: u64 = 0;
     var total_removed: u64 = 0;
 
-    for (rows) |r| {
+    for (shown) |r| {
         total_added += r.added;
         total_removed += r.removed;
+
+        if (r.header.len > 0) {
+            try w.splatByteAll(' ', head);
+            try paint(w, opts, t.dim, try path_mod.elideFront(
+                arena,
+                r.header,
+                (opts.cols orelse std.math.maxInt(u16)) -| head,
+                opts.glyphs.ellipsis,
+                metrics,
+            ));
+            try w.writeByte('\n');
+        }
 
         try w.splatByteAll(' ', margin);
         try paint(w, opts, statusStyle(t, r.status), letter(r.status));
         try w.splatByteAll(' ', gap);
 
+        try paint(w, opts, t.dim, r.rail);
         // From the front, the way `git diff --stat` shortens one: the name
         // at the end is the answer to "which file".
-        const text = try path_mod.elideFront(arena, r.text, col.text, opts.glyphs.ellipsis, metrics);
+        const room = col.text -| wrap.columns(r.rail, metrics);
+        const text = try path_mod.elideFront(arena, r.text, room, opts.glyphs.ellipsis, metrics);
         try paint(w, opts, t.path, text);
-        try w.splatByteAll(' ', col.text - wrap.columns(text, metrics) + gap);
+        try w.splatByteAll(' ', room - wrap.columns(text, metrics) + gap);
 
         var buf: [count_max]u8 = undefined;
         const added = addedCell(&buf, r);
@@ -184,7 +213,7 @@ pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Option
     try w.writeByte('\n');
     // Indented to the path column: a line at the left edge reads as a new
     // section rather than as the sum of the one above it.
-    try w.splatByteAll(' ', margin + 1 + gap);
+    try w.splatByteAll(' ', head);
     try paint(w, opts, t.text, try i18n.allocPrint(arena, "{d} file{s}", .{
         rows.len,
         // The plural as an argument, the way the rest of the tool asks.
@@ -217,6 +246,68 @@ fn scope(arena: Allocator, opts: Options) Allocator.Error![]const u8 {
     return i18n.allocPrint(arena, "against {s}, {d} ignored", .{ opts.base, opts.hidden });
 }
 
+/// Rows in tree order: a directory holding more than one changed file becomes
+/// a header, its files listed under it by name. Everything else keeps its
+/// whole path - a lone file is not a tree, and a file at the root has no
+/// directory to hang under.
+///
+/// Grouped by the directory of the *shown* name, which is what makes a rename
+/// need no special case: `src/ui/{app => screen}.zig` sits under `src/ui`
+/// like any other file there, and one that moved between directories reads as
+/// `src/{ui => core}/app.zig`, whose directory matches nothing and is left
+/// whole.
+fn grouped(arena: Allocator, rows: []const Row, g: Glyphs) Allocator.Error![]Row {
+    const claimed = try arena.alloc(bool, rows.len);
+    @memset(claimed, false);
+
+    // Two columns of rail with an indent before it and a space after, so
+    // every name under a header starts at the same column.
+    const branch = try std.fmt.allocPrint(arena, "  {s} ", .{g.tree_branch});
+    const closing = try std.fmt.allocPrint(arena, "  {s} ", .{g.tree_last});
+
+    var out: std.ArrayList(Row) = try .initCapacity(arena, rows.len);
+    var members: std.ArrayList(usize) = .empty;
+
+    for (rows, 0..) |r, i| {
+        if (claimed[i]) continue;
+        const dir = dirOf(r.text);
+
+        // Forward only: anything earlier in this directory has already taken
+        // this row into its own group.
+        members.clearRetainingCapacity();
+        try members.append(arena, i);
+        if (dir.len > 0) {
+            for (rows[i + 1 ..], i + 1..) |other, j| {
+                if (claimed[j] or !std.mem.eql(u8, dir, dirOf(other.text))) continue;
+                claimed[j] = true;
+                try members.append(arena, j);
+            }
+        }
+
+        if (members.items.len == 1) {
+            out.appendAssumeCapacity(r);
+            continue;
+        }
+
+        const last = members.items.len - 1;
+        for (members.items, 0..) |m, n| {
+            var row = rows[m];
+            row.header = if (n == 0) try std.fmt.allocPrint(arena, "{s}/", .{dir}) else "";
+            row.rail = if (n == last) closing else branch;
+            row.text = row.text[dir.len + 1 ..];
+            out.appendAssumeCapacity(row);
+        }
+    }
+    return out.items;
+}
+
+/// The directory a shown name sits in, without its trailing slash. Empty at
+/// the root.
+fn dirOf(text: []const u8) []const u8 {
+    const cut = std.mem.lastIndexOfScalar(u8, text, '/') orelse return "";
+    return text[0..cut];
+}
+
 /// The widest cell in each column, before the terminal gets a say.
 const Widths = struct {
     text: u16,
@@ -235,7 +326,7 @@ fn measure(rows: []const Row, opts: Options) Widths {
     for (rows) |r| {
         var buf: [count_max]u8 = undefined;
         var when: [age_max]u8 = undefined;
-        out.text = @max(out.text, wrap.columns(r.text, metrics));
+        out.text = @max(out.text, wrap.columns(r.rail, metrics) + wrap.columns(r.text, metrics));
         out.added = @max(out.added, wrap.columns(addedCell(&buf, r), metrics));
         out.removed = @max(out.removed, wrap.columns(removedCell(&buf, r, opts.glyphs), metrics));
         out.age = @max(out.age, wrap.columns(ageCell(&when, r, opts.now), metrics));
@@ -243,19 +334,25 @@ fn measure(rows: []const Row, opts: Options) Widths {
     return out;
 }
 
-/// The same widths, fitted to what stdout has. Only the path column gives:
+/// The same widths, fitted to what stdout has. The path column is what gives:
 /// every other one is a number, already as short as it can be said.
 fn fitted(natural: Widths, cols: ?u16) Widths {
     var out = natural;
     const room = cols orelse return out;
-    // What a row spends that is not the path, in the order it spends it.
-    const fixed = margin + 1 + gap +
-        gap + natural.added +
-        gap + natural.removed +
-        (if (natural.age > 0) gap + natural.age else 0);
-    if (fixed + out.text <= room) return out;
-    out.text = @max(min_text, room -| fixed);
+
+    // Unless shrinking it would leave no path to read. Then the age goes
+    // instead: it is the widest of the trailing columns and the least of what
+    // a row says.
+    if (out.age > 0 and room -| fixedOf(out) < min_text) out.age = 0;
+
+    const budget = room -| fixedOf(out);
+    if (budget < natural.text) out.text = @max(min_text, budget);
     return out;
+}
+
+/// What a row spends that is not the path, in the order it spends it.
+fn fixedOf(w: Widths) u16 {
+    return head + gap + w.added + gap + w.removed + (if (w.age > 0) gap + w.age else 0);
 }
 
 /// A letter as well as the colour, where the `F` list uses colour alone: this
@@ -459,6 +556,89 @@ test "a pipe has no width to fit to, so nothing is shortened" {
     var buf: [4 << 10]u8 = undefined;
     const out = try drawn(arena.allocator(), &buf, test_rows, test_opts);
     try testing.expect(std.mem.indexOf(u8, out, "src/ui/app_old.zig") != null);
+}
+
+test "a directory with more than one changed file becomes a header with rails" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    var opts = test_opts;
+    opts.tree = true;
+    const out = try drawn(arena.allocator(), &buf, test_rows, opts);
+
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    try testing.expectEqualStrings("    src/ui/", it.next().?);
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " M    |- app.zig"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " A    |- status.zig"));
+    // The last of a group closes it.
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " D    \\- app_old.zig"));
+    // A file at the root is in no directory, so it is in no group.
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " B  logo.png"));
+
+    // Grouping only moves the names; the numbers are the same ones.
+    try testing.expect(std.mem.indexOf(u8, out, "4 files  +222  -103  against HEAD") != null);
+}
+
+test "one file in a directory is not a tree" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    var opts = test_opts;
+    opts.tree = true;
+    const rows: []const Row = &.{
+        .{ .text = "src/core/git.zig", .status = .modified, .added = 87, .removed = 2 },
+        .{ .text = "build.zig", .status = .modified, .added = 20, .removed = 1 },
+    };
+    const out = try drawn(arena.allocator(), &buf, rows, opts);
+
+    try testing.expect(std.mem.indexOf(u8, out, "src/core/git.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "|-") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "src/core/\n") == null);
+}
+
+test "a rename that left its directory is left whole" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    var opts = test_opts;
+    opts.tree = true;
+    const rows: []const Row = &.{
+        // Its directory is `src/{ui => core}`, which is nothing else's.
+        .{ .text = "src/{ui => core}/app.zig", .status = .renamed, .added = 3, .removed = 3 },
+        // This one never left `src/ui`, so it groups like any other file there.
+        .{ .text = "src/ui/{app => screen}.zig", .status = .renamed, .added = 1, .removed = 1 },
+        .{ .text = "src/ui/theme.zig", .status = .modified, .added = 2, .removed = 0 },
+    };
+    const out = try drawn(arena.allocator(), &buf, rows, opts);
+
+    try testing.expect(std.mem.indexOf(u8, out, " R  src/{ui => core}/app.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "    src/ui/\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "|- {app => screen}.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\\- theme.zig") != null);
+}
+
+test "a terminal too narrow for both drops the age before the path" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    var opts = test_opts;
+    opts.tree = true;
+    opts.cols = 34;
+    const out = try drawn(arena.allocator(), &buf, test_rows, opts);
+
+    // The table rows only: the totals under them are a sentence, and a
+    // sentence wraps rather than being cut.
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    for (0..test_rows.len + 1) |_| {
+        try testing.expect(wrap.columns(it.next().?, metrics) <= 34);
+    }
+    // The names and the rails both survive; the clock is what went.
+    try testing.expect(std.mem.indexOf(u8, out, "\\- app_old.zig") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ago") == null);
 }
 
 test "a moved file is named the way git names one" {
