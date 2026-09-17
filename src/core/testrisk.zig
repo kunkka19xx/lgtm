@@ -139,11 +139,49 @@ pub fn countIn(line: []const u8, words: []const []const u8) u32 {
     return n;
 }
 
-/// What this file's change did to its tests.
+/// What this file's change did to its tests, and which rows say so.
+pub const Found = struct {
+    risk: Risk = .{},
+    /// One bool per row of `f`: whether that row is a finding worth walking to.
+    ///
+    /// Only the certain two. A removed test declaration and an added skip are
+    /// *places* - there is a line to put the cursor on and something to read
+    /// when you get there. A fallen assertion count is a property of the file,
+    /// and landing the reader on one arbitrary removed line to explain it would
+    /// be pointing at evidence rather than at the thing.
+    rows: []bool = &.{},
+};
+
+/// What this file's change did to its tests, and the rows to walk to.
+///
+/// One pass for both, because they are the same reading. The rows worth
+/// stopping on are exactly the `test_decl` removals and the `skip_names`
+/// additions the counts are already made of, so asking separately walked every
+/// line twice and matched every word twice to reach the same answer - a
+/// seventh of the whole re-diff, spent re-deriving what the counts had just
+/// discarded.
+pub fn scanRows(
+    gpa: std.mem.Allocator,
+    f: *const diff.FileDiff,
+    lang: *const langdef.LangDef,
+) std.mem.Allocator.Error!Found {
+    const rows = try gpa.alloc(bool, f.lines.len());
+    errdefer gpa.free(rows);
+    @memset(rows, false);
+    return .{ .risk = walk(f, lang, rows), .rows = rows };
+}
+
+/// The counts alone, for a caller with no use for the rows.
 ///
 /// A language with no test vocabulary yields nothing, which is the right answer
 /// for one nobody has described yet: silence rather than a guess.
 pub fn scan(f: *const diff.FileDiff, lang: *const langdef.LangDef) Risk {
+    return walk(f, lang, null);
+}
+
+/// The one reading. `rows`, when given, is already false everywhere and is
+/// written only where a line is a place to walk to.
+fn walk(f: *const diff.FileDiff, lang: *const langdef.LangDef, rows: ?[]bool) Risk {
     var out: Risk = .{};
     if (lang.test_decl.len == 0 and lang.assert_names.len == 0 and lang.skip_names.len == 0) return out;
 
@@ -159,14 +197,20 @@ pub fn scan(f: *const diff.FileDiff, lang: *const langdef.LangDef) Risk {
         switch (f.lines.kind[i]) {
             .context => {},
             .del => {
-                if (mentions(text, lang.test_decl)) decl_gone += 1;
+                const decl = mentions(text, lang.test_decl);
+                if (decl) decl_gone += 1;
                 if (mentions(text, lang.skip_names)) skip_gone += 1;
                 assert_gone += countIn(text, lang.assert_names);
+                // A removed declaration is the place; a removed skip is the
+                // test coming back, which is not a finding.
+                if (rows) |r| r[i] = decl;
             },
             .add => {
                 if (mentions(text, lang.test_decl)) decl_new += 1;
-                if (mentions(text, lang.skip_names)) skip_new += 1;
+                const skip = mentions(text, lang.skip_names);
+                if (skip) skip_new += 1;
                 assert_new += countIn(text, lang.assert_names);
+                if (rows) |r| r[i] = skip;
             },
         }
     }
@@ -184,30 +228,6 @@ pub fn scan(f: *const diff.FileDiff, lang: *const langdef.LangDef) Risk {
     if (f.status == .deleted and decl_gone > 0) {
         out.file_deleted = true;
         out.removed = decl_gone;
-    }
-    return out;
-}
-
-/// One bool per row of `f`: whether that row is a finding worth walking to.
-///
-/// Only the certain two. A removed test declaration and an added skip are
-/// *places* - there is a line to put the cursor on and something to read when
-/// you get there. A fallen assertion count is a property of the file, and
-/// landing the reader on one arbitrary removed line to explain it would be
-/// pointing at evidence rather than at the thing.
-pub fn markRows(gpa: std.mem.Allocator, f: *const diff.FileDiff, lang: *const langdef.LangDef) std.mem.Allocator.Error![]bool {
-    const out = try gpa.alloc(bool, f.lines.len());
-    errdefer gpa.free(out);
-    @memset(out, false);
-    if (lang.test_decl.len == 0 and lang.skip_names.len == 0) return out;
-
-    for (0..f.lines.len()) |i| {
-        const text = f.lines.text[i];
-        out[i] = switch (f.lines.kind[i]) {
-            .del => mentions(text, lang.test_decl),
-            .add => mentions(text, lang.skip_names),
-            .context => false,
-        };
     }
     return out;
 }
@@ -427,7 +447,7 @@ test "the vocabularies do not fire on ordinary code" {
         .{ .line = "    private boolean ignored = false;", .def = &lang_java.def },
         // The import a skip arrives with. Counted alongside the call it
         // enables, one skipped test would be reported as two - and the import
-        // is the line `markRows` would send the reader to. The `(` is what
+        // is the line the walk would send the reader to. The `(` is what
         // separates them.
         .{ .line = "import static org.junit.Assume.assumeTrue;", .def = &lang_java.def },
         .{ .line = "import static org.junit.jupiter.api.Assumptions.assumeTrue;", .def = &lang_java.def },
@@ -555,8 +575,14 @@ test "the rows worth walking to are the two certain kinds" {
     }, .modified);
     defer f.lines.deinit(gpa);
 
-    const rows = try markRows(gpa, &f, &zig_like);
-    defer gpa.free(rows);
+    const found = try scanRows(gpa, &f, &zig_like);
+    defer gpa.free(found.rows);
+    const rows = found.rows;
+
+    // The same pass that found the rows counted the change, and the counts are
+    // what the rows are drawn from: one declaration gone, one skip added.
+    try testing.expectEqual(@as(u32, 1), found.risk.removed);
+    try testing.expectEqual(@as(u32, 1), found.risk.skipped);
 
     // The removed declaration and the added skip: places with something to
     // read when you arrive.

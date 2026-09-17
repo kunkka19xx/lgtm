@@ -65,6 +65,15 @@ pub const Glyphs = struct {
     tree_branch: []const u8,
     tree_last: []const u8,
 
+    /// Which side of the index a file sits on, in `lgtm status`. A fill
+    /// gradient rather than three unrelated shapes: full, half, empty reads as
+    /// "how much of this is in the index" without the key, and still reads
+    /// when the colour is off. Untracked has no mark at all - it is not on
+    /// either side of the index, and a fourth glyph would imply it was.
+    stage_staged: []const u8,
+    stage_both: []const u8,
+    stage_unstaged: []const u8,
+
     /// Stands in for the part of a path there was no room to draw.
     /// The gutter mark for a line carrying a comment.
     comment_mark: []const u8,
@@ -148,6 +157,9 @@ pub const Glyphs = struct {
         .heavy_br = "\u{251b}",
         .tree_branch = "\u{251c}\u{2500}",
         .tree_last = "\u{2514}\u{2500}",
+        .stage_staged = "\u{25cf}",
+        .stage_both = "\u{25d0}",
+        .stage_unstaged = "\u{25cb}",
         .comment_mark = "\u{25cf}",
         .fresh_mark = "\u{2503}",
         .revert_mark = "\u{21ba}",
@@ -206,6 +218,9 @@ pub const Glyphs = struct {
         .heavy_br = "+",
         .tree_branch = "|-",
         .tree_last = "\\-",
+        .stage_staged = "*",
+        .stage_both = "o",
+        .stage_unstaged = ".",
         .comment_mark = "*",
         .fresh_mark = "|",
         .revert_mark = "<-",
@@ -288,6 +303,17 @@ pub const Theme = struct {
     file_modified: Style,
     file_renamed: Style,
     file_binary: Style,
+
+    /// The stage mark in `lgtm status`. Their own slots rather than borrowed
+    /// status colours: the mark answers a different question from the letter
+    /// beside it, and painting both from `file_added` would make one file's
+    /// row two shades of the same green saying two unrelated things.
+    stage_staged: Style,
+    stage_both: Style,
+    stage_unstaged: Style,
+    /// A file git is not tracking. Muted on purpose: it is the one row in the
+    /// table that is not part of the review yet.
+    stage_untracked: Style,
 
     /// Chrome.
     rule: Style,
@@ -387,6 +413,10 @@ pub fn fromPalette(p: Palette) Theme {
         .popup_border = .{ .fg = p.accent, .dim = true },
 
         .file_plain = .{ .fg = p.fg },
+        .stage_staged = .{ .fg = p.green },
+        .stage_both = .{ .fg = p.yellow },
+        .stage_unstaged = .{ .fg = p.muted },
+        .stage_untracked = .{ .fg = p.muted },
         .file_added = .{ .fg = p.green },
         .file_deleted = .{ .fg = p.red },
         // Amber, which is what "orange" is in a palette that has yellow: the

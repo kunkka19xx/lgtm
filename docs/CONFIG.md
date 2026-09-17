@@ -285,6 +285,7 @@ The slots:
 | Markdown | `heading` - coloured and bold; `list_mark` - the accent, for bullets, ordered markers, task boxes and `>`; `strong` `emphasis` `strikethrough` - bold, underlined and struck, and no colour on the first two |
 | Accents | `accent` `popup_border` |
 | Files | `file_plain` `file_added` `file_deleted` `file_modified` `file_renamed` `file_binary` |
+| Stage | `stage_staged` `stage_both` `stage_unstaged` `stage_untracked` - the mark in `lgtm status` saying which side of the index a change is on |
 | Diff | `add_sign` `del_sign` `add_line` `del_line` `filler` `hunk_id` `line_no` `added_count` `removed_count` |
 | Comments | `comment_open` `comment_sent` `comment_stale` `comment_author` |
 | The mark | `fresh` |
