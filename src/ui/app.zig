@@ -59,6 +59,7 @@ const search = @import("search.zig");
 const complete = @import("complete.zig");
 const theme_mod = @import("theme.zig");
 const wrap_mod = @import("wrap.zig");
+const suggest = @import("../core/suggest.zig");
 
 /// A one-line message on the mode row: a search that found nothing, a command
 /// that is not one, an editor that would not start. Fixed capacity and cleared
@@ -1903,10 +1904,18 @@ pub const App = struct {
         const width = self.vp.cols -| col -| 2;
         if (width == 0) return 1;
 
+        const text = notes.markBody(self.frame_arena.allocator(), n.*);
+        var old_buf: [suggest.max_replaced][]const u8 = undefined;
+        const old: []const []const u8 = if (suggest.has(text)) blk: {
+            const cur = self.current() orelse break :blk &.{};
+            break :blk suggest.replaced(cur, n.line, n.span, &old_buf);
+        } else &.{};
+
         var rows: u16 = 0;
-        var lines = std.mem.splitScalar(u8, notes.markBody(self.frame_arena.allocator(), n.*), '\n');
-        while (lines.next()) |line| {
-            rows +|= wrap_mod.height(line, width, self.vp.metrics, cap, .flush);
+        var w = suggest.walk(text, old);
+        while (w.next()) |line| {
+            const inset: u16 = if (line.kind == .prose) 0 else 2;
+            rows +|= wrap_mod.height(line.text, width -| inset, self.vp.metrics, cap, .flush);
         }
         // The line saying how many more there are. `drawComment` adds the
         // same row; a disagreement misplaces every line below it.

@@ -554,6 +554,8 @@ pub const CommentMark = struct {
     /// the mark a row points at; the rest are here for the gutter dot, which
     /// still needs every remark on the line.
     replies: u16 = 0,
+    /// Lines the remark covers, for a ```suggestion to be drawn against.
+    span: u32 = 1,
 
     pub const State = enum {
         sent,
@@ -592,6 +594,9 @@ pub const ThreadMessage = struct {
     stale: bool = false,
     /// Already handed to the agent.
     sent: bool = false,
+    /// The lines a ```suggestion in `body` replaces. Empty when there is no
+    /// suggestion, or the line has gone from the diff.
+    replaced: []const []const u8 = &.{},
 };
 
 /// What the thread overlay drew, written back by the renderer because only it

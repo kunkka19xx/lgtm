@@ -52,7 +52,10 @@ pub const KeyWords = enum { none, line_head, anywhere };
 /// stage. A brace there belongs to a value or a shell command, and counting
 /// it closed the span the line was still inside - `${VAR}` in a `RUN` line
 /// ended the stage it was part of.
-pub const Blocks = enum { braces, indent, none };
+/// `headings` is markdown: the level is the column, so `indent`'s comparison
+/// nests them - but without `lineStart` closing a span at the first unindented
+/// paragraph under it.
+pub const Blocks = enum { braces, indent, none, headings };
 
 pub const LangDef = struct {
     name: []const u8,
@@ -182,6 +185,29 @@ pub const LangDef = struct {
     /// language with no indexing, which is why it is a flag: `a[0]` would
     /// otherwise open a block that never closes on the line it opened.
     block_brackets: bool = false,
+    /// Markdown: a bullet, an ordered marker, a blockquote or a thematic
+    /// break at the head of a line, and the task box that may follow one.
+    list_marks: bool = false,
+    /// Markdown: three or more backticks or tildes open a code block whose
+    /// body is not lexed.
+    fences: bool = false,
+    /// Markdown: `~~struck~~`, `**bold**` and `_italic_`. A branch rather than
+    /// a `StringSpec`, because what keeps `some_flag and other_flag` from
+    /// reading as one italic span is a word-boundary rule and a spec cannot
+    /// say that.
+    emphasis: bool = false,
+    /// Markdown: `| a | b |` rows and the `|---|---|` under a header. Only
+    /// with the leading pipe, which every hand-written table has.
+    tables: bool = false,
+    /// Markdown: `[text](url)`, `![alt](src)` and `<https://autolink>`. What
+    /// is between the brackets lexes on its own, so inline code in a link
+    /// still reads as inline code.
+    links: bool = false,
+    /// Markdown: punctuation and numbers no branch above claimed are prose.
+    /// A comma is a comma and 1400 is a quantity in a sentence; colouring them
+    /// speckles a paragraph and paints a URL's digits a different colour from
+    /// its letters.
+    prose: bool = false,
 
     // -- what a test looks like ---------------------------------------------
     //

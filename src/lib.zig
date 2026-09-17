@@ -31,6 +31,7 @@ pub const expand = @import("core/expand.zig");
 pub const git = @import("core/git.zig");
 pub const hunk = @import("core/hunk.zig");
 pub const source = @import("core/source.zig");
+pub const suggest = @import("core/suggest.zig");
 pub const testrisk = @import("core/testrisk.zig");
 
 pub const lexer = @import("syntax/lexer.zig");

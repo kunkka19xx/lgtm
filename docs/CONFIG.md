@@ -282,6 +282,7 @@ The slots:
 | | |
 |---|---|
 | Syntax | `text` `comment` `string` `number` `keyword` `type_name` `fn_name` `punct` |
+| Markdown | `heading` - coloured and bold; `list_mark` - the accent, for bullets, ordered markers, task boxes and `>`; `strong` `emphasis` `strikethrough` - bold, underlined and struck, and no colour on the first two |
 | Accents | `accent` `popup_border` |
 | Files | `file_plain` `file_added` `file_deleted` `file_modified` `file_renamed` `file_binary` |
 | Diff | `add_sign` `del_sign` `add_line` `del_line` `filler` `hunk_id` `line_no` `added_count` `removed_count` |

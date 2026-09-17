@@ -18,6 +18,7 @@ const keytext = @import("keytext.zig");
 const notes = @import("notes.zig");
 const outgoing = @import("outgoing.zig");
 const pr_mod = @import("pr.zig");
+const suggest = @import("../core/suggest.zig");
 const render = @import("render.zig");
 
 /// The most messages one overlay holds, so the set fits a frame buffer.
@@ -251,6 +252,7 @@ pub fn view(app: *App, arena: Allocator) Allocator.Error!?render.ThreadView {
             .mine = notes.mine(app, n.*),
             .stale = n.state == .stale,
             .sent = n.state == .sent,
+            .replaced = replacedFor(app, arena, n.*),
         };
     }
 
@@ -265,6 +267,16 @@ pub fn view(app: *App, arena: Allocator) Allocator.Error!?render.ThreadView {
         .layout = &app.thread.layout,
         .bindings = app.km.bindings,
     };
+}
+
+/// The lines a message's suggestion replaces, from the diff on screen. Empty
+/// for another file's remark; the proposal still says what it proposes.
+fn replacedFor(app: *App, arena: Allocator, n: comments_mod.Comment) []const []const u8 {
+    if (!suggest.has(n.body)) return &.{};
+    const f = app.current() orelse return &.{};
+    if (!std.mem.eql(u8, f.path(), n.path)) return &.{};
+    const buf = arena.alloc([]const u8, suggest.max_replaced) catch return &.{};
+    return suggest.replaced(f, n.line, n.span, buf);
 }
 
 /// The last lines of the root's hunk, which ends on the line the remark was

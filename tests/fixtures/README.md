@@ -19,6 +19,10 @@ One directory per scenario:
 `diffs/` is not a scenario and the harness skips it: `diffs/mixed.diff` is
 recorded `git diff` output embedded by a unit test in `core/diff.zig`.
 
+`markdown.md` is not a scenario either. It is a sample to open in `lgtm` and
+look at: every construct the markdown highlighter claims, and every one it
+deliberately refuses.
+
 Versions are whole-file snapshots, not diffs. This is deliberate: the primary
 re-anchor path (PERFORMANCE.md 3.1) diffs the previous worktree against the new
 one to build an old-to-new line map, so the harness needs both full states. A
