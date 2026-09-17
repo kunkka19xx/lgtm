@@ -123,12 +123,13 @@ fn collect(arena: Allocator, files: []const diff.FileDiff) Allocator.Error![]Fin
     var out: std.ArrayList(Finding) = .empty;
     for (files) |*f| {
         const lang = highlight.forPath(f.path()) orelse continue;
-        const risk = testrisk.scan(f, lang);
+        const found = try testrisk.scanRows(arena, f, lang);
+        const risk = found.risk;
         if (!risk.any()) continue;
 
         var places: std.ArrayList(Place) = .empty;
         var more: u32 = 0;
-        for (try testrisk.markRows(arena, f, lang), 0..) |hit, i| {
+        for (found.rows, 0..) |hit, i| {
             if (!hit) continue;
             if (places.items.len == max_places) {
                 more += 1;

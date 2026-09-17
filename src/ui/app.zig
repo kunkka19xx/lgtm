@@ -476,7 +476,7 @@ pub const App = struct {
     /// is `review.regenerate`; what is left here is the part that is about a
     /// reader rather than a diff.
     pub fn rediff(self: *App) !void {
-        const span = metrics.span(.diff_parse);
+        const span = metrics.span(.rediff);
         defer span.end();
 
         // The working-tree text of every file carrying a note, copied before

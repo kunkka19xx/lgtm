@@ -204,6 +204,19 @@ pub fn build(b: *std.Build) void {
     if (b.args) |a| run_bench.addArgs(a);
     b.step("bench", "Benchmark the lexer against a source tree").dependOn(&run_bench.step);
 
+    // Re-diff benchmark. `zig build rediff -Doptimize=ReleaseFast -- [base] [repo]`.
+    const rediff_mod = b.createModule(.{
+        .root_source_file = b.path("src/harness/rediff_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rediff_mod.addImport("lgtm", lgtm_mod);
+    const rediff_exe = b.addExecutable(.{ .name = "rediff-bench", .root_module = rediff_mod });
+    const run_rediff = b.addRunArtifact(rediff_exe);
+    run_rediff.setCwd(b.path("."));
+    if (b.args) |a| run_rediff.addArgs(a);
+    b.step("rediff", "Benchmark the parse and the test-risk scan").dependOn(&run_rediff.step);
+
     // Licence header check. Runs as its own step and as part of `zig build check`.
     const spdx = b.addExecutable(.{
         .name = "check-spdx",

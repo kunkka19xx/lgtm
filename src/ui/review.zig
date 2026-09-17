@@ -410,8 +410,9 @@ pub const Review = struct {
         for (fs, 0..) |*f, i| {
             const lang = highlight.forPath(f.path());
             if (lang) |def| {
-                out[i] = testrisk.scan(f, def);
-                rows[i] = try testrisk.markRows(arena, f, def);
+                const found = try testrisk.scanRows(arena, f, def);
+                out[i] = found.risk;
+                rows[i] = found.rows;
             } else {
                 out[i] = .{};
                 rows[i] = &.{};
