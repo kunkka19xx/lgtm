@@ -840,20 +840,33 @@ One table, printed and gone: what changed, by how much, and when each file was
 last written.
 
 ```
- B  logo.png                                  1d ago
- R  src/core/{old => new}/app.zig    +3   −3  2h ago
-    src/ui/
- M    ├─ app.zig                    +12   −4  27m ago
- D    ├─ app_old.zig                  0  −99
- A    └─ status.zig                +210    0  just now
+ ○ B  logo.png                                  1d ago
+ ● R  src/core/{old => new}/app.zig    +3   −3  2h ago
+      src/ui/
+ ◐ M    ├─ app.zig                    +12   −4  27m ago
+ ● D    ├─ app_old.zig                  0  −99
+ ○ A    └─ status.zig                +210    0  just now
+   ?  notes.txt                        +4    0  1m ago
 
-    5 files  +225  −106  against HEAD
+      6 files  +229  −106  against HEAD
+      ● staged   ◐ both   ○ unstaged   ? untracked
 ```
 
 `M A D R B` is modified, added, deleted, renamed, binary - a letter as well as
 a colour, because this output is usually a pipe and a pipe has no colours. A
 deleted file has no age: there is nothing left on disk to ask. A binary one has
 no counts: it has no lines.
+
+The mark in front of the letter is how much of that file is in the index:
+**●** all of it, **◐** some of it, **○** none of it. An untracked file has no
+mark and takes a **?** instead of a letter - it is on neither side of the
+index, and showing it as `A` made it identical to a file deliberately staged
+for addition. The key only prints when the index has something to say: a tree
+where nothing is staged is every row marked ○, which needs no explaining.
+
+The marks are glyphs as well as colours, for the same reason the letters are,
+and `[ui] icons = "ascii"` spells them `* o .`. With `--target` or `--pr` the
+column goes entirely: two refs have no index between them.
 
 A directory holding more than one changed file becomes a header with its files
 under it - which is what makes the shape of a turn visible: six files under

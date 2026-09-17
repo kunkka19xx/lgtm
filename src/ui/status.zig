@@ -28,9 +28,23 @@ const Theme = theme_mod.Theme;
 const margin = 1;
 const gap = 2;
 
-/// Where the path column starts: the margin, the status letter, the gap after
-/// it. A directory header and the totals line both hang off it.
-const head = margin + gap + 1;
+/// The stage mark and the space after it. Only a working tree has an index,
+/// so a two-ref review spends nothing here.
+const mark_col = 2;
+
+/// Where the path column starts: the margin, the stage mark, the status
+/// letter, the gap after it. A directory header, the totals and the key all
+/// hang off it.
+fn headOf(opts: Options) u16 {
+    return margin + @as(u16, if (marked(opts)) mark_col else 0) + 1 + gap;
+}
+
+/// Whether the stage column means anything. Between two refs there is no
+/// index to be on either side of, and a column that answers nothing is worse
+/// than no column.
+fn marked(opts: Options) bool {
+    return opts.target == null;
+}
 
 /// The narrowest the path column gets before there is no path left to read.
 const min_text = 12;
@@ -51,6 +65,9 @@ pub const Row = struct {
     /// outside one - or git's `src/{old => new}.zig` when it moved.
     text: []const u8,
     status: diff.Status,
+    /// Which side of the index this file's change is on. `unstaged` is the
+    /// default because it is what a file git did not mention in `status` is.
+    stage: git.Stage = .unstaged,
     added: u32,
     removed: u32,
     /// Seconds since the epoch, or null when there is nothing on disk to ask.
@@ -100,7 +117,22 @@ pub fn run(gpa: Allocator, io: std.Io, w: *std.Io.Writer, opts_in: Options) Erro
     };
     opts.hidden = git.hiddenCount(gpa, io, opts.ignore, opts.base);
 
-    try draw(arena, w, try collect(arena, io, parsed.diff.files, opts.target == null), opts);
+    // Only a working tree has an index. Between two refs there is nothing to
+    // be on either side of, and asking would describe the tree instead of the
+    // review that was requested.
+    //
+    // A failure here costs the column, not the table: every row falls back to
+    // `unstaged`, which is what a file matching the index is anyway.
+    var st: ?git.Stages = if (opts.target == null) (git.stages(gpa, io, null) catch null) else null;
+    defer if (st) |*x| x.deinit();
+
+    try draw(arena, w, try collect(
+        arena,
+        io,
+        parsed.diff.files,
+        opts.target == null,
+        if (st) |*x| x else null,
+    ), opts);
 }
 
 /// The rows behind a parsed diff. Split from `draw` so the table can be tested
@@ -111,6 +143,9 @@ fn collect(
     files: []const diff.FileDiff,
     /// False for a two-ref review: the file on disk is not the file reported.
     ages: bool,
+    /// What `git status` said about each path, or null when it was not asked
+    /// or could not answer.
+    st: ?*const git.Stages,
 ) Allocator.Error![]Row {
     const rows = try arena.alloc(Row, files.len);
     for (files, rows) |*f, *row| row.* = .{
@@ -119,6 +154,9 @@ fn collect(
         else
             f.path(),
         .status = f.status,
+        // Keyed on the path git would use, which for a rename is the new one -
+        // the same one `path()` returns.
+        .stage = if (st) |x| x.get(f.path()) else .unstaged,
         .added = f.added,
         .removed = f.removed,
         .when = if (ages) mtime(io, f) else null,
@@ -142,6 +180,7 @@ fn nowSeconds(io: std.Io) i64 {
 /// The table, then the totals under it.
 pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Options) Error!void {
     const t = opts.theme;
+    const head = headOf(opts);
     try w.writeByte('\n');
 
     if (rows.len == 0) {
@@ -156,7 +195,7 @@ pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Option
     }
 
     const shown = if (opts.tree) try grouped(arena, rows, opts.glyphs) else rows;
-    const col = fitted(measure(shown, opts), opts.cols);
+    const col = fitted(measure(shown, opts), opts.cols, head);
     var total_added: u64 = 0;
     var total_removed: u64 = 0;
 
@@ -177,7 +216,12 @@ pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Option
         }
 
         try w.splatByteAll(' ', margin);
-        try paint(w, opts, statusStyle(t, r.status), letter(r.status));
+        if (marked(opts)) {
+            const mark = stageMark(r.stage, opts.glyphs);
+            try paint(w, opts, stageStyle(t, r.stage), mark);
+            try w.splatByteAll(' ', mark_col - wrap.columns(mark, metrics));
+        }
+        try paint(w, opts, statusStyle(t, r.status, r.stage), letter(r.status, r.stage));
         try w.splatByteAll(' ', gap);
 
         try paint(w, opts, t.dim, r.rail);
@@ -230,7 +274,52 @@ pub fn draw(arena: Allocator, w: *std.Io.Writer, rows: []const Row, opts: Option
     }));
     try w.splatByteAll(' ', gap);
     try paint(w, opts, t.dim, try scope(arena, opts));
-    try w.writeAll("\n\n");
+    try w.writeByte('\n');
+
+    try key(w, rows, opts);
+    try w.writeByte('\n');
+}
+
+/// What the stage marks mean, under the totals, listing only the ones the
+/// table actually used.
+///
+/// Silent for a tree where nothing is staged. Every row then carries the same
+/// mark, and a key explaining a column that says the same thing all the way
+/// down is the kind of permanent furniture that stops being read. It appears
+/// as soon as the index has anything to say, which is the moment the marks
+/// start differing and the moment the reader needs them.
+fn key(w: *std.Io.Writer, rows: []const Row, opts: Options) Error!void {
+    if (!marked(opts)) return;
+
+    var seen: [4]bool = @splat(false);
+    for (rows) |r| seen[@intFromEnum(r.stage)] = true;
+    if (!seen[@intFromEnum(git.Stage.staged)] and
+        !seen[@intFromEnum(git.Stage.both)] and
+        !seen[@intFromEnum(git.Stage.untracked)]) return;
+
+    try w.splatByteAll(' ', headOf(opts));
+    var first = true;
+    for ([_]git.Stage{ .staged, .both, .unstaged, .untracked }) |st| {
+        if (!seen[@intFromEnum(st)]) continue;
+        if (!first) try w.splatByteAll(' ', gap + 1);
+        first = false;
+        // Untracked is marked by its letter, not by a fill, so the key shows
+        // the letter - otherwise it names a glyph that is nowhere above it.
+        const mark = if (st == .untracked) "?" else stageMark(st, opts.glyphs);
+        try paint(w, opts, stageStyle(opts.theme, st), mark);
+        try w.writeByte(' ');
+        try paint(w, opts, opts.theme.dim, word(st));
+    }
+    try w.writeByte('\n');
+}
+
+fn word(st: git.Stage) []const u8 {
+    return switch (st) {
+        .staged => i18n.t("staged"),
+        .both => i18n.t("both"),
+        .unstaged => i18n.t("unstaged"),
+        .untracked => i18n.t("untracked"),
+    };
 }
 
 /// What the totals are totals *of*: the two sides compared, and how many files
@@ -336,28 +425,33 @@ fn measure(rows: []const Row, opts: Options) Widths {
 
 /// The same widths, fitted to what stdout has. The path column is what gives:
 /// every other one is a number, already as short as it can be said.
-fn fitted(natural: Widths, cols: ?u16) Widths {
+fn fitted(natural: Widths, cols: ?u16, head: u16) Widths {
     var out = natural;
     const room = cols orelse return out;
 
     // Unless shrinking it would leave no path to read. Then the age goes
     // instead: it is the widest of the trailing columns and the least of what
     // a row says.
-    if (out.age > 0 and room -| fixedOf(out) < min_text) out.age = 0;
+    if (out.age > 0 and room -| fixedOf(out, head) < min_text) out.age = 0;
 
-    const budget = room -| fixedOf(out);
+    const budget = room -| fixedOf(out, head);
     if (budget < natural.text) out.text = @max(min_text, budget);
     return out;
 }
 
 /// What a row spends that is not the path, in the order it spends it.
-fn fixedOf(w: Widths) u16 {
+fn fixedOf(w: Widths, head: u16) u16 {
     return head + gap + w.added + gap + w.removed + (if (w.age > 0) gap + w.age else 0);
 }
 
 /// A letter as well as the colour, where the `F` list uses colour alone: this
 /// output is routinely a pipe, and a pipe has no colours.
-fn letter(status: diff.Status) []const u8 {
+/// Untracked answers before the diff status does. Every untracked file is a
+/// synthesised whole-file add, so it arrives as `.added` and would otherwise
+/// be lettered `A` - the same letter as a file deliberately staged for
+/// addition, which is the opposite intention.
+fn letter(status: diff.Status, stage: git.Stage) []const u8 {
+    if (stage == .untracked) return "?";
     return switch (status) {
         .modified => "M",
         .added => "A",
@@ -369,13 +463,35 @@ fn letter(status: diff.Status) []const u8 {
 
 /// The same five answers `ui/render.zig` paints a path with, so a file is the
 /// same colour here as it is on the screen.
-fn statusStyle(t: Theme, status: diff.Status) Style {
+fn statusStyle(t: Theme, status: diff.Status, stage: git.Stage) Style {
+    if (stage == .untracked) return t.stage_untracked;
     return switch (status) {
         .added => t.file_added,
         .deleted => t.file_deleted,
         .modified => t.file_modified,
         .renamed => t.file_renamed,
         .binary => t.file_binary,
+    };
+}
+
+/// How much of this file's change is in the index, as a fill: full, half,
+/// empty. Untracked has none - the `?` in the letter column is the whole
+/// answer, and a mark beside it would be a second one.
+fn stageMark(stage: git.Stage, g: Glyphs) []const u8 {
+    return switch (stage) {
+        .staged => g.stage_staged,
+        .both => g.stage_both,
+        .unstaged => g.stage_unstaged,
+        .untracked => "",
+    };
+}
+
+fn stageStyle(t: Theme, stage: git.Stage) Style {
+    return switch (stage) {
+        .staged => t.stage_staged,
+        .both => t.stage_both,
+        .unstaged => t.stage_unstaged,
+        .untracked => t.stage_untracked,
     };
 }
 
@@ -438,23 +554,23 @@ test "every file is a row, with its counts and its age" {
 
     var it = std.mem.tokenizeScalar(u8, out, '\n');
     const modified = it.next().?;
-    try testing.expect(std.mem.startsWith(u8, modified, " M  src/ui/app.zig"));
+    try testing.expect(std.mem.startsWith(u8, modified, " . M  src/ui/app.zig"));
     try testing.expect(std.mem.indexOf(u8, modified, "+12") != null);
     try testing.expect(std.mem.indexOf(u8, modified, "-4") != null);
     try testing.expect(std.mem.endsWith(u8, modified, "2m ago"));
 
     const added = it.next().?;
-    try testing.expect(std.mem.startsWith(u8, added, " A  src/ui/status.zig"));
+    try testing.expect(std.mem.startsWith(u8, added, " . A  src/ui/status.zig"));
     try testing.expect(std.mem.endsWith(u8, added, "just now"));
 
     // Nothing on disk to stat, so the row ends at its counts.
     const deleted = it.next().?;
-    try testing.expect(std.mem.startsWith(u8, deleted, " D  src/ui/app_old.zig"));
+    try testing.expect(std.mem.startsWith(u8, deleted, " . D  src/ui/app_old.zig"));
     try testing.expect(std.mem.endsWith(u8, deleted, "-99"));
 
     // A binary file has no lines to count. Neither cell says zero.
     const binary = it.next().?;
-    try testing.expect(std.mem.startsWith(u8, binary, " B  logo.png"));
+    try testing.expect(std.mem.startsWith(u8, binary, " . B  logo.png"));
     try testing.expect(std.mem.indexOf(u8, binary, "0") == null);
     try testing.expect(std.mem.endsWith(u8, binary, "1d ago"));
 }
@@ -568,13 +684,13 @@ test "a directory with more than one changed file becomes a header with rails" {
     const out = try drawn(arena.allocator(), &buf, test_rows, opts);
 
     var it = std.mem.tokenizeScalar(u8, out, '\n');
-    try testing.expectEqualStrings("    src/ui/", it.next().?);
-    try testing.expect(std.mem.startsWith(u8, it.next().?, " M    |- app.zig"));
-    try testing.expect(std.mem.startsWith(u8, it.next().?, " A    |- status.zig"));
+    try testing.expectEqualStrings("      src/ui/", it.next().?);
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " . M    |- app.zig"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " . A    |- status.zig"));
     // The last of a group closes it.
-    try testing.expect(std.mem.startsWith(u8, it.next().?, " D    \\- app_old.zig"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " . D    \\- app_old.zig"));
     // A file at the root is in no directory, so it is in no group.
-    try testing.expect(std.mem.startsWith(u8, it.next().?, " B  logo.png"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " . B  logo.png"));
 
     // Grouping only moves the names; the numbers are the same ones.
     try testing.expect(std.mem.indexOf(u8, out, "4 files  +222  -103  against HEAD") != null);
@@ -648,7 +764,7 @@ test "a moved file is named the way git names one" {
         .{ .old_path = "src/ui/app.zig", .new_path = "src/core/app.zig", .status = .renamed, .added = 3, .removed = 3 },
     };
     // Ages off, so nothing is stat'd - the same thing a two-ref review passes.
-    const rows = try collect(arena.allocator(), undefined, files, false);
+    const rows = try collect(arena.allocator(), undefined, files, false, null);
     try testing.expectEqualStrings("src/{ui => core}/app.zig", rows[0].text);
 }
 
@@ -668,4 +784,72 @@ test "colour is one escape run per cell, and a pipe gets none" {
         try drawn(arena.allocator(), &plain, test_rows, test_opts),
         "\x1b[",
     ) == null);
+}
+
+test "the stage mark says which side of the index a change is on" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    const rows: []const Row = &.{
+        .{ .text = "staged.zig", .status = .modified, .stage = .staged, .added = 1, .removed = 0 },
+        .{ .text = "both.zig", .status = .modified, .stage = .both, .added = 2, .removed = 0 },
+        .{ .text = "unstaged.zig", .status = .modified, .stage = .unstaged, .added = 3, .removed = 0 },
+        .{ .text = "untracked.zig", .status = .added, .stage = .untracked, .added = 4, .removed = 0 },
+    };
+    const out = try drawn(arena.allocator(), &buf, rows, test_opts);
+
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " * M  staged.zig"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " o M  both.zig"));
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " . M  unstaged.zig"));
+    // An untracked file is a synthesised whole-file add, so its status is
+    // `.added`. Lettering it `A` would make it identical to the file above it
+    // in a tree where one was staged and the other never added at all.
+    try testing.expect(std.mem.startsWith(u8, it.next().?, "   ?  untracked.zig"));
+}
+
+test "the key lists only the marks the table used" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    const some: []const Row = &.{
+        .{ .text = "a.zig", .status = .modified, .stage = .staged, .added = 1, .removed = 0 },
+        .{ .text = "b.zig", .status = .modified, .stage = .unstaged, .added = 1, .removed = 0 },
+    };
+    const out = try drawn(arena.allocator(), &buf, some, test_opts);
+    try testing.expect(std.mem.indexOf(u8, out, "* staged") != null);
+    try testing.expect(std.mem.indexOf(u8, out, ". unstaged") != null);
+    // Neither of these is on screen, so neither is explained.
+    try testing.expect(std.mem.indexOf(u8, out, "o both") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "? untracked") == null);
+}
+
+test "a tree with nothing staged gets no key at all" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    // The ordinary case: every row carries the same mark, so a key would
+    // explain a column that says the same thing all the way down.
+    const out = try drawn(arena.allocator(), &buf, test_rows, test_opts);
+    try testing.expect(std.mem.indexOf(u8, out, "unstaged") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "staged") == null);
+}
+
+test "a two-ref review spends no width on a column it cannot answer" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var buf: [4 << 10]u8 = undefined;
+
+    var opts = test_opts;
+    opts.target = "feature";
+    const out = try drawn(arena.allocator(), &buf, test_rows, opts);
+
+    // Between two refs there is no index, so the row starts at its letter and
+    // the table is two columns narrower.
+    var it = std.mem.tokenizeScalar(u8, out, '\n');
+    try testing.expect(std.mem.startsWith(u8, it.next().?, " M  src/ui/app.zig"));
+    try testing.expect(std.mem.indexOf(u8, out, "staged") == null);
 }

@@ -84,6 +84,11 @@ pub const entries: []const Entry = &.{
     .{ "against {s}", "{s} との比較" },
     .{ "against {s}, {d} ignored", "{s} との比較、{d}件を除外" },
     .{ "{s}..{s}, {d} ignored", "{s}..{s}、{d}件を除外" },
+    // The stage key under `lgtm status`.
+    .{ "staged", "ステージ済み" },
+    .{ "both", "両方" },
+    .{ "unstaged", "未ステージ" },
+    .{ "untracked", "未追跡" },
     .{ "no changes against HEAD", "HEAD からの変更はありません" },
     .{ "not a git repository", "git リポジトリではありません" },
     .{ "cd to a repository, or git init here", "リポジトリへ cd するか、ここで git init" },

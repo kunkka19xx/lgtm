@@ -406,6 +406,107 @@ pub fn snapshotPaths(gpa: Allocator, io: std.Io) Error![][]const u8 {
     return list.toOwnedSlice(gpa);
 }
 
+/// Which side of the index a file's change sits on.
+///
+/// The review itself has no use for this: `lgtm` compares the working tree
+/// with a base and the index is not on that path. `lgtm status` shadows
+/// `git status`, though, and there the index is half of what git would have
+/// said - three different states arrive as one `M` without it.
+pub const Stage = enum {
+    /// Wholly in the index: git's `M `, `A `, `D `, `R `.
+    staged,
+    /// Wholly outside it: git's ` M`, ` D`.
+    unstaged,
+    /// Some of each, the case a single letter cannot say at all: git's `MM`.
+    /// An unmerged path is reported here too - both sides of it differ, and a
+    /// conflict is the one state where that is the whole point.
+    both,
+    /// Not tracked: git's `??`. Its own answer rather than `staged`, because
+    /// an untracked file and one deliberately `git add`ed look identical
+    /// otherwise, and they are opposite intentions.
+    untracked,
+};
+
+/// Every path `git status` has something to say about, and what it said.
+///
+/// Keyed on the path as git spells it - for a rename, the new one, which is
+/// what `FileDiff.path()` returns for the same file.
+pub const Stages = struct {
+    map: std.StringHashMapUnmanaged(Stage) = .empty,
+    arena: std.heap.ArenaAllocator,
+
+    /// `unstaged` for a path git did not mention, which is what a file already
+    /// matching the index is. A caller that could not run git at all gets the
+    /// same answer for everything, and a table with a uniform mark rather than
+    /// no table.
+    pub fn get(self: *const Stages, path: []const u8) Stage {
+        return self.map.get(path) orelse .unstaged;
+    }
+
+    pub fn deinit(self: *Stages) void {
+        self.map.deinit(self.arena.child_allocator);
+        self.arena.deinit();
+    }
+};
+
+/// `git status --porcelain`, read for its two status columns only.
+///
+/// One subprocess, and it carries the untracked list as well, so a caller
+/// wanting both does not also need `ls-files --others`.
+///
+/// `-z` rather than the default: a path with a space, a quote or a newline in
+/// it is emitted verbatim between NULs, where the textual form would quote and
+/// escape it and every key would have to be unescaped before it matched.
+pub fn stages(gpa: Allocator, io: std.Io, repo: ?[]const u8) Error!Stages {
+    var out: Stages = .{ .arena = .init(gpa) };
+    errdefer out.deinit();
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    try argv.appendSlice(gpa, &.{ "git", "--no-optional-locks" });
+    if (repo) |r| try argv.appendSlice(gpa, &.{ "-C", r });
+    try argv.appendSlice(gpa, &.{ "status", "--porcelain=v1", "-z", "--untracked-files=all" });
+
+    const res = try proc.run(gpa, io, argv.items, max_diff_bytes);
+    defer res.deinit(gpa);
+    if (res.exit_code != 0) return error.GitFailed;
+
+    try parseStages(&out, res.stdout);
+    return out;
+}
+
+/// Split out so the format can be tested without a repository.
+fn parseStages(out: *Stages, text: []const u8) Allocator.Error!void {
+    const gpa = out.arena.child_allocator;
+    const arena = out.arena.allocator();
+
+    var it = std.mem.splitScalar(u8, text, 0);
+    while (it.next()) |rec| {
+        // `XY <path>`: two status columns, a space, then the path.
+        if (rec.len < 4 or rec[2] != ' ') continue;
+        const x = rec[0];
+        const y = rec[1];
+        const path = rec[3..];
+
+        // A rename emits the new path in this record and the old one in the
+        // next, which is not a record of its own and must not be read as one.
+        if (x == 'R' or x == 'C') _ = it.next();
+
+        try out.map.put(gpa, try arena.dupe(u8, path), classify(x, y));
+    }
+}
+
+fn classify(x: u8, y: u8) Stage {
+    if (x == '?' and y == '?') return .untracked;
+    // Unmerged: both sides of a conflict differ, whatever the letters are.
+    if (x == 'U' or y == 'U') return .both;
+    const in_index = x != ' ' and x != '?';
+    const in_tree = y != ' ' and y != '?';
+    if (in_index and in_tree) return .both;
+    if (in_index) return .staged;
+    return .unstaged;
+}
+
 fn collectPaths(
     gpa: Allocator,
     io: std.Io,
@@ -754,4 +855,51 @@ test "a log reads as commits, oldest first, with their counts" {
     const none = try parseLog(testing.allocator, "");
     defer testing.allocator.free(none);
     try testing.expectEqual(@as(usize, 0), none.len);
+}
+
+test "porcelain status splits the index side from the working tree" {
+    const gpa = std.testing.allocator;
+    var st: Stages = .{ .arena = .init(gpa) };
+    defer st.deinit();
+
+    // `-z`: NUL after every record, and a rename spends two of them.
+    try parseStages(&st, "MM both.txt\x00" ++
+        "M  keep.txt\x00" ++
+        " M unstaged.txt\x00" ++
+        "A  staged_new.txt\x00" ++
+        "D  staged_del.txt\x00" ++
+        "?? untracked.txt\x00" ++
+        "R  new_name.txt\x00old_name.txt\x00");
+
+    try std.testing.expectEqual(Stage.both, st.get("both.txt"));
+    try std.testing.expectEqual(Stage.staged, st.get("keep.txt"));
+    try std.testing.expectEqual(Stage.unstaged, st.get("unstaged.txt"));
+    try std.testing.expectEqual(Stage.staged, st.get("staged_new.txt"));
+    try std.testing.expectEqual(Stage.staged, st.get("staged_del.txt"));
+    try std.testing.expectEqual(Stage.untracked, st.get("untracked.txt"));
+
+    // A rename is keyed on the new name, which is what `FileDiff.path()`
+    // returns for it. The old name is the rename's second field, not a record
+    // of its own - read as one it would have become a bogus entry.
+    try std.testing.expectEqual(Stage.staged, st.get("new_name.txt"));
+    try std.testing.expectEqual(@as(?Stage, null), st.map.get("old_name.txt"));
+
+    // A path nobody mentioned matches the index.
+    try std.testing.expectEqual(Stage.unstaged, st.get("never-heard-of.txt"));
+}
+
+test "a path with a space keeps its whole name" {
+    const gpa = std.testing.allocator;
+    var st: Stages = .{ .arena = .init(gpa) };
+    defer st.deinit();
+
+    // The reason for `-z`: the textual form would quote and escape this.
+    try parseStages(&st, " M src/a file with spaces.zig\x00");
+    try std.testing.expectEqual(Stage.unstaged, st.get("src/a file with spaces.zig"));
+}
+
+test "an unmerged path is both sides, whatever the letters are" {
+    try std.testing.expectEqual(Stage.both, classify('U', 'U'));
+    try std.testing.expectEqual(Stage.both, classify('A', 'U'));
+    try std.testing.expectEqual(Stage.both, classify('U', 'D'));
 }
