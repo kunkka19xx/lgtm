@@ -17,6 +17,7 @@ const finder_mod = @import("finder.zig");
 const fs_mod = @import("../io/fs.zig");
 const render = @import("render.zig");
 const review_file = @import("../core/review.zig");
+const suggest = @import("../core/suggest.zig");
 const template = @import("../bridge/template.zig");
 const walks = @import("walks.zig");
 const pr_mod = @import("pr.zig");
@@ -601,6 +602,7 @@ pub fn commentMarks(app: *App) []const render.CommentMark {
             .body = markBody(arena, n),
             .state = if (head != null and head.? > 0) worstOn(app, n) else markState(n),
             .replies = head orelse 0,
+            .span = n.span,
         }) catch return out.items;
     }
     return out.items;
@@ -627,7 +629,11 @@ fn worstOn(app: *App, n: comments_mod.Comment) render.CommentMark.State {
 /// that draws a note and the pass that measures it must agree to the byte.
 pub fn markBody(arena: Allocator, n: comments_mod.Comment) []const u8 {
     if (!n.theirs()) return n.body;
-    return std.fmt.allocPrint(arena, "@{s}  {s}", .{ n.author, n.body }) catch n.body;
+    // A remark opening with a suggestion has no first line of prose for the
+    // name to join, so the name takes a row of its own.
+    const lead = std.mem.trimStart(u8, n.body, " \t");
+    const sep: []const u8 = if (std.mem.startsWith(u8, lead, suggest.open_fence)) "\n" else "  ";
+    return std.fmt.allocPrint(arena, "@{s}{s}{s}", .{ n.author, sep, n.body }) catch n.body;
 }
 
 pub fn markState(n: comments_mod.Comment) render.CommentMark.State {

@@ -244,6 +244,24 @@ pub const Theme = struct {
     type_name: Style,
     fn_name: Style,
     punct: Style,
+    /// No colour: a bold sentence is the same sentence, and a hue would both
+    /// make it a different kind of thing and collide with what the palette
+    /// already means by that hue.
+    ///
+    /// `emphasis` is underlined, not italic: tmux's own default
+    /// `default-terminal` is `screen-256color`, whose terminfo has no `sitm`
+    /// and defines `smso` as `\E[3m` - so the italic escape comes out as
+    /// reverse video and a word of prose becomes an unreadable block. A
+    /// reader on `tmux-256color` can say `emphasis = "italic"`.
+    strong: Style,
+    emphasis: Style,
+    strikethrough: Style,
+    /// The accent, like every other piece of structure the reader navigates
+    /// by. Not `dim`: a list a reader has to hunt for is a list drawn wrong.
+    list_mark: Style,
+    /// Coloured and bold, unlike the other two: a heading is chrome for the
+    /// document, not a sentence said harder.
+    heading: Style,
 
     /// The theme's primary. One named slot rather than a colour picked per
     /// call site, so a config file can move every accented thing at once
@@ -336,6 +354,11 @@ pub const Theme = struct {
             .type_name => self.type_name,
             .fn_name => self.fn_name,
             .punct => self.punct,
+            .strong => self.strong,
+            .emphasis => self.emphasis,
+            .strikethrough => self.strikethrough,
+            .list_mark => self.list_mark,
+            .heading => self.heading,
         };
     }
 };
@@ -354,6 +377,11 @@ pub fn fromPalette(p: Palette) Theme {
         .type_name = .{ .fg = p.cyan },
         .fn_name = .{ .fg = p.blue },
         .punct = .{ .fg = p.muted },
+        .strong = .{ .bold = true },
+        .emphasis = .{ .ul_style = .single },
+        .strikethrough = .{ .strikethrough = true, .fg = p.muted },
+        .list_mark = .{ .fg = p.accent },
+        .heading = .{ .fg = p.cyan, .bold = true },
 
         .accent = .{ .fg = p.accent, .bold = true },
         .popup_border = .{ .fg = p.accent, .dim = true },

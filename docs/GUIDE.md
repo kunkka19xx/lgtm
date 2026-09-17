@@ -158,6 +158,41 @@ wrap, and say so when they do.
 you type. `n` and `N` step; `<Esc>` or `:noh` clears the highlight and keeps the
 pattern.
 
+Markdown is highlighted like everything else, and the hunk header names the
+section a change is in rather than only a line number - `@@ #4 | Install` beats
+`@@ #4` when you are reading somebody's README. Inline code stands out,
+`**bold**` is bold and `_italic_` is underlined, and fenced blocks are left
+alone because their contents are somebody else's language.
+
+Tables keep their shape: the pipes and the `|---|---|` recede, the header row
+goes bold, and a body cell lexes on its own so inline code in one still reads
+as inline code. A list marker takes the accent - `-`, `*`, `+`, `1.`, `2)`, a
+`- [ ]` or `- [x]` box, and a blockquote's `>` - because one marker per item is
+what says the line is an item, where a row of pipes is chrome that should get
+out of the way. `~~struck out~~` is struck.
+
+A `===` or `---` rule under a line of prose is that line's heading, so the hunk
+header names the section either way you write your headings. The rule is what
+is coloured, not the title above it - a title repainted only when the lexer
+happens to start above it would be bold at some scroll positions and not
+others. A link shows its target - `[text](url)`, `![alt](src)` and
+`<https://autolink>` alike - with the brackets receding and what the link says
+left as the prose it is.
+
+Underlined rather than italic because tmux's own default `default-terminal` is
+`screen-256color`, whose terminfo has no italic at all - its standout
+capability *is* the italic escape, so a word of prose comes out as a reverse
+video block you cannot read. If your tmux config says
+`set -g default-terminal "tmux-256color"`, which does have italics, then
+`emphasis = "italic"` under `[theme]` gets you the real thing.
+
+What is *not* coloured there is deliberate. A comma is a comma, and `1400` in
+an `<img width>` is a quantity in a sentence, not a literal - colouring them
+speckles a paragraph and paints a URL's digits a different colour from its
+letters. Emphasis is refused wherever it only looks like emphasis:
+`some_flag and other_flag` is two identifiers, `2 * 3 * 4` is arithmetic, and
+`* item` is a bullet.
+
 `*` searches for the identifier under the cursor, and `#` does it backwards.
 This is the review's most common question, now that a name has changed: where
 else does it appear? It costs one key. Matched whole, so `*` on `id`
@@ -218,6 +253,14 @@ A dozen remarks is a dozen interruptions, or it is one file.
 
 Comments follow the code when the agent rewrites it, survive a restart, and say
 so when they can no longer be placed. A comment is never silently dropped.
+
+**A `suggestion` block is drawn as the edit it is.** Wherever a remark carries
+one - under the line, in the thread overlay, yours or somebody else's - the
+fence is not shown. What is shown is the lines it replaces and the lines it
+proposes, signed and coloured the way the diff signs and colours them, because
+that is the comparison you were going to make in your head anyway. Prose around
+the block stays prose. A suggestion whose line has gone from the diff still
+reads: there is nothing to show it against, so it shows what it proposes.
 
 A comment over a selection covers every line it touches, `v` or `V` alike: a
 remark anchors to whole lines, so where in them the selection starts makes no

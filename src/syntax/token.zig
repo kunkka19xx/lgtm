@@ -21,6 +21,21 @@ pub const Kind = enum(u8) {
     type_name,
     fn_name,
     punct,
+    /// Markdown's `**bold**`.
+    strong,
+    /// Markdown's `_italic_`.
+    emphasis,
+    /// Markdown's `~~struck out~~`.
+    strikethrough,
+    /// A bullet, an ordered marker, a task box or a blockquote's `>`. Its own
+    /// kind rather than `punct`, which table pipes and `---` rules share: one
+    /// marker per item is the thing that says the line is an item, where a
+    /// row of pipes is chrome that should get out of the way.
+    list_mark,
+    /// Markdown's `# heading`. Its own kind rather than `type_name`, which it
+    /// borrowed until there was a way to say bold - going bold there would
+    /// have taken every other language's type names with it.
+    heading,
 };
 
 /// Token runs, never per-character styles. `start` is a

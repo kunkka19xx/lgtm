@@ -41,6 +41,7 @@ const yaml_lang = @import("lang/yaml.zig");
 const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
 const sql_lang = @import("lang/sql.zig");
+const markdown_lang = @import("lang/markdown.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -62,6 +63,7 @@ pub const languages = [_]*const LangDef{
     &toml_lang.def,
     &dockerfile_lang.def,
     &sql_lang.def,
+    &markdown_lang.def,
 };
 
 /// The language a path is in, by extension or by name, lower-cased.
@@ -394,6 +396,8 @@ test "extensions map to languages, case-insensitively" {
     // rendered plain because the extension did not fit the buffer.
     try testing.expectEqualStrings("json", forPath("web/site.webmanifest").?.name);
     try testing.expectEqualStrings("sql", forPath("schema.sql").?.name);
+    try testing.expectEqualStrings("markdown", forPath("docs/GUIDE.md").?.name);
+    try testing.expectEqualStrings("markdown", forPath("README.markdown").?.name);
 
     try testing.expect(forPath("Makefile") == null);
     try testing.expect(forPath("notes.txt") == null);

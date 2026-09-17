@@ -18,6 +18,7 @@ const search = @import("search.zig");
 const rows_mod = @import("rows.zig");
 const path_mod = @import("path.zig");
 const binary = @import("../core/binary.zig");
+const suggest = @import("../core/suggest.zig");
 const i18n = @import("../i18n/i18n.zig");
 const wrap = @import("wrap.zig");
 
@@ -229,18 +230,42 @@ fn drawComment(f: Frame, v: View, row: i32, id: u32) Allocator.Error!i32 {
     if (width == 0) return 1;
 
     // The body wrapped, and hard newlines honoured: a note written with `o`
-    // has real lines in it and they are the reader's paragraphs.
+    // has real lines in it and they are the reader's paragraphs. A
+    // ```suggestion is drawn as the edit it is, not as its fence.
+    var old_buf: [suggest.max_replaced][]const u8 = undefined;
+    const old: []const []const u8 = if (suggest.has(n.body))
+        suggest.replaced(v.file, n.line, n.span, &old_buf)
+    else
+        &.{};
+
     var rows: i32 = 0;
-    var lines = std.mem.splitScalar(u8, n.body, '\n');
-    while (lines.next()) |line| {
-        var it: wrap.Iterator = .init(line, width, f.method(), .flush);
+    var w = suggest.walk(n.body, old);
+    while (w.next()) |line| {
+        const kind_style = switch (line.kind) {
+            .prose => style,
+            .removed => t.del_sign,
+            .added => t.add_sign,
+        };
+        const sign: []const u8 = switch (line.kind) {
+            .prose => "",
+            .removed => f.glyphs.del,
+            .added => f.glyphs.add,
+        };
+        // Inset past the sign, which the wrap below draws once.
+        const inset: u16 = if (line.kind == .prose) 0 else 2;
+        var it: wrap.Iterator = .init(line.text, width -| inset, f.method(), .flush);
+        var lead = true;
         while (it.next()) |chunk| {
             if (onScreen(f, row + rows)) |at| {
                 // The marker only on the first row, so a wrapped note reads as
                 // one remark rather than as several.
                 if (rows == 0) f.put(at, col -| 2, f.glyphs.comment_mark, style);
-                f.put(at, col + chunk.col, chunk.slice(line), style);
+                // And the sign only on the first row of its line: repeated on
+                // a continuation it reads as a second line of the edit.
+                if (lead and sign.len > 0) f.put(at, col, sign, kind_style);
+                f.put(at, col + inset + chunk.col, chunk.slice(line.text), kind_style);
             }
+            lead = false;
             rows += 1;
             if (row + rows >= f.win.height) break;
         }
@@ -854,6 +879,72 @@ test "a collapsed conversation says how many more there are, and which key reads
     var key: [32]u8 = undefined;
     const want = keytext.firstKeyFor(@import("keymap.zig").default_bindings, .comment_view, .normal, &key);
     try testing.expect(std.mem.indexOf(u8, drawn, want) != null);
+}
+
+test "a suggestion draws as the edit it is, not as the fence it was written in" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = 80, .rows = 10, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    screen.width_method = .unicode;
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 10, .screen = &screen };
+    const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = frame_mod.Glyphs.ascii };
+
+    const hunk_mod = @import("../core/hunk.zig");
+    var kinds = [_]hunk_mod.LineKind{.context};
+    var olds = [_]u32{1};
+    var news = [_]u32{7};
+    var texts = [_][]const u8{"const a = 1;"};
+    const file: @import("../core/diff.zig").FileDiff = .{
+        .old_path = "a.zig",
+        .new_path = "a.zig",
+        .status = .modified,
+        .lines = .{ .kind = &kinds, .old_no = &olds, .new_no = &news, .text = &texts },
+    };
+
+    const marks = [_]frame_mod.CommentMark{.{
+        .line = 7,
+        .id = 3,
+        .span = 1,
+        .body = "cleaner:\n```suggestion\nconst a = 2;\n```",
+        .state = .open,
+    }};
+    const v: View = .{
+        .file = &file,
+        .rows = .empty,
+        .file_index = 0,
+        .file_count = 1,
+        .cursor = 0,
+        .scroll = 0,
+        .notes = &marks,
+        .bindings = @import("keymap.zig").default_bindings,
+    };
+
+    // One row of prose, one line out, one line in. The fence itself is gone.
+    try testing.expectEqual(@as(i32, 3), try drawComment(f, v, 0, 3));
+
+    try testing.expect(std.mem.indexOf(u8, try rowText(arena, &screen, 0, 80), "cleaner:") != null);
+    const out = try rowText(arena, &screen, 1, 80);
+    const in = try rowText(arena, &screen, 2, 80);
+    try testing.expect(std.mem.indexOf(u8, out, "-") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "const a = 1;") != null);
+    try testing.expect(std.mem.indexOf(u8, in, "+") != null);
+    try testing.expect(std.mem.indexOf(u8, in, "const a = 2;") != null);
+    // The fence is drawn nowhere.
+    for (0..3) |r| {
+        try testing.expect(std.mem.indexOf(u8, try rowText(arena, &screen, @intCast(r), 80), "```") == null);
+    }
+}
+
+fn rowText(arena: Allocator, screen: *vaxis.Screen, row: u16, cols: u16) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    for (0..cols) |c| {
+        const cell = screen.readCell(@intCast(c), row) orelse break;
+        try out.appendSlice(arena, cell.char.grapheme);
+    }
+    return out.items;
 }
 
 test "a remark that leads nothing keeps the height it always had" {

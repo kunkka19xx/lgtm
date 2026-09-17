@@ -39,8 +39,17 @@ pub const State = struct {
     /// Indentation of the line that opened a block scalar. Its body is every
     /// line indented past this one.
     block_indent: u16 = 0,
+    /// The byte an open fence is made of, and how many. A fence closes only
+    /// on its own character and at least as many. Here, not on `Scan`, so a
+    /// lex resumed from a checkpoint inside one matches a whole-file lex.
+    fence_char: u8 = 0,
+    fence_len: u8 = 0,
+    /// A `|---|---|` has been seen and no line since has ended the table. In
+    /// `State` so a lex resumed from a checkpoint inside a long table knows
+    /// it is in one; a row alone is a paragraph that happens to have pipes.
+    in_table: bool = false,
 
-    pub const Mode = enum(u8) { normal, block_comment, string, block_scalar };
+    pub const Mode = enum(u8) { normal, block_comment, string, block_scalar, fence };
 };
 
 pub const checkpoint_lines = 64;
@@ -249,6 +258,9 @@ const Scan = struct {
     /// name. Deliberately not part of `State`: a tag name never survives a
     /// newline, so a checkpoint has nothing to carry.
     expect_tag: bool = false,
+    /// What this line is to a table, decided once at its start. Not in
+    /// `State`: a table row does not cross a newline.
+    table: Table = .none,
 
     fn run(self: *Scan) Allocator.Error!void {
         while (self.i < self.end) {
@@ -264,6 +276,7 @@ const Scan = struct {
                 .block_comment => try self.inBlockComment(self.i),
                 .string => try self.inString(self.i),
                 .block_scalar => try self.inBlockScalar(),
+                .fence => try self.inFence(),
             }
             // Every step consumes at least one byte and never runs past the
             // newline that ends a line, so this is the single place lines are
@@ -287,17 +300,53 @@ const Scan = struct {
             }
         }
 
+        self.table = .none;
+
         // Indentation is only meaningful outside a multi-line literal.
         if (self.st.mode == .block_comment or self.st.mode == .string) return;
+        if (self.st.mode == .fence) return;
 
         var j = self.i;
         var col: u16 = 0;
         while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) : (j += 1) col += 1;
         const blank = j >= self.end or self.text[j] == '\n' or self.text[j] == '\r';
         self.indent = col;
-        if (blank) return;
+        if (blank) {
+            // A blank line ends a table, so the next row of pipes is a
+            // paragraph again until another rule says otherwise.
+            self.st.in_table = false;
+            return;
+        }
 
         if (self.def.blocks == .indent) self.closeIndentSpans(col);
+        if (self.def.tables) self.table = self.classifyTable(j);
+    }
+
+    /// A header is only knowable from the line below it, and a row only from
+    /// the rule above it: without one, pipes are pipes in a paragraph.
+    fn classifyTable(self: *Scan, from: usize) Table {
+        if (from >= self.end or self.text[from] != '|') {
+            self.st.in_table = false;
+            return .none;
+        }
+        if (isDelimRow(self.text[from..self.lineEndFrom(from)])) {
+            self.st.in_table = true;
+            return .delim;
+        }
+        if (self.nextLineIsDelim(from)) return .header;
+        return if (self.st.in_table) .row else .none;
+    }
+
+    fn lineEndFrom(self: Scan, from: usize) usize {
+        return std.mem.indexOfScalarPos(u8, self.text[0..self.end], from, '\n') orelse self.end;
+    }
+
+    fn nextLineIsDelim(self: Scan, from: usize) bool {
+        const nl = std.mem.indexOfScalarPos(u8, self.text[0..self.end], from, '\n') orelse return false;
+        var j = nl + 1;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        if (j >= self.end or self.text[j] != '|') return false;
+        return isDelimRow(self.text[j..self.lineEndFrom(j)]);
     }
 
     // -- emitting ----------------------------------------------------------
@@ -379,6 +428,28 @@ const Scan = struct {
             return;
         }
 
+        // Before the literals, because markdown's inline-code spec opens on
+        // the same byte: ``` is a fence, not an empty code span.
+        if (self.def.fences and self.head) {
+            const n = self.opensFence();
+            if (n > 0) {
+                const start = self.i;
+                self.st.fence_char = c;
+                self.st.fence_len = n;
+                self.st.mode = .fence;
+                self.i += n;
+                try self.emit(start, self.i, .punct);
+                // Classified either way, so the body starts with no text
+                // pending. The info string names a language.
+                const info = self.i;
+                self.toLineEnd();
+                if (self.i == info) return;
+                const rest = std.mem.trimEnd(u8, self.text[info..self.i], "\r\n");
+                const named = std.mem.trim(u8, rest, " \t").len > 0;
+                return self.emit(info, self.i, if (named) .type_name else .punct);
+            }
+        }
+
         // One table lookup stands in for every opener test below. Most bytes
         // in source are not the start of a comment or a literal.
         if (self.def.delim_start[c]) {
@@ -443,11 +514,35 @@ const Scan = struct {
         const at_head = self.head;
         self.head = self.head and c == '-';
 
+        // Before the number branch, which would take the digits and leave
+        // the dot.
+        if (self.def.list_marks and at_head and std.ascii.isDigit(c)) {
+            if (self.orderedMarkEnd()) |end| {
+                const start = self.i;
+                self.i = end;
+                return self.emit(start, self.i, .list_mark);
+            }
+        }
+
+        // Before the identifier branch: '_' starts an identifier.
+        if (self.def.emphasis and (c == '*' or c == '_' or c == '~')) {
+            if (self.emphasisEnd()) |span| {
+                const start = self.i;
+                self.i = span.end;
+                self.expect_fn = false;
+                // A run of three or more tildes is a fence, taken above.
+                const kind: Kind = if (c == '~')
+                    .strikethrough
+                else if (span.marks == 2) .strong else .emphasis;
+                return self.emit(start, self.i, kind);
+            }
+        }
+
         if (std.ascii.isDigit(c)) {
             const start = self.i;
             self.scanNumber();
             self.expect_fn = false;
-            return self.emit(start, self.i, .number);
+            return self.emit(start, self.i, if (self.def.prose) .text else .number);
         }
 
         if (self.def.ident_start[c]) {
@@ -522,6 +617,134 @@ const Scan = struct {
             return self.emit(start, self.i, .punct);
         }
 
+        // A header's cells are labels, drawn rather than lexed: through the
+        // keyword lookup, `default` would colour in one table and not the
+        // next.
+        if (at_head and (self.table == .delim or self.table == .header)) {
+            const stop = self.lineEndFrom(self.i);
+            if (self.table == .delim) {
+                const start = self.i;
+                self.i = stop;
+                return self.emit(start, self.i, .punct);
+            }
+            while (self.i < stop) {
+                const start = self.i;
+                if (self.text[self.i] == '|') {
+                    self.i += 1;
+                    try self.emit(start, self.i, .punct);
+                    continue;
+                }
+                while (self.i < stop and self.text[self.i] != '|') self.i += 1;
+                try self.emit(start, self.i, .strong);
+            }
+            return;
+        }
+
+        // Pipes only: a cell lexes on its own, so inline code in one reads
+        // as inline code.
+        if (self.table == .row and c == '|') {
+            const start = self.i;
+            self.i += 1;
+            return self.emit(start, self.i, .punct);
+        }
+
+        // The `#` count is the depth, and the line is the name - which is
+        // what puts the section in the hunk header.
+        if (self.def.blocks == .headings and at_head and c == '#') {
+            const start = self.i;
+            var level: u16 = 0;
+            while (self.i < self.end and self.text[self.i] == '#') : (self.i += 1) level += 1;
+            // `#hashtag` is a word. A heading's run is followed by a space.
+            const spaced = self.i < self.end and (self.text[self.i] == ' ' or self.text[self.i] == '\t');
+            if (level <= 6 and spaced) {
+                self.toLineEnd();
+                const name = std.mem.trim(u8, self.text[start..self.i], "# \t\r\n");
+                // The level stands in for the column, and nests.
+                self.indent = level;
+                if (name.len > 0) try self.openFn(name, true);
+                return self.emit(start, self.i, .heading);
+            }
+            self.i = start;
+        }
+
+        // A rule under a line of prose is that line's heading, not a rule.
+        // Before the thematic-break branch, which would otherwise take it.
+        if (self.def.blocks == .headings and at_head) {
+            if (self.setextOver()) |h| {
+                const start = self.i;
+                self.i = self.lineEndFrom(self.i);
+                self.indent = h.level;
+                try self.openFn(h.name, true);
+                // The section starts at its title, not at the rule under it.
+                if (self.fns) |fns| {
+                    if (fns.items.len > 0) fns.items[fns.items.len - 1].start_line -|= 1;
+                }
+                return self.emit(start, self.i, .heading);
+            }
+        }
+
+        if (self.def.list_marks and at_head) {
+            if (c == '>') {
+                self.i += 1;
+                return self.emit(self.i - 1, self.i, .list_mark);
+            }
+            if (c == '-' or c == '*' or c == '+') {
+                const start = self.i;
+                while (self.i < self.end and self.text[self.i] == c) self.i += 1;
+                const marks = self.i - start;
+                // Three or more alone on a line is a thematic break.
+                if (marks >= 3 and self.restOfLineBlank())
+                    return self.emit(start, self.i, .punct);
+                self.i = start;
+                // One mark and then a space. `**bold**` opens a line as
+                // often as a list does and is not one.
+                const next = if (start + 1 < self.end) self.text[start + 1] else '\n';
+                const spaced = next == ' ' or next == '\t' or next == '\n' or next == '\r';
+                if (marks == 1 and spaced) {
+                    self.i = start + 1;
+                    // The box belongs to the bullet, not to the link branch.
+                    if (self.taskBoxEnd()) |end| self.i = end;
+                    return self.emit(start, self.i, .list_mark);
+                }
+                // Not a mark. Falls through, and the line reads as prose.
+            }
+        }
+
+        // Three pieces, so what is between the brackets lexes as itself. The
+        // opener is drawn only once the rest of the link is really there, or
+        // every `[1]` in prose would be chrome.
+        if (self.def.links) {
+            const bang = c == '!' and self.i + 1 < self.end and self.text[self.i + 1] == '[';
+            if ((c == '[' or bang) and self.linkFollows(self.i + @intFromBool(bang))) {
+                const start = self.i;
+                self.i += 1 + @as(usize, @intFromBool(bang));
+                return self.emit(start, self.i, .punct);
+            }
+            if (c == ']' and self.i + 1 < self.end and self.text[self.i + 1] == '(') {
+                if (self.closeParen(self.i + 2)) |close| {
+                    const start = self.i;
+                    self.i += 2;
+                    try self.emit(start, self.i, .punct);
+                    try self.emit(self.i, close, .string);
+                    self.i = close;
+                    const end = self.i + 1;
+                    self.i = end;
+                    return self.emit(close, end, .punct);
+                }
+            }
+            // All target, so there is no text half to leave alone.
+            if (c == '<') {
+                if (self.autolinkEnd()) |end| {
+                    const start = self.i;
+                    self.i += 1;
+                    try self.emit(start, self.i, .punct);
+                    try self.emit(self.i, end - 1, .string);
+                    self.i = end;
+                    return self.emit(end - 1, end, .punct);
+                }
+            }
+        }
+
         // A table header is the whole bracketed name, and the only structure
         // TOML has. It has a line to itself, which is what tells it from an
         // array element that happens to start one: `[1, 2],` is a value.
@@ -578,6 +801,7 @@ const Scan = struct {
             self.i += 1;
         }
         if (self.i == start) self.i += 1; // never stall
+        if (self.def.prose) return self.emit(start, self.i, .text);
         return self.emit(start, self.i, .punct);
     }
 
@@ -603,6 +827,170 @@ const Scan = struct {
             return self.inNormal();
         }
         return self.emit(start, self.i, .string);
+    }
+
+    /// `Title` over `=====` is an H1, and over `-----` an H2.
+    ///
+    /// Only the rule is coloured. Repainting the title would mean reaching
+    /// back into runs a resumed lex never emitted, so it would be bold at some
+    /// scroll positions and not others. The name still reaches the hunk
+    /// header. Reading backwards is safe; the buffer is whole whatever range
+    /// is being lexed.
+    fn setextOver(self: Scan) ?struct { level: u16, name: []const u8 } {
+        const c = self.text[self.i];
+        if (c != '=' and c != '-') return null;
+        var j = self.i;
+        while (j < self.end and self.text[j] == c) j += 1;
+        if (std.mem.trim(u8, self.text[j..self.lineEndFrom(self.i)], " \t\r").len != 0) return null;
+
+        // Under a blank line a rule is a rule.
+        const here = std.mem.lastIndexOfScalar(u8, self.text[0..self.i], '\n') orelse return null;
+        const from = if (std.mem.lastIndexOfScalar(u8, self.text[0..here], '\n')) |p| p + 1 else 0;
+        const name = std.mem.trim(u8, self.text[from..here], " \t\r");
+        if (name.len == 0) return null;
+        switch (name[0]) {
+            '#', '|', '>', '`', '~', '=', '-' => return null,
+            else => {},
+        }
+        return .{ .level = if (c == '=') 1 else 2, .name = name };
+    }
+
+    /// One past the `.` or `)` of an ordered marker. Bounded, because a year
+    /// at the head of a line is not a list.
+    fn orderedMarkEnd(self: Scan) ?usize {
+        var j = self.i;
+        while (j < self.end and std.ascii.isDigit(self.text[j])) j += 1;
+        if (j - self.i > 9 or j >= self.end) return null;
+        if (self.text[j] != '.' and self.text[j] != ')') return null;
+        j += 1;
+        if (j >= self.end) return j;
+        return if (isSpace(self.text[j])) j else null;
+    }
+
+    /// One past the `]` of the `[ ]` or `[x]` that may follow a bullet.
+    fn taskBoxEnd(self: Scan) ?usize {
+        var j = self.i;
+        while (j < self.end and (self.text[j] == ' ' or self.text[j] == '\t')) j += 1;
+        if (j == self.i or j + 2 >= self.end or self.text[j] != '[') return null;
+        const mark = self.text[j + 1];
+        if (mark != ' ' and mark != 'x' and mark != 'X') return null;
+        return if (self.text[j + 2] == ']') j + 3 else null;
+    }
+
+    /// A `]` with a `(` after it on the same line, and a `)` to close it.
+    fn linkFollows(self: Scan, from: usize) bool {
+        var j = from + 1;
+        while (j < self.end and self.text[j] != '\n') : (j += 1) {
+            if (self.text[j] == '[') return false;
+            if (self.text[j] != ']') continue;
+            if (j + 1 >= self.end or self.text[j + 1] != '(') return false;
+            return self.closeParen(j + 2) != null;
+        }
+        return false;
+    }
+
+    /// The `)` closing a target, counting pairs so a URL with brackets in it
+    /// survives. Null past the end of the line.
+    fn closeParen(self: Scan, from: usize) ?usize {
+        var depth: usize = 1;
+        var j = from;
+        while (j < self.end and self.text[j] != '\n') : (j += 1) {
+            switch (self.text[j]) {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0) return j;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    /// One past the `>` of `<scheme://rest>`. The scheme is what tells it
+    /// from the `<img` opening a line of raw HTML.
+    fn autolinkEnd(self: Scan) ?usize {
+        var j = self.i + 1;
+        var scheme = false;
+        while (j < self.end and self.text[j] != '\n') : (j += 1) {
+            const b = self.text[j];
+            if (isSpace(b) or b == '<') return null;
+            if (b == ':') scheme = true;
+            if (b == '>') return if (scheme and j > self.i + 1) j + 1 else null;
+        }
+        return null;
+    }
+
+    /// Where a span ends and how many marks opened it, or null.
+    ///
+    /// Three rules, each refusing a false positive rather than catching a true
+    /// one: it never crosses a line, so a stray `*` costs one sentence; the
+    /// marks hug their words, which tells `2 * 3 * 4` from `*emphasis*`; and
+    /// `_` needs a word boundary, without which `some_flag and other_flag` is
+    /// one italic span.
+    fn emphasisEnd(self: Scan) ?struct { end: usize, marks: usize } {
+        const c = self.text[self.i];
+        var marks: usize = 0;
+        while (self.i + marks < self.end and self.text[self.i + marks] == c) marks += 1;
+        if (marks > 2) return null;
+        if (c == '_' and self.i > 0 and self.def.ident_cont[self.text[self.i - 1]]) return null;
+
+        const body = self.i + marks;
+        if (body >= self.end or isSpace(self.text[body])) return null;
+
+        var j = body;
+        while (j < self.end and self.text[j] != '\n') {
+            if (self.text[j] != c) {
+                j += 1;
+                continue;
+            }
+            var close: usize = 0;
+            while (j + close < self.end and self.text[j + close] == c) close += 1;
+            const after = j + close;
+            // `*a\\*b*` closes on the last mark, not the escaped one.
+            if (close != marks or isSpace(self.text[j - 1]) or self.text[j - 1] == '\\') {
+                j = after;
+                continue;
+            }
+            if (c == '_' and after < self.end and self.def.ident_cont[self.text[after]]) {
+                j = after;
+                continue;
+            }
+            return .{ .end = after, .marks = marks };
+        }
+        return null;
+    }
+
+    /// Every line to the closing fence, as text rather than lexed: the body
+    /// is somebody else's language, and this scanner runs one definition at a
+    /// time. Unclosed it runs to the end, which is right for a fragment.
+    fn inFence(self: *Scan) Allocator.Error!void {
+        const start = self.i;
+        self.toLineEnd();
+        const line = std.mem.trimEnd(u8, self.text[start..self.i], "\r\n");
+        const bare = std.mem.trimStart(u8, line, " \t");
+        var marks: usize = 0;
+        while (marks < bare.len and bare[marks] == self.st.fence_char) marks += 1;
+        // Its own character, at least as many, and nothing else.
+        if (marks >= self.st.fence_len and std.mem.trim(u8, bare[marks..], " \t").len == 0) {
+            self.st.mode = .normal;
+            self.st.fence_char = 0;
+            self.st.fence_len = 0;
+            return self.emit(start, self.i, .punct);
+        }
+        // Flushed per line: `.text` is the pending run, and a block left
+        // pending would be one run holding every newline in it.
+        return self.flushText(self.i);
+    }
+
+    /// How many backticks or tildes open a fence here, or zero for none.
+    fn opensFence(self: Scan) u8 {
+        const c = self.text[self.i];
+        if (c != '`' and c != '~') return 0;
+        var j = self.i;
+        while (j < self.end and self.text[j] == c) j += 1;
+        const marks = j - self.i;
+        return if (marks >= 3) @intCast(@min(marks, 255)) else 0;
     }
 
     /// `|`, `>` and their modifiers - `|-`, `>+`, `|2` - with nothing after
@@ -1015,7 +1403,8 @@ const Scan = struct {
             // Depth never moves under `none`, so this closes every sibling,
             // which is the whole of what a flat language needs.
             .braces, .none => self.closeBraceSpans(),
-            .indent => self.closeIndentSpans(self.indent),
+            // A heading's level is its column, set before the call.
+            .indent, .headings => self.closeIndentSpans(self.indent),
         }
 
         try fns.append(self.gpa, .{
@@ -1095,10 +1484,31 @@ const yaml_lang = @import("lang/yaml.zig");
 const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
 const sql_lang = @import("lang/sql.zig");
+const markdown_lang = @import("lang/markdown.zig");
 
 /// Asserts the two invariants every renderer depends on. Called by most tests
 /// below rather than tested once, because a new language definition is exactly
 /// the kind of change that breaks them somewhere unexpected.
+/// What a line is to a table.
+pub const Table = enum { none, row, header, delim };
+
+/// `|---|:---:|`, with at least one dash. Anything else is an ordinary row.
+fn isDelimRow(line: []const u8) bool {
+    var dashes = false;
+    for (std.mem.trimEnd(u8, line, " \t\r")) |c| {
+        switch (c) {
+            '-' => dashes = true,
+            '|', ':', ' ', '\t' => {},
+            else => return false,
+        }
+    }
+    return dashes;
+}
+
+fn isSpace(c: u8) bool {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
 fn expectTiles(runs: []const Run, text: []const u8, from: u32, to: u32) !void {
     var at = from;
     for (runs) |r| {
@@ -2616,6 +3026,395 @@ test "sql ignores case and names what a statement creates" {
     try testing.expectEqualStrings("users", st.enclosingFn(2).?.name);
     try testing.expectEqualStrings("touch_user", st.enclosingFn(6).?.name);
     try testing.expectEqualStrings("touch_user", st.enclosingFn(8).?.name);
+}
+
+test "markdown headings are the outline, and they nest by level" {
+    const src =
+        \\# Config
+        \\
+        \\prose under the top.
+        \\
+        \\## `[keys]`
+        \\
+        \\more prose.
+        \\
+        \\### one deeper
+        \\
+        \\deepest.
+        \\
+        \\## `[nav]`
+        \\
+        \\back out one.
+        \\
+        \\# Another top
+        \\
+        \\and out entirely.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.heading, kindOf(runs, src, "# Config").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("Config", st.enclosingFn(2).?.name);
+    // The innermost heading wins, and a shallower one closes the deeper.
+    try testing.expectEqualStrings("`[keys]`", st.enclosingFn(6).?.name);
+    try testing.expectEqualStrings("one deeper", st.enclosingFn(10).?.name);
+    try testing.expectEqualStrings("`[nav]`", st.enclosingFn(14).?.name);
+    try testing.expectEqualStrings("Another top", st.enclosingFn(18).?.name);
+}
+
+test "a hash that is not a heading is not one" {
+    const src =
+        \\#hashtag is a word
+        \\####### seven is too many
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expect(kindOf(runs, src, "hashtag").? != .heading);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expect(st.enclosingFn(0) == null);
+}
+
+test "a backtick in prose does not paint the paragraph" {
+    const src =
+        \\Use `zig build` to compile.
+        \\
+        \\A stray ` here, and then a great deal of ordinary prose that runs on and
+        \\on past any reasonable length for a code span, which is exactly the case
+        \\a lone backtick in a sentence is.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "zig build").?);
+    // A comma is a comma. Dimming every one speckles a paragraph.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, ", and then").?);
+    // The stray one gave up, so the sentence after it is still prose.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "ordinary prose").?);
+}
+
+test "a fenced block is not lexed, and only its own fence closes it" {
+    const src =
+        \\Before.
+        \\
+        \\~~~zig
+        \\// # not a heading
+        \\const x = "not a string to us";
+        \\```
+        \\- not a bullet
+        \\~~~
+        \\
+        \\After.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    // The info string names a language; the body is nobody's.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "zig\n").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "# not a heading").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "not a string to us").?);
+    // A backtick fence inside a tilde one is a line of the block.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "- not a bullet").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expect(st.enclosingFn(3) == null);
+}
+
+test "an unclosed fence runs to the end, because a hunk is a fragment" {
+    const src =
+        \\```
+        \\half a block, cut off by the hunk
+        \\# still not a heading
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "# still not").?);
+}
+
+test "bullets and rules are marks, and the prose after them is prose" {
+    const src =
+        \\- one
+        \\* two
+        \\+ three
+        \\> quoted
+        \\
+        \\---
+        \\
+        \\after the rule
+        \\
+        \\**Read what your agent wrote - before you say LGTM.**
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.punct, kindOf(runs, src, "---").?);
+    // A rule is chrome and stays with the pipes; a marker is not.
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "* two").?);
+    // `**bold**` opens a line as often as a list does, and is not a list.
+    try testing.expectEqual(Kind.strong, kindOf(runs, src, "**Read what").?);
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, ">").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "one").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "after the rule").?);
+}
+
+test "emphasis is bold and italic, and refuses everything that only looks like it" {
+    const src =
+        \\**bold text** and _italic text_ in a sentence.
+        \\
+        \\some_flag and other_flag are two identifiers.
+        \\
+        \\A stray * in prose, and 2 * 3 * 4 is arithmetic.
+        \\
+        \\Not * this * either, because the marks do not hug the words.
+        \\
+        \\- a bullet, still a bullet
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    try testing.expectEqual(Kind.strong, kindOf(runs, src, "bold text").?);
+    try testing.expectEqual(Kind.emphasis, kindOf(runs, src, "italic text").?);
+    // The word-boundary rule, which is the whole reason this is not a spec.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "flag and other").?);
+    // Marks that do not hug their words are not marks.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "3 * 4").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "this * either").?);
+    // A stray one gives up at the end of its line rather than the file.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "a bullet, still").?);
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "- a bullet").?);
+}
+
+test "a number in a sentence is prose, not a literal" {
+    // A URL's digits painted a different colour from its letters is the tool
+    // asserting something about a link that is not true.
+    const src =
+        \\<img width="1400" src="https://host/assets/0eb27774-9c64-43c2-ba22" />
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "1400").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "0eb27774").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "9c64").?);
+    // And a real language still has numbers.
+    var zl: Lexer = .init(&zig_lang.def);
+    const zsrc = "const n = 1400;\n";
+    const zruns = try zl.lexAll(gpa, zsrc);
+    defer gpa.free(zruns);
+    try testing.expectEqual(Kind.number, kindOf(zruns, zsrc, "1400").?);
+}
+
+test "a table is pipes, a rule and a header row" {
+    const src =
+        \\Before.
+        \\
+        \\| Setting | Default | What it does |
+        \\|---|---|:--:|
+        \\| `comments` | `"marker"` | the gutter dot alone |
+        \\
+        \\| pipes | but no rule under them
+        \\
+        \\| Second | table |
+        \\|---|---|
+        \\| back | in one |
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    // The header's cells are labels, drawn rather than lexed.
+    try testing.expectEqual(Kind.strong, kindOf(runs, src, "Setting").?);
+    try testing.expectEqual(Kind.punct, kindOf(runs, src, "|---|").?);
+    // A body row keeps its pipes and lexes its cells, so inline code in one
+    // still reads as inline code.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "`comments`").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "the gutter dot").?);
+    // With no rule under it, the pipes themselves are prose too.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "| pipes |").?);
+    // And the table after it is a table again: the state does not leak.
+    try testing.expectEqual(Kind.strong, kindOf(runs, src, "Second").?);
+    try testing.expectEqual(Kind.punct, kindOf(runs, src, "| back |").?);
+}
+
+test "a link is its target, and what it says goes on lexing as itself" {
+    const src =
+        \\See [the guide](docs/GUIDE.md) and [`config.zig`](src/config.zig).
+        \\
+        \\![a shot](https://host/a(1).png) and <https://host/auto> too.
+        \\
+        \\Prose with [square brackets] and a lone ] in it.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "docs/GUIDE.md").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "the guide").?);
+    // Inline code inside a link is still inline code.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "`config.zig`").?);
+    // A target with brackets of its own survives, and so does an autolink.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "https://host/a(1).png").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "https://host/auto").?);
+    // Brackets that open no link are prose, which is what most brackets are.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "square brackets").?);
+}
+
+test "the rest of a list: ordered markers and task boxes" {
+    const src =
+        \\1. first
+        \\2) second
+        \\10. tenth
+        \\
+        \\- [ ] not done
+        \\- [x] done
+        \\- plain
+        \\
+        \\2026 was a year, not a list.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "1.").?);
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "2)").?);
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "10.").?);
+    // The box belongs to the bullet, and is not the `[` that opens a link.
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "[ ]").?);
+    try testing.expectEqual(Kind.list_mark, kindOf(runs, src, "[x]").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "not done").?);
+    // A number with no marker after it is a number in a sentence.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "2026").?);
+}
+
+test "strikethrough, and an escaped mark that closes nothing" {
+    const src =
+        \\~~struck out~~ and ~single~ too.
+        \\
+        \\Escaped \*stars\* stay prose, and *a \* b* closes on the last one.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    try testing.expectEqual(Kind.strikethrough, kindOf(runs, src, "struck out").?);
+    try testing.expectEqual(Kind.strikethrough, kindOf(runs, src, "single").?);
+    // The punctuation run takes `\*` whole, so the star never opens a span.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "stars").?);
+    // And an escaped star does not close one either: the span runs to `b*`.
+    try testing.expectEqual(Kind.emphasis, kindOf(runs, src, "a \\* b").?);
+}
+
+test "a rule under a line of prose is that line's heading" {
+    const src =
+        \\Config
+        \\======
+        \\
+        \\prose under the top.
+        \\
+        \\A section
+        \\---
+        \\
+        \\prose under that.
+        \\
+        \\***
+        \\
+        \\and that one is a rule, because nothing is above it.
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&markdown_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+    try expectTiles(runs, src, 0, @intCast(src.len));
+
+    try testing.expectEqual(Kind.heading, kindOf(runs, src, "======").?);
+    // The title keeps the prose runs it was emitted as, deliberately.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "Config").?);
+    // A rule with a blank line above it is still a rule.
+    try testing.expectEqual(Kind.punct, kindOf(runs, src, "***").?);
+
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    // Named from the line above, and the section starts at the title.
+    try testing.expectEqualStrings("Config", st.enclosingFn(0).?.name);
+    try testing.expectEqualStrings("Config", st.enclosingFn(3).?.name);
+    // `-----` is an H2, so it nests inside the `=====` above it.
+    try testing.expectEqualStrings("A section", st.enclosingFn(8).?.name);
+}
+
+test "a lex resumed inside a fence matches one from the top" {
+    // The property every checkpoint rests on, and the one thing here that
+    // cannot be eyeballed: the fence has to live in `State`.
+    const gpa = testing.allocator;
+    var src: std.ArrayList(u8) = .empty;
+    defer src.deinit(gpa);
+    try src.appendSlice(gpa, "# Top\n\n```zig\n");
+    for (0..200) |i| try src.print(gpa, "line {d} with `backticks` and # hashes\n", .{i});
+    try src.appendSlice(gpa, "```\n\n## After\n\nprose.\n");
+
+    var lx: Lexer = .init(&markdown_lang.def);
+    const whole = try lx.lexAll(gpa, src.items);
+    defer gpa.free(whole);
+
+    var st = try lx.structure(gpa, src.items);
+    defer st.deinit(gpa);
+    // A checkpoint well inside the block, which is the case that matters.
+    const cp = st.checkpointFor(100);
+    try testing.expect(cp.line > 0);
+    try testing.expect(cp.state.mode == .fence);
+
+    var part: std.ArrayList(Run) = .empty;
+    defer part.deinit(gpa);
+    _ = try lx.lex(gpa, src.items, cp.offset, @intCast(src.items.len), cp.state, &part);
+
+    var from: usize = 0;
+    while (from < whole.len and whole[from].start < cp.offset) from += 1;
+    try testing.expectEqualSlices(Run, whole[from..], part.items);
 }
 
 test "a yaml block scalar is not yaml" {

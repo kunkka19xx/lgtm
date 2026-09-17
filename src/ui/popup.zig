@@ -27,6 +27,7 @@ const keymap = @import("keymap.zig");
 const path_mod = @import("path.zig");
 const prompt_mod = @import("prompt.zig");
 const wrap_mod = @import("wrap.zig");
+const suggest = @import("../core/suggest.zig");
 const i18n = @import("../i18n/i18n.zig");
 
 /// A byte range inside a border label.
@@ -1481,6 +1482,12 @@ pub const ThreadRow = struct {
     };
 
     kind: Kind,
+    /// Which side of a suggestion this row is, and `prose` for the remark
+    /// itself. Only `body` rows carry anything but `prose`.
+    side: suggest.Kind = .prose,
+    /// The first row of its line. The sign goes here and nowhere else: on a
+    /// continuation it would read as a second line of the edit.
+    lead: bool = true,
     text: []const u8 = "",
     /// Which message it belongs to, or `no_message` for the code above the
     /// stack and the blank under it.
@@ -1517,11 +1524,32 @@ pub fn stackRows(
         // wash starts at a name rather than a row above it.
         if (i > 0) try out.append(arena, .{ .kind = .blank });
         try out.append(arena, .{ .kind = .head, .msg = i });
-        var rows: ComposeRows = .init(msg.body, content -| thread_indent, m);
         var any = false;
-        while (rows.next()) |chunk| {
-            any = true;
-            try out.append(arena, .{ .kind = .body, .text = chunk.slice(msg.body), .msg = i });
+        if (suggest.has(msg.body)) {
+            // The lines it replaces, then the lines it proposes.
+            var w = suggest.walk(msg.body, msg.replaced);
+            while (w.next()) |line| {
+                const inset: u16 = if (line.kind == .prose) 0 else 2;
+                var it: wrap_mod.Iterator = .init(line.text, content -| thread_indent -| inset, m, .flush);
+                var lead = true;
+                while (it.next()) |chunk| {
+                    any = true;
+                    try out.append(arena, .{
+                        .kind = .body,
+                        .side = line.kind,
+                        .lead = lead,
+                        .text = chunk.slice(line.text),
+                        .msg = i,
+                    });
+                    lead = false;
+                }
+            }
+        } else {
+            var rows: ComposeRows = .init(msg.body, content -| thread_indent, m);
+            while (rows.next()) |chunk| {
+                any = true;
+                try out.append(arena, .{ .kind = .body, .text = chunk.slice(msg.body), .msg = i });
+            }
         }
         // A remark with nothing in it cannot happen through the store, but a
         // message that drew no rows would make the selection unreachable.
@@ -1654,13 +1682,25 @@ pub fn drawThread(f: Frame, v: frame_mod.ThreadView, top: u16, height: u16) Allo
             .head => try drawThreadHead(f, v.messages[row.msg], y, box, bg),
             .body => {
                 const msg = v.messages[row.msg];
-                const style = if (msg.stale)
-                    f.theme.comment_stale
-                else if (msg.sent)
-                    f.theme.comment_sent
-                else
-                    f.theme.text;
-                f.put(y, box.col + 2 + thread_indent, row.text, frame_mod.withBg(style, bg));
+                const style = switch (row.side) {
+                    .removed => f.theme.del_sign,
+                    .added => f.theme.add_sign,
+                    .prose => if (msg.stale)
+                        f.theme.comment_stale
+                    else if (msg.sent)
+                        f.theme.comment_sent
+                    else
+                        f.theme.text,
+                };
+                const sign: []const u8 = switch (row.side) {
+                    .prose => "",
+                    .removed => f.glyphs.del,
+                    .added => f.glyphs.add,
+                };
+                const inset: u16 = if (row.side == .prose) 0 else 2;
+                const at = box.col + 2 + thread_indent;
+                if (row.lead and sign.len > 0) f.put(y, at, sign, frame_mod.withBg(style, bg));
+                f.put(y, at + inset, row.text, frame_mod.withBg(style, bg));
             },
         }
     }
