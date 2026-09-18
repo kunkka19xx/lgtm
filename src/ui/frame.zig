@@ -296,9 +296,25 @@ pub const Frame = struct {
         return out;
     }
 
+    /// How much of `text` may be drawn from `col` without leaving the window.
+    ///
+    /// vaxis stops at the right edge, but it tests the column before it knows
+    /// the glyph's width: a double-width grapheme starting in the last column
+    /// is written whole and covers one column past the edge. On the bottom row
+    /// that is a wrap, and the terminal scrolls the frame up by one - which is
+    /// how a Japanese status line at 44 columns eats the file header.
+    ///
+    /// Bytes are never fewer than columns in UTF-8, so text short enough to
+    /// fit by length needs no measuring at all.
+    fn fits(self: Frame, col: u16, text: []const u8) []const u8 {
+        const room = self.width() -| col;
+        if (text.len <= room) return text;
+        return text[0..wrap.fitFront(text, room, self.method())];
+    }
+
     pub fn put(self: Frame, row: u16, col: u16, text: []const u8, style: vaxis.Style) void {
         _ = self.win.printSegment(
-            .{ .text = text, .style = style },
+            .{ .text = self.fits(col, text), .style = style },
             .{ .row_offset = row, .col_offset = col, .wrap = .none },
         );
     }
@@ -317,7 +333,7 @@ pub const Frame = struct {
         uri: []const u8,
     ) void {
         _ = self.win.printSegment(
-            .{ .text = text, .style = style, .link = .{ .uri = uri } },
+            .{ .text = self.fits(col, text), .style = style, .link = .{ .uri = uri } },
             .{ .row_offset = row, .col_offset = col, .wrap = .none },
         );
     }
