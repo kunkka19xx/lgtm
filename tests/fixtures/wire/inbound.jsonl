@@ -1,0 +1,4 @@
+{"type":"hello","token":"0123456789abcdef0123456789abcdef","version":0,"device":"iPhone"}
+{"type":"send","text":"run the tests again","submit":true}
+{"type":"send","text":"and look at server.zig"}
+{"type":"ping"}

@@ -90,6 +90,20 @@ pub fn writeStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!vo
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
+/// As `writeStateFile`, readable by the owner only. Replaced rather than
+/// rewritten, because creation is the only moment a mode is set.
+pub fn writeSecretStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
+    std.debug.assert(std.mem.startsWith(u8, path, state_dir ++ "/"));
+
+    try ensureStateDir(io);
+    Dir.cwd().deleteFile(io, path) catch {};
+    try Dir.cwd().writeFile(io, .{
+        .sub_path = path,
+        .data = bytes,
+        .flags = .{ .exclusive = true, .permissions = .fromMode(0o600) },
+    });
+}
+
 /// The working directory, resolved, or null when it cannot be had.
 ///
 /// For the one screen that has to say *where* the reader is: told there is no

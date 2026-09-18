@@ -14,6 +14,7 @@ pub const loop = @import("ui/loop.zig");
 pub const splash = @import("ui/splash.zig");
 pub const status = @import("ui/status.zig");
 pub const risk = @import("ui/risk.zig");
+pub const serve = @import("serve/serve.zig");
 const metrics = lib.metrics;
 const gh = lib.gh;
 
@@ -25,6 +26,7 @@ const usage =
     \\       lgtm status [options]    what changed, as a table
     \\       lgtm risk [options]      what the change did to the tests
     \\       lgtm themes              draw every bundled theme
+    \\       lgtm serve [options]     the agent's pane, to a paired phone
     \\       lgtm <git command> ...   anything lgtm has no word for is git's
     \\       lgtm git <command> ...   git's own, even where lgtm has the word
     \\
@@ -39,6 +41,9 @@ const usage =
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
     \\  --strict         risk: fail on a fallen assertion count too
+    \\  --listen <ip>    serve: loopback or a Tailscale address (127.0.0.1)
+    \\  --port <n>       serve: the port to listen on (7777)
+    \\  --new-token      serve: replace the saved token, unpairing every phone
     \\  --once           render one frame and exit, for screenshots and CI
     \\  --profile        print timing spans on exit (requires -Dprofile build)
     \\  -v, --version    print the banner and exit
@@ -56,11 +61,11 @@ const usage =
 /// tool that answered it by writing a config file into a directory with no
 /// repository in it would be worse than no tool. Writing that config is
 /// `--init`, which is the spelling it has always had.
-const Verb = enum { status, diff, risk, themes, help, version };
+const Verb = enum { status, diff, risk, themes, serve, help, version };
 
 /// Which of them was asked for. `help` and `version` are not here: they beat
 /// every other word, so they are answered where they are read.
-const Command = enum { review, status, risk, init, themes };
+const Command = enum { review, status, risk, init, themes, serve };
 
 /// A panic still says what went wrong; what this drops in a release build is
 /// the stack trace under it, and with it the DWARF reader, the inflate for
@@ -93,6 +98,8 @@ pub fn main(init: std.process.Init) !void {
     var config_path: ?[]const u8 = null;
     var theme_name: ?[]const u8 = null;
     var pane: ?[]const u8 = null;
+    var serving: serve.Options = .{};
+    var serve_flag = false;
     var base: ?[]const u8 = null;
     var target: ?[]const u8 = null;
     var want_pr = false;
@@ -198,6 +205,24 @@ pub fn main(init: std.process.Init) !void {
                 try w.flush();
                 return;
             };
+        } else if (std.mem.eql(u8, arg, "--new-token")) {
+            serving.new_token = true;
+            serve_flag = true;
+        } else if (std.mem.eql(u8, arg, "--listen")) {
+            serving.listen = args.next() orelse {
+                try w.print("lgtm: --listen needs an address\n\n{s}", .{usage});
+                try w.flush();
+                return;
+            };
+            serve_flag = true;
+        } else if (std.mem.eql(u8, arg, "--port")) {
+            const text = args.next() orelse "";
+            serving.port = std.fmt.parseInt(u16, text, 10) catch {
+                try w.print("lgtm: --port needs a number, not '{s}'\n\n{s}", .{ text, usage });
+                try w.flush();
+                return;
+            };
+            serve_flag = true;
         } else if (std.mem.eql(u8, arg, "--pr")) {
             // The number is optional, so the next argument is taken only when
             // it is digits: `--pr --once` is two flags, not a parse error.
@@ -244,6 +269,19 @@ pub fn main(init: std.process.Init) !void {
         try writeStarter(gpa, io, init.environ_map, config_path, w);
         try w.flush();
         return;
+    }
+
+    if (serve_flag and cmd != .serve) {
+        try w.print("lgtm: --listen, --port and --new-token are for serve\n\n{s}", .{usage});
+        try w.flush();
+        return;
+    }
+    if (cmd == .serve) {
+        serving.pane = pane;
+        serving.qr = tty.stdoutIsTerminal(io);
+        const code = try serve.run(gpa, io, init.environ_map, w, serving);
+        try w.flush();
+        lib.proc.exit(code);
     }
 
     try w.flush();
@@ -627,4 +665,5 @@ test {
     _ = app;
     _ = status;
     _ = risk;
+    _ = serve;
 }

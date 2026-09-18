@@ -99,6 +99,8 @@ pub fn build(b: *std.Build) void {
     // the test build needs it: the decl is unreferenced elsewhere, so Zig never
     // analyses it and no other module has to declare the import.
     test_module.addAnonymousImport("mixed_diff", .{ .root_source_file = b.path("tests/fixtures/diffs/mixed.diff") });
+    test_module.addAnonymousImport("wire_outbound", .{ .root_source_file = b.path("tests/fixtures/wire/outbound.jsonl") });
+    test_module.addAnonymousImport("wire_inbound", .{ .root_source_file = b.path("tests/fixtures/wire/inbound.jsonl") });
 
     const test_filter = b.option([]const u8, "test-filter", "Only run tests whose name contains this substring");
     const tests = b.addTest(.{

@@ -36,6 +36,35 @@ pub fn sendArgv(arena: Allocator, window: []const u8, text: []const u8) Allocato
     return arena.dupe([]const u8, &.{ "kitten", "@", "send-text", "--match", match, "--", text });
 }
 
+pub fn readArgv(arena: Allocator, window: []const u8) Allocator.Error![]const []const u8 {
+    const match = try std.fmt.allocPrint(arena, "id:{s}", .{window});
+    return arena.dupe([]const u8, &.{ "kitten", "@", "get-text", "--match", match, "--extent", "screen" });
+}
+
+pub fn submitArgv(arena: Allocator, window: []const u8) Allocator.Error![]const []const u8 {
+    const match = try std.fmt.allocPrint(arena, "id:{s}", .{window});
+    return arena.dupe([]const u8, &.{ "kitten", "@", "send-key", "--match", match, "enter" });
+}
+
+pub fn gone(stderr: []const u8) bool {
+    return classify(stderr) == error.WindowGone;
+}
+
+/// Read-only, and it fails for a window that has closed.
+pub fn existsArgv(arena: Allocator, window: []const u8) Allocator.Error![]const []const u8 {
+    const match = try std.fmt.allocPrint(arena, "id:{s}", .{window});
+    return arena.dupe([]const u8, &.{ "kitten", "@", "ls", "--match", match });
+}
+
+/// kitty's `send-text` and `send-key` exit 0 when no window matched.
+pub fn ensure(gpa: Allocator, io: std.Io, window: []const u8) SendError!void {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const out = proc.run(gpa, io, try existsArgv(scratch.allocator(), window), list_output_max) catch return error.KittyFailed;
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return classify(out.stderr);
+}
+
 pub fn listArgv(arena: Allocator) Allocator.Error![]const []const u8 {
     return arena.dupe([]const u8, &.{ "kitten", "@", "ls" });
 }
@@ -44,6 +73,7 @@ pub fn send(gpa: Allocator, io: std.Io, window: []const u8, text: []const u8) Se
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
 
+    try ensure(gpa, io, window);
     const argv = try sendArgv(scratch.allocator(), window, text);
     const out = proc.run(gpa, io, argv, send_output_max) catch return error.KittyFailed;
     defer out.deinit(gpa);

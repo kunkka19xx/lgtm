@@ -36,6 +36,20 @@ pub fn sendArgv(arena: Allocator, pane: []const u8, text: []const u8) Allocator.
     });
 }
 
+pub fn readArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "wezterm", "cli", "get-text", "--pane-id", pane });
+}
+
+/// A carriage return, sent as keystrokes rather than as a paste, is Enter.
+pub fn submitArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "wezterm", "cli", "send-text", "--no-paste", "--pane-id", pane, "--", "\r" });
+}
+
+pub fn gone(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "no such pane") != null or
+        std.mem.indexOf(u8, stderr, "not found") != null;
+}
+
 pub fn listArgv(arena: Allocator) Allocator.Error![]const []const u8 {
     return arena.dupe([]const u8, &.{ "wezterm", "cli", "list", "--format", "json" });
 }
@@ -47,16 +61,7 @@ pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) Send
     const argv = try sendArgv(scratch.allocator(), pane, text);
     const out = proc.run(gpa, io, argv, send_output_max) catch return error.WeztermFailed;
     defer out.deinit(gpa);
-    if (out.exit_code != 0) {
-        // WezTerm says "no such pane" for a pane that has closed. Worth
-        // separating for the same reason tmux's is: it is the common failure
-        // and the one the reader can act on.
-        return if (std.mem.indexOf(u8, out.stderr, "no such pane") != null or
-            std.mem.indexOf(u8, out.stderr, "not found") != null)
-            error.PaneGone
-        else
-            error.WeztermFailed;
-    }
+    if (out.exit_code != 0) return if (gone(out.stderr)) error.PaneGone else error.WeztermFailed;
 }
 
 /// Every pane WezTerm knows about, as ids. The `--format json` output is read

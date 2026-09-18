@@ -1,0 +1,9 @@
+{"type":"session","version":0,"repo":"lgtm","agent":{"backend":"tmux","pane":"%3","read":true,"submit":true,"stream":false,"status":false,"why":""}}
+{"type":"session","version":0,"repo":"lgtm","agent":{"backend":"ghostty","pane":"","read":false,"submit":false,"stream":false,"status":false,"why":"ghostty cannot be read; run the agent inside tmux"}}
+{"type":"session","version":0,"repo":"lgtm","agent":{"backend":"herdr","pane":"w1:p1","read":true,"submit":true,"stream":false,"status":true,"why":""}}
+{"type":"screen","pane":"%3","rows":["> fix the retry backoff","","● Reading server.zig","  \"quoted\" \\ tab\there"]}
+{"type":"sent","ok":true,"submitted":true,"why":""}
+{"type":"sent","ok":false,"submitted":false,"why":"pane is gone"}
+{"type":"status","state":"blocked","agent":"claude"}
+{"type":"error","code":"token","message":"wrong token"}
+{"type":"pong"}
