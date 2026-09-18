@@ -607,3 +607,39 @@ test "the badge and the row count speak japanese, measured in columns" {
     try testing.expectEqualStrings("0", screen.readCell(12, 0).?.char.grapheme);
     try testing.expectEqualStrings("行", screen.readCell(13, 0).?.char.grapheme);
 }
+
+test "a wide glyph never takes the last column of a narrow mode row" {
+    // vaxis tests the column before it knows the glyph is two wide, so a
+    // notice ending in kana used to write past the edge: the bottom row
+    // wrapped, the terminal scrolled, and the status row went with it.
+    i18n.lang = .ja;
+    defer i18n.lang = .en;
+
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var w: u16 = 30;
+    while (w <= 60) : (w += 1) {
+        var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = w, .rows = 2, .x_pixel = 0, .y_pixel = 0 });
+        defer screen.deinit(testing.allocator);
+        screen.width_method = .unicode;
+        const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = w, .height = 2, .screen = &screen };
+        const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = Glyphs.unicode };
+
+        const file: diff.FileDiff = .{ .old_path = "a.zig", .new_path = "a.zig", .status = .modified };
+        const v: View = .{
+            .file = &file,
+            .rows = .empty,
+            .file_index = 0,
+            .file_count = 1,
+            .cursor = 0,
+            .scroll = 0,
+            .notice = try i18n.allocPrint(arena, "side by side on{s}", .{i18n.t(" - this pane is too narrow for it")}),
+        };
+        try drawMode(f, v, 0);
+
+        const last = screen.readCell(w - 1, 0) orelse continue;
+        try testing.expect(last.char.width <= 1);
+    }
+}
