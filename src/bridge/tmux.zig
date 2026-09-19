@@ -14,6 +14,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const proc = @import("../io/proc.zig");
+const scrape = @import("scrape.zig");
 
 /// Pane ids are `%` followed by a small integer. Held inline rather than
 /// allocated: the target outlives every arena it could have come from, and 24
@@ -185,23 +186,12 @@ pub fn parseCaptures(
         const line_end = hit + marker.len;
         scan = line_end;
         if (line_start != hit or (line_end < out.len and out[line_end] != '\n')) continue;
-        try caps.append(arena, trimBlankTail(out[at..line_start]));
+        try caps.append(arena, scrape.trimBlankTail(out[at..line_start]));
         at = @min(line_end + 1, out.len);
         scan = at;
     }
     if (caps.items.len != n) return null;
     return try caps.toOwnedSlice(arena);
-}
-
-fn trimBlankTail(text: []const u8) []const u8 {
-    var end = text.len;
-    while (end > 0) {
-        const line_start = if (std.mem.lastIndexOfScalar(u8, text[0 .. end - 1], '\n')) |nl| nl + 1 else 0;
-        const line = std.mem.trimEnd(u8, text[line_start .. end - 1], " \t\r");
-        if (line.len > 0) break;
-        end = line_start;
-    }
-    return text[0..end];
 }
 
 pub fn capture(
@@ -244,16 +234,36 @@ pub const SendError = error{ PaneGone, TmuxFailed } || Allocator.Error;
 pub fn send(gpa: Allocator, io: std.Io, pane: []const u8, text: []const u8) SendError!void {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
+    return sendKeys(gpa, io, try sendArgv(scratch.allocator(), pane, text));
+}
 
-    const argv = try sendArgv(scratch.allocator(), pane, text);
+/// `send-keys` without `-l`, so `Enter` is the key rather than the word.
+pub fn submitArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "tmux", "send-keys", "-t", pane, "Enter" });
+}
+
+/// The terminal `pane` runs on, such as `/dev/ttys012`, or empty when tmux cannot say.
+pub fn paneTty(gpa: Allocator, io: std.Io, pane: []const u8, buf: []u8) []const u8 {
+    const out = proc.run(gpa, io, &.{ "tmux", "display-message", "-p", "-t", pane, "#{pane_tty}" }, 256) catch return "";
+    defer out.deinit(gpa);
+    const name = std.mem.trim(u8, out.stdout, " \t\r\n");
+    if (out.exit_code != 0 or name.len > buf.len) return "";
+    @memcpy(buf[0..name.len], name);
+    return buf[0..name.len];
+}
+
+pub fn readArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "tmux", "capture-pane", "-p", "-t", pane });
+}
+
+pub fn gone(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "find pane") != null;
+}
+
+fn sendKeys(gpa: Allocator, io: std.Io, argv: []const []const u8) SendError!void {
     const out = proc.run(gpa, io, argv, send_output_max) catch return error.TmuxFailed;
     defer out.deinit(gpa);
-    if (out.exit_code != 0) {
-        return if (std.mem.indexOf(u8, out.stderr, "find pane") != null)
-            error.PaneGone
-        else
-            error.TmuxFailed;
-    }
+    if (out.exit_code != 0) return if (gone(out.stderr)) error.PaneGone else error.TmuxFailed;
 }
 
 /// The panes of the current window, or of every session. Caller owns nothing:

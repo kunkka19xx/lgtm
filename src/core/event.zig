@@ -71,6 +71,8 @@ pub const Event = union(enum) {
     /// Not produced in v0.1. `ref` is owned by the queue
     /// until drained and freed by the consumer, like `files_changed`.
     snapshot_taken: struct { turn: u32, ref: []const u8 },
+    /// `.lgtm/phone` or `.lgtm/phone.jsonl` changed: a phone came or went, or commented.
+    phone,
     // Later: lsp_response, agent_edit (ACP).
 };
 
@@ -258,8 +260,8 @@ test "all eight modes are declared" {
 }
 
 test "unreachable event variants are declared, not retrofitted" {
-    // Same reasoning as the modes above: two of these six are unproducible in
+    // Same reasoning as the modes above: two of these seven are unproducible in
     // v0.1, and declaring them costs nothing next to revisiting every dispatch
     // site later.
-    try std.testing.expectEqual(@as(usize, 6), @typeInfo(Event).@"union".fields.len);
+    try std.testing.expectEqual(@as(usize, 7), @typeInfo(Event).@"union".fields.len);
 }

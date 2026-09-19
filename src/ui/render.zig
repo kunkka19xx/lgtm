@@ -360,6 +360,8 @@ fn drawMode(f: Frame, v: View, row: u16) Allocator.Error!void {
     // one this tool is otherwise always showing.
     const badge = if (v.viewing != null or v.base.len > 0 or v.label.len > 0) t.turn_badge else t.mode_badge;
     var col: u16 = try f.print(row, 0, badge, " {s} ", .{label});
+    // Beside the badge, where nothing can crowd out a phone that can type into the agent.
+    if (v.phone.len > 0) col += 1 + try f.print(row, col + 1, t.accent, "{s}", .{try i18n.allocPrint(f.arena, "phone: {s}", .{v.phone})});
 
     col += 2;
 

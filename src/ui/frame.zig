@@ -265,6 +265,8 @@ pub const View = struct {
     /// rather than swallowed: a stale frame the user knows about beats a
     /// blended one they do not.
     torn: bool = false,
+    /// The device attached through `lgtm serve`, shown for as long as it is.
+    phone: []const u8 = "",
 };
 
 pub const Frame = struct {

@@ -4,6 +4,7 @@ const Entry = @import("../i18n.zig").Entry;
 
 pub const entries: []const Entry = &.{
     .{ "NORMAL", "ノーマル" },
+    .{ "phone: {s}", "スマホ: {s}" },
     .{ "VISUAL", "ビジュアル" },
     .{ "VISUAL LINE", "ビジュアル行" },
     .{ "COMMAND", "コマンド" },

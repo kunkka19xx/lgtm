@@ -7,8 +7,9 @@ CLAUDE.md
 .make/
 .claude/worktrees/
 
-# Only the user-facing pair ships. Everything else in docs/ is internal: the
-# design documents, the roadmap, the working journal. They stay on disk.
+# Only the user-facing docs ship, and the protocol lgtm-ios builds against.
+# Everything else in docs/ is internal: the design documents, the roadmap, the
+# working journal. They stay on disk.
 docs/*.md
 !docs/GUIDE.md
 !docs/CONFIG.md

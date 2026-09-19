@@ -532,6 +532,131 @@ large: `PNG image | 1200x630 | 8.5 KB`.
 
 ---
 
+## From your phone
+
+Leave the desk and keep talking to the agent: read what it says, reply, and
+review what it changed, from an iPhone. The app is
+[lgte](https://github.com/kunkka19xx/lgte); until it is on the App
+Store, build it with Xcode from that repository.
+
+Nothing goes through a cloud service. The phone talks to `lgtm` on your own
+machine, over [Tailscale](https://tailscale.com): install it on both, sign in
+to the same account, and they can reach each other from anywhere, encrypted.
+
+### Start it
+
+Once, from any directory; a repository is where the phone's review starts:
+
+```sh
+lgtm serve --listen $(tailscale ip -4)
+```
+
+It serves the whole machine: every agent running in tmux, herdr, WezTerm or
+kitty shows up on the phone, whichever repository it works in. kitty needs
+`allow_remote_control yes` and, for `lgtm serve` started outside kitty,
+`listen_on` in its config.
+
+For an agent in any other terminal, Ghostty and a plain SSH session included,
+start it through `lgtm`, and it joins the list:
+
+```sh
+lgtm agent claude
+```
+
+`lgtm agent` hands the agent your terminal untouched: it looks and behaves
+exactly as it does on its own, and exits with the agent's exit code. The phone
+reads a copy. Given `--listen`, it serves the machine itself, with no
+`lgtm serve` running.
+
+### Pair
+
+`lgtm serve` prints a QR code. In the app, tap **Scan code**; the iPhone's
+Camera app works too. The pairing belongs to the machine, kept in
+`~/.local/state/lgtm/serve-token` and readable only by you, so the phone
+reconnects on its own after a restart.
+
+`--new-token` replaces it, and every paired phone has to scan again.
+
+### What the phone does
+
+- **Agents**: every agent on the machine, the one waiting for you first, with
+  what it last said. Tap one for its screen, live, and swipe sideways for the
+  next. Scroll up for what it did earlier: up to 2000 lines above the screen
+  (not under `lgtm agent`, which keeps no history). The wrap button reflows
+  long lines to the phone's width, and draws a terminal-wide rule as one line
+  rather than several. Type and tap Send, and it lands in that agent's input and is submitted;
+  hold Send to insert without pressing Enter. Above the box are the keys a
+  phone keyboard lacks, the likeliest first: the numbers and Esc when the agent
+  asks you something, Esc and ^C while it works, arrows and Tab otherwise, and
+  the rest behind the keyboard button. Esc and ^C wait a moment, so a second
+  tap takes them back.
+- **Review**: the changed files of any repository an agent works in, starting
+  with the one `lgtm serve` runs in; pick another from the title, or tap the
+  review button on an agent's screen. Their diffs with syntax, and your
+  comments. Tap a line to comment on it, and either keep the comment for the
+  review or send it to the agent now, as `path:line - comment`, the way `<C-s>`
+  in the compose box does here. **Send** writes the review to that
+  repository's `.lgtm/phone-review-N.md` and tells the agent working there
+  where it is. Comments follow the code as the agent edits it, as they
+  do here.
+- **State**: under herdr, what each agent is doing and when it waits for you;
+  elsewhere, working while its screen moves and idle once it stops.
+
+The phone's comments are its own: `lgtm` shows them in the gutter, as
+someone else's, and never sends them in your review. While a phone is attached
+the mode row says so, `phone: iPhone`; under `lgtm agent`, where the agent owns
+the screen, your terminal raises a notification when the phone opens it.
+
+One device at a time: a newly paired one takes over, and the one it replaced
+says so rather than fighting back.
+
+To open agents from the phone, list what it may open. **+** then asks which and
+where, and swiping a card closes that agent, after asking:
+
+```toml
+[serve]
+agents = ["claude", "codex"]
+dirs = ["~/code/api"]
+```
+
+Only agents are listed. To see every pane, shells too:
+
+```toml
+[serve]
+panes = "all"
+```
+
+### Get a push when it needs you
+
+```toml
+[notify]
+url = "https://ntfy.sh/pick-a-long-random-topic"
+```
+
+With [ntfy](https://ntfy.sh) or Bark on the phone, `lgtm` pushes "claude is
+waiting for you" under herdr, or "went quiet" when an agent's screen has been
+still for 20 seconds, for every agent on the machine, while no phone is
+attached. See
+[CONFIG.md](CONFIG.md#notify).
+
+### What to keep in mind
+
+A paired phone can type into any agent's terminal and press Enter, so treat the
+token like a key. `lgtm serve` only listens on this machine or its Tailscale
+address, never on your local network, and refuses to start on anything else.
+The phone sees whole screens, including anything else that was run there.
+Everything a phone types is recorded in `~/.local/state/lgtm/serve.log`, with
+the time, the device and the pane.
+
+| | reads the screen | presses Enter | says what the agent is doing |
+|---|---|---|---|
+| tmux, WezTerm, kitty | yes | yes | from its screen |
+| herdr | yes | yes | yes |
+| Ghostty | no, use `lgtm agent` | no | no |
+| `lgtm agent` | yes | yes | from its screen |
+
+---
+
 ## Every key
 
 `?` shows this list generated from *your* bindings, so a remapped keymap
@@ -725,6 +850,13 @@ review with its own `.gitignore`:
 | `.lgtm/review-N.md` | what `<C-s>` wrote |
 | `.lgtm/state.json` | the session, the turn count, where you read to |
 | `.lgtm/config.toml` | this repository's settings, if you commit one |
+| `.lgtm/phone.jsonl` | the phone's comments |
+| `.lgtm/phone-review-N.md` | what the phone's Send wrote |
+| `.lgtm/phone` | the phone attached right now, if one is |
+
+The phone's pairing token and its audit log are the only things kept outside a
+repository, in `~/.local/state/lgtm/` as `serve-token` and `serve.log`,
+because they belong to the machine.
 
 Kill `lgtm` and restart it; you lose scroll position and nothing else.
 

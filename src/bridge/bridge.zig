@@ -43,6 +43,7 @@ const ghostty = @import("ghostty.zig");
 const herdr = @import("herdr.zig");
 const kitty = @import("kitty.zig");
 const osc52 = @import("osc52.zig");
+const scrape = @import("scrape.zig");
 const tmux = @import("tmux.zig");
 const wezterm = @import("wezterm.zig");
 
@@ -251,6 +252,61 @@ pub const Bridge = union(enum) {
         return null;
     }
 
+    /// Enter, for a person's tap on Send in `lgtm serve` and nothing else. Null on success.
+    pub fn submit(self: *Bridge, cx: Ctx) Error!?[]const u8 {
+        const dest = try self.target(cx) orelse return error.NoTarget;
+        var scratch: std.heap.ArenaAllocator = .init(cx.gpa);
+        defer scratch.deinit();
+        const arena = scratch.allocator();
+        const failed: ?scrape.RunError = switch (self.*) {
+            inline .tmux, .herdr, .wezterm, .kitty => |_, tag| blk: {
+                const mod = backend(tag);
+                if (@hasDecl(mod, "ensure")) mod.ensure(cx.gpa, cx.io, dest) catch |err| break :blk switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    error.WindowGone => error.PaneGone,
+                    else => error.Failed,
+                };
+                _ = scrape.read(cx.gpa, arena, cx.io, try mod.submitArgv(arena, dest), mod.gone) catch |err| break :blk err;
+                break :blk null;
+            },
+            .ghostty, .osc52 => return "this terminal cannot press Enter for you",
+        };
+        return switch (failed orelse return null) {
+            error.PaneGone => "pane is gone",
+            error.OutOfMemory => error.OutOfMemory,
+            error.Failed => "pressing Enter failed",
+        };
+    }
+
+    /// Ghostty's scripting can type into a terminal but not read one back.
+    pub fn readable(self: Bridge) bool {
+        return switch (self) {
+            .tmux, .herdr, .wezterm, .kitty => true,
+            .ghostty, .osc52 => false,
+        };
+    }
+
+    /// The visible screen of `pane`, in `arena`.
+    pub fn read(self: *Bridge, cx: Ctx, arena: Allocator, pane: []const u8) scrape.RunError![]const u8 {
+        return switch (self.*) {
+            inline .tmux, .herdr, .wezterm, .kitty => |_, tag| blk: {
+                const mod = backend(tag);
+                break :blk scrape.read(cx.gpa, arena, cx.io, try mod.readArgv(arena, pane), mod.gone);
+            },
+            .ghostty, .osc52 => error.Failed,
+        };
+    }
+
+    fn backend(comptime tag: std.meta.Tag(Bridge)) type {
+        return switch (tag) {
+            .tmux => tmux,
+            .herdr => herdr,
+            .wezterm => wezterm,
+            .kitty => kitty,
+            else => @compileError("no read or submit for " ++ @tagName(tag)),
+        };
+    }
+
     /// `y` and `Y`: the clipboard, always, whatever the backend is. A
     /// reference copied for a commit message has no business being typed into
     /// an agent, and unlike a send it may legitimately contain newlines - the
@@ -336,11 +392,11 @@ pub const Bridge = union(enum) {
     /// split is a pane a send must never land in. Being wrong costs a marker
     /// and a sort position, never a misdirected send.
     const not_agents: []const []const u8 = &.{
-        "ash",  "bash",     "csh",  "dash",  "elvish", "fish",  "ksh",  "nu",
-        "pwsh", "sh",       "tcsh", "xonsh", "zsh",    "emacs", "hx",   "helix",
-        "kak",  "micro",    "nano", "nvim",  "vi",     "vim",   "less", "man",
-        "more", "bat",      "btop", "htop",  "top",    "git",   "ssh",  "tmux",
-        "lgtm", "lgtm-dev",
+        "ash",   "bash",  "csh",      "dash",  "elvish", "fish",  "ksh",  "nu",
+        "pwsh",  "sh",    "tcsh",     "xonsh", "zsh",    "emacs", "hx",   "helix",
+        "kak",   "micro", "nano",     "nvim",  "vi",     "vim",   "less", "man",
+        "more",  "bat",   "btop",     "htop",  "top",    "git",   "ssh",  "tmux",
+        "herdr", "lgtm",  "lgtm-dev",
     };
 
     /// Whether a pane is worth marking as an agent. The *absence* of a known
@@ -404,13 +460,7 @@ pub const Bridge = union(enum) {
                 }
             },
             inline .herdr, .wezterm, .kitty => |_, tag| {
-                const mod = switch (tag) {
-                    .herdr => herdr,
-                    .wezterm => wezterm,
-                    .kitty => kitty,
-                    else => unreachable,
-                };
-                const ids = mod.list(cx.gpa, arena, cx.io) catch return &.{};
+                const ids = backend(tag).list(cx.gpa, arena, cx.io) catch return &.{};
                 for (ids) |id| {
                     if (mine.len > 0 and std.mem.eql(u8, id, mine)) continue;
                     try out.append(arena, .{ .id = id });
@@ -423,7 +473,7 @@ pub const Bridge = union(enum) {
         return out.toOwnedSlice(arena);
     }
 
-    fn target(self: *Bridge, cx: Ctx) Allocator.Error!?[]const u8 {
+    pub fn target(self: *Bridge, cx: Ctx) Allocator.Error!?[]const u8 {
         const p = self.panes() orelse return null;
         if (p.pane()) |chosen| return chosen;
         if (p.tried) return null;
@@ -492,6 +542,16 @@ pub fn detect(environ: *const std.process.Environ.Map) Bridge {
     return .osc52;
 }
 
+/// `detect`, except that when tmux and herdr both claim us, herdr is innermost if the tmux pane's tty is not our stdin.
+pub fn detectIn(gpa: Allocator, io: std.Io, environ: *const std.process.Environ.Map) Bridge {
+    const br = detect(environ);
+    if (br != .tmux or !nonEmpty(environ, "HERDR_ENV")) return br;
+    var buf: [128]u8 = undefined;
+    const tty = tmux.paneTty(gpa, io, environ.get("TMUX_PANE") orelse return br, &buf);
+    if (tty.len == 0 or fs.stdinIs(io, tty)) return br;
+    return .{ .herdr = panesFrom(environ, "HERDR_PANE_ID") };
+}
+
 /// `$GHOSTTY_RESOURCES_DIR` is injected by Ghostty itself; `$TERM_PROGRAM` is
 /// the conventional one and survives a shell that clears the first. Either
 /// will do, because the question is only which backend to try.
@@ -519,7 +579,7 @@ fn panesFrom(environ: *const std.process.Environ.Map, key: []const u8) Panes {
 
 /// The payload as it goes out: newline refused, carriage returns dropped, one
 /// trailing space guaranteed.
-fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
+pub fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
     if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.Multiline;
 
     const trimmed = std.mem.trimEnd(u8, text, " \t\r");
@@ -776,4 +836,30 @@ test "two panes infer the other one, three refuse to guess" {
     try testing.expect(soleOther(&.{ "0", "7", "9" }, "0") == null);
     // Alone in the window there is nobody to send to.
     try testing.expect(soleOther(&.{"0"}, "0") == null);
+}
+
+test "each backend reads the screen and presses Enter with the commands its tool takes" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { got: []const []const u8, want: []const []const u8 }{
+        .{ .got = try tmux.readArgv(a, "%3"), .want = &.{ "tmux", "capture-pane", "-p", "-t", "%3" } },
+        .{ .got = try tmux.submitArgv(a, "%3"), .want = &.{ "tmux", "send-keys", "-t", "%3", "Enter" } },
+        .{ .got = try herdr.readArgv(a, "w1:p1"), .want = &.{ "herdr", "pane", "read", "w1:p1", "--source", "visible" } },
+        .{ .got = try herdr.submitArgv(a, "w1:p1"), .want = &.{ "herdr", "pane", "send-keys", "w1:p1", "enter" } },
+        .{ .got = try wezterm.readArgv(a, "3"), .want = &.{ "wezterm", "cli", "get-text", "--pane-id", "3" } },
+        .{ .got = try wezterm.submitArgv(a, "3"), .want = &.{ "wezterm", "cli", "send-text", "--no-paste", "--pane-id", "3", "--", "\r" } },
+        .{ .got = try kitty.readArgv(a, "4"), .want = &.{ "kitten", "@", "get-text", "--match", "id:4", "--extent", "screen" } },
+        .{ .got = try kitty.submitArgv(a, "4"), .want = &.{ "kitten", "@", "send-key", "--match", "id:4", "enter" } },
+        .{ .got = try kitty.existsArgv(a, "4"), .want = &.{ "kitten", "@", "ls", "--match", "id:4" } },
+    };
+    for (cases) |c| {
+        try testing.expectEqual(c.want.len, c.got.len);
+        for (c.want, c.got) |x, y| try testing.expectEqualStrings(x, y);
+    }
+    // What each tool prints for a pane that closed, captured from the real thing.
+    try testing.expect(tmux.gone("can't find pane: %9"));
+    try testing.expect(herdr.gone("{\"error\":{\"code\":\"pane_not_found\",\"message\":\"pane w9:p9 not found\"}}"));
+    try testing.expect(wezterm.gone("unexpected response Ok(ErrorResponse(ErrorResponse { reason: \"Error: no such pane 99\" }))"));
+    try testing.expect(kitty.gone("Error: No matching windows for expression: id:1"));
 }

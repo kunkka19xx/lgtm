@@ -562,6 +562,46 @@ pub fn swapComments(app: *App, number: u32) void {
     loadComments(app);
 }
 
+/// Phone comments as someone else's, marked sent: shown, never written back, never in the TUI's review.
+pub fn loadPhone(app: *App) void {
+    const n = if (!phoneFresh(app.io)) 0 else if (fs_mod.readFile(app.io, app.gpa, ".lgtm/phone", 256)) |bytes| blk: {
+        defer app.gpa.free(bytes);
+        const name = std.mem.trim(u8, bytes, " \t\r\n");
+        const k = @min(name.len, app.phone_buf.len);
+        @memcpy(app.phone_buf[0..k], name[0..k]);
+        break :blk k;
+    } else |_| 0;
+    app.phone_len = n;
+
+    const dirty = app.comments.dirty;
+    defer app.comments.dirty = dirty;
+    var i = app.comments.items().len;
+    while (i > 0) {
+        i -= 1;
+        const c = app.comments.items()[i];
+        if (std.mem.eql(u8, c.author, phone_author)) app.comments.remove(c.id);
+    }
+    const text = fs_mod.readFile(app.io, app.gpa, ".lgtm/phone.jsonl", 4 << 20) catch return;
+    defer app.gpa.free(text);
+    var phone: comments_mod.Store = .init(app.gpa);
+    defer phone.deinit();
+    comments_mod.read(&phone, text) catch return;
+    for (phone.items()) |c| {
+        const id = app.comments.adopt(.{ .path = c.path, .line = c.line, .span = c.span, .body = c.body, .author = phone_author }) catch continue;
+        app.comments.find(id).?.state = .sent;
+    }
+}
+
+const phone_author = "phone";
+
+/// `lgtm serve` rewrites `.lgtm/phone` every five seconds while attached; older, its daemon is gone.
+const phone_stale_ns: i128 = 15 * std.time.ns_per_s;
+
+pub fn phoneFresh(io: std.Io) bool {
+    const meta = fs_mod.statFile(io, ".lgtm/phone") orelse return false;
+    return meta.size > 0 and std.Io.Timestamp.now(io, .real).nanoseconds - meta.mtime_ns < phone_stale_ns;
+}
+
 pub fn loadComments(app: *App) void {
     if (!app.persist) return;
     // `.lgtm/notes.jsonl` is the name this file had before the feature was

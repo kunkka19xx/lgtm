@@ -39,6 +39,15 @@ pub fn sendArgv(arena: Allocator, verb: []const u8, pane: []const u8, text: []co
     return arena.dupe([]const u8, &.{ "herdr", "pane", verb, pane, text });
 }
 
+pub fn readArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "herdr", "pane", "read", pane, "--source", "visible" });
+}
+
+/// `send-keys` takes key names, so `enter` is the key.
+pub fn submitArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
+    return arena.dupe([]const u8, &.{ "herdr", "pane", "send-keys", pane, "enter" });
+}
+
 pub fn listArgv(arena: Allocator) Allocator.Error![]const []const u8 {
     return arena.dupe([]const u8, &.{ "herdr", "pane", "list" });
 }
@@ -73,11 +82,13 @@ pub fn unknownVerb(stderr: []const u8) bool {
 }
 
 pub fn classify(stderr: []const u8) SendError {
-    if (std.mem.indexOf(u8, stderr, "not found") != null or
+    return if (gone(stderr)) error.PaneGone else error.HerdrFailed;
+}
+
+pub fn gone(stderr: []const u8) bool {
+    return std.mem.indexOf(u8, stderr, "not found") != null or
         std.mem.indexOf(u8, stderr, "no such pane") != null or
-        std.mem.indexOf(u8, stderr, "unknown pane") != null)
-        return error.PaneGone;
-    return error.HerdrFailed;
+        std.mem.indexOf(u8, stderr, "unknown pane") != null;
 }
 
 /// Every pane herdr reports.

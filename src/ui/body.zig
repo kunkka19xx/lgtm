@@ -819,21 +819,7 @@ fn markMatches(
     return out;
 }
 
-/// Runs overlapping `[lo, hi)`. Binary search for the first, then a walk:
-/// runs are sorted and non-overlapping, so this is O(log n + k) per row rather
-/// than a scan of the file's runs for every visible line.
-pub fn runsIn(runs: []const lexer.Run, lo: u32, hi: u32) []const lexer.Run {
-    var low: usize = 0;
-    var high: usize = runs.len;
-    while (low < high) {
-        const mid = low + (high - low) / 2;
-        if (runs[mid].end() <= lo) low = mid + 1 else high = mid;
-    }
-    const start = low;
-    var end = start;
-    while (end < runs.len and runs[end].start < hi) end += 1;
-    return runs[start..end];
-}
+const runsIn = lexer.runsIn;
 
 const testing = std.testing;
 

@@ -1,0 +1,15 @@
+{"type":"session","version":1,"host":"mac-mini","review":"/Users/me/code/lgtm","agents":["claude","codex"],"dirs":["/Users/me/code/api"]}
+{"type":"panes","panes":[{"id":"herdr:term_65bca13b","backend":"herdr","group":["w1","w1:t1"],"title":"claude","dir":"/Users/me/code/api","repo":"/Users/me/code/api","agent":"claude","state":"blocked","source":"herdr","read":true,"submit":true,"stream":false,"why":"","preview":["Do you want to proceed?","1. Yes","2. No"]},{"id":"tmux:4182:%12","backend":"tmux","group":["work","1:zsh"],"title":"✳ fix retry","dir":"","repo":"","agent":"claude","state":"working","source":"quiet","read":true,"submit":true,"stream":false,"why":"","preview":[]},{"id":"pty:5120","backend":"pty","group":[],"title":"","dir":"","repo":"","agent":"codex","state":"unknown","source":"none","read":true,"submit":true,"stream":true,"why":"","preview":[]}]}
+{"type":"screen","pane":"tmux:4182:%12","rows":["> fix the retry backoff","","● Reading server.zig","  \"quoted\" \\ tab\there"]}
+{"type":"scrollback","pane":"tmux:4182:%12","rows":["$ zig build test","All 987 tests passed."]}
+{"type":"sent","pane":"tmux:4182:%12","ok":true,"submitted":true,"why":""}
+{"type":"sent","pane":"tmux:4182:%12","ok":false,"submitted":false,"why":"pane is gone"}
+{"type":"files","repo":"/Users/me/code/lgtm","files":[{"path":"src/retry.zig","status":"modified","added":3,"removed":1,"comments":1}]}
+{"type":"file","path":"src/retry.zig","status":"modified","lines":[{"kind":"context","old":1,"new":1,"text":"const max = 3;","runs":[[0,5,4],[12,1,3]]},{"kind":"del","old":2,"new":0,"text":"fn retry() void {}","runs":[]},{"kind":"add","old":0,"new":2,"text":"fn retry(n: u32) void {}","runs":[]}],"hunks":[{"at":0,"section":""}],"notes":[{"id":1,"line":2,"body":"cap this?","state":"open","removed":false}]}
+{"type":"noted","ok":true,"id":1,"why":""}
+{"type":"submitted","ok":true,"path":".lgtm/phone-review-1.md","count":1,"why":""}
+{"type":"spawned","ok":true,"pane":"tmux:4182:%31","why":""}
+{"type":"closed","ok":false,"pane":"pty:5120","why":"stop it where it runs"}
+{"type":"error","code":"token","message":"wrong token","pane":""}
+{"type":"error","code":"pane_gone","message":"the pane is gone","pane":"tmux:4182:%12"}
+{"type":"pong"}
