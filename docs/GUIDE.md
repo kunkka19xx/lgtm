@@ -536,7 +536,7 @@ large: `PNG image | 1200x630 | 8.5 KB`.
 
 Leave the desk and keep talking to the agent: read what it says, reply, and
 review what it changed, from an iPhone. The app is
-[lgtm for iOS](https://github.com/kunkka19xx/lgtm-ios); until it is on the App
+[lgte](https://github.com/kunkka19xx/lgte); until it is on the App
 Store, build it with Xcode from that repository.
 
 Nothing goes through a cloud service. The phone talks to `lgtm` on your own
