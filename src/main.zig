@@ -15,6 +15,7 @@ pub const splash = @import("ui/splash.zig");
 pub const status = @import("ui/status.zig");
 pub const risk = @import("ui/risk.zig");
 pub const serve = @import("serve/serve.zig");
+const pty = @import("io/pty.zig");
 const metrics = lib.metrics;
 const gh = lib.gh;
 
@@ -26,7 +27,8 @@ const usage =
     \\       lgtm status [options]    what changed, as a table
     \\       lgtm risk [options]      what the change did to the tests
     \\       lgtm themes              draw every bundled theme
-    \\       lgtm serve [options]     the agent's pane, to a paired phone
+    \\       lgtm serve [options]     every agent on this machine, to a paired phone
+    \\       lgtm agent [options] <cmd>  run the agent here, for lgtm serve to find
     \\       lgtm <git command> ...   anything lgtm has no word for is git's
     \\       lgtm git <command> ...   git's own, even where lgtm has the word
     \\
@@ -41,9 +43,10 @@ const usage =
     \\                   a wezterm pane or a kitty window (3)
     \\  --theme <name>   use this bundled theme for this run
     \\  --strict         risk: fail on a fallen assertion count too
-    \\  --listen <ip>    serve: loopback or a Tailscale address (127.0.0.1)
-    \\  --port <n>       serve: the port to listen on (7777)
-    \\  --new-token      serve: replace the saved token, unpairing every phone
+    \\  --listen <ip>    serve, agent: loopback or a Tailscale address (127.0.0.1);
+    \\                   given to agent, it serves this machine itself
+    \\  --port <n>       serve, agent: the port to listen on (7777)
+    \\  --new-token      serve, agent: replace the saved token, unpairing every phone
     \\  --once           render one frame and exit, for screenshots and CI
     \\  --profile        print timing spans on exit (requires -Dprofile build)
     \\  -v, --version    print the banner and exit
@@ -61,11 +64,11 @@ const usage =
 /// tool that answered it by writing a config file into a directory with no
 /// repository in it would be worse than no tool. Writing that config is
 /// `--init`, which is the spelling it has always had.
-const Verb = enum { status, diff, risk, themes, serve, help, version };
+const Verb = enum { status, diff, risk, themes, serve, agent, help, version };
 
 /// Which of them was asked for. `help` and `version` are not here: they beat
 /// every other word, so they are answered where they are read.
-const Command = enum { review, status, risk, init, themes, serve };
+const Command = enum { review, status, risk, init, themes, serve, agent };
 
 /// A panic still says what went wrong; what this drops in a release build is
 /// the stack trace under it, and with it the DWARF reader, the inflate for
@@ -86,6 +89,11 @@ pub fn main(init: std.process.Init) !void {
     defer out.deinit();
     const w = out.writer();
 
+    // `lgtm agent` re-runs itself here on the agent's pty; see `io/pty.zig`.
+    if (childArgv(init.minimal.args)) |argv| pty.becomeChild(io, argv);
+    // `lgtm serve` runs one of these in each repo a phone reviews.
+    if (reviewArgs(init.minimal.args)) |device| lib.proc.exit(serve.reviewer(gpa, io, init.environ_map, device) catch 1);
+
     // Before anything is parsed: a word lgtm has no answer for is git's.
     // `lgtm` is what you type instead of `git`, so a subcommand it has not
     // grown yet is handed over rather than refused - and it is the *first*
@@ -100,6 +108,8 @@ pub fn main(init: std.process.Init) !void {
     var pane: ?[]const u8 = null;
     var serving: serve.Options = .{};
     var serve_flag = false;
+    var command: std.ArrayList([]const u8) = .empty;
+    defer command.deinit(gpa);
     var base: ?[]const u8 = null;
     var target: ?[]const u8 = null;
     var want_pr = false;
@@ -138,6 +148,10 @@ pub fn main(init: std.process.Init) !void {
             want_once = true;
         } else if (std.mem.eql(u8, arg, "--strict")) {
             want_strict = true;
+        } else if (cmd == .agent and (std.mem.eql(u8, arg, "--") or (arg.len > 0 and arg[0] != '-'))) {
+            // Everything from the command on is the command's, flags included.
+            if (!std.mem.eql(u8, arg, "--")) try command.append(gpa, arg);
+            while (args.next()) |rest| try command.append(gpa, rest);
         } else if (taking_refs and arg.len > 0 and arg[0] != '-') {
             // After `diff`, a word is a ref - git's own rule, and the reason
             // `lgtm diff status` reviews a branch called status rather than
@@ -214,6 +228,7 @@ pub fn main(init: std.process.Init) !void {
                 try w.flush();
                 return;
             };
+            serving.explicit = true;
             serve_flag = true;
         } else if (std.mem.eql(u8, arg, "--port")) {
             const text = args.next() orelse "";
@@ -222,6 +237,7 @@ pub fn main(init: std.process.Init) !void {
                 try w.flush();
                 return;
             };
+            serving.explicit = true;
             serve_flag = true;
         } else if (std.mem.eql(u8, arg, "--pr")) {
             // The number is optional, so the next argument is taken only when
@@ -271,13 +287,23 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    if (serve_flag and cmd != .serve) {
-        try w.print("lgtm: --listen, --port and --new-token are for serve\n\n{s}", .{usage});
+    if (serve_flag and cmd != .serve and cmd != .agent) {
+        try w.print("lgtm: --listen, --port and --new-token are for serve and agent\n\n{s}", .{usage});
         try w.flush();
         return;
     }
+    if (cmd == .agent) {
+        if (command.items.len == 0) {
+            try w.print("lgtm: agent needs a command, such as: lgtm agent claude\n\n{s}", .{usage});
+            try w.flush();
+            return;
+        }
+        serving.qr = tty.stdoutIsTerminal(io);
+        const code = try serve.host(gpa, io, init.environ_map, w, serving, command.items);
+        try w.flush();
+        lib.proc.exit(code);
+    }
     if (cmd == .serve) {
-        serving.pane = pane;
         serving.qr = tty.stdoutIsTerminal(io);
         const code = try serve.run(gpa, io, init.environ_map, w, serving);
         try w.flush();
@@ -425,6 +451,33 @@ pub fn main(init: std.process.Init) !void {
 
     if (want_profile) try metrics.report(w);
     try w.flush();
+}
+
+/// The command after `lgtm __pty-child --`, when this run is that helper.
+fn childArgv(args: std.process.Args) ?[]const []const u8 {
+    var it = args.iterate();
+    _ = it.next();
+    const first = it.next() orelse return null;
+    if (!std.mem.eql(u8, first, pty.child_verb)) return null;
+    _ = it.next();
+    const S = struct {
+        var buf: [256][]const u8 = undefined;
+    };
+    var n: usize = 0;
+    while (it.next()) |a| : (n += 1) {
+        if (n == S.buf.len) break;
+        S.buf[n] = a;
+    }
+    return if (n == 0) null else S.buf[0..n];
+}
+
+/// The device after `lgtm __review`, when this run is that helper.
+fn reviewArgs(args: std.process.Args) ?[]const u8 {
+    var it = args.iterate();
+    _ = it.next();
+    const first = it.next() orelse return null;
+    if (!std.mem.eql(u8, first, serve.review_verb)) return null;
+    return it.next() orelse "";
 }
 
 /// Runs git with everything that was typed and exits with its status.

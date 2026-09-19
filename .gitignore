@@ -13,7 +13,6 @@ CLAUDE.md
 docs/*.md
 !docs/GUIDE.md
 !docs/CONFIG.md
-!docs/PROTOCOL.md
 result
 
 # lang samples for checking

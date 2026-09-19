@@ -37,6 +37,11 @@ pub fn listen(io: Io, addr: Address) ListenError!Server {
     return .{ .inner = try addr.listen(io, .{ .reuse_address = true }) };
 }
 
+pub fn listenUnix(io: Io, path: []const u8) !Server {
+    const ua = try net.UnixAddress.init(path);
+    return .{ .inner = try ua.listen(io, .{}) };
+}
+
 /// A local socket, such as the one herdr names in `$HERDR_SOCKET_PATH`.
 pub fn connectUnix(io: Io, path: []const u8) !Conn {
     const ua = try net.UnixAddress.init(path);

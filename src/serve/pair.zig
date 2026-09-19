@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The pairing token, kept in `.lgtm/` so a paired phone survives a restart,
+// The pairing token, one per machine so a paired phone survives a restart,
 // and the URL a phone scans to learn it.
 
 const std = @import("std");
 const fs = @import("../io/fs.zig");
 
-pub const token_path = fs.state_dir ++ "/serve-token";
+/// `$XDG_STATE_HOME/lgtm/serve-token`, else under `~/.local/state`.
+pub fn tokenPath(environ: *const std.process.Environ.Map, buf: []u8) ?[]const u8 {
+    if (environ.get("XDG_STATE_HOME")) |d| if (d.len > 0) return std.fmt.bufPrint(buf, "{s}/lgtm/serve-token", .{d}) catch null;
+    const home = environ.get("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.local/state/lgtm/serve-token", .{home}) catch null;
+}
 
 pub const Token = struct {
     hex: [32]u8,
@@ -30,22 +35,20 @@ pub const Token = struct {
     }
 };
 
-/// The saved token, or a new one saved owner-only. `fresh` replaces it, which
-/// unpairs every device.
-pub fn loadOrCreate(io: std.Io, gpa: std.mem.Allocator, fresh: bool) std.Io.RandomSecureError!Token {
+/// The saved token, or a new one saved owner-only; `fresh` replaces it, unpairing every device.
+pub fn loadOrCreate(io: std.Io, gpa: std.mem.Allocator, path: []const u8, fresh: bool) std.Io.RandomSecureError!Token {
     if (!fresh) {
-        if (fs.readFile(io, gpa, token_path, 128)) |bytes| {
+        if (fs.readFile(io, gpa, path, 128)) |bytes| {
             defer gpa.free(bytes);
             if (Token.parse(std.mem.trim(u8, bytes, " \t\r\n"))) |t| return t;
         } else |_| {}
     }
     const t = try Token.generate(io);
-    fs.writeSecretStateFile(io, token_path, &t.hex) catch {};
+    fs.writeSecretFile(io, path, &t.hex) catch {};
     return t;
 }
 
-/// `lgtm://pair?h=...&p=...&t=...&n=...`. One-letter keys keep the QR code a
-/// size smaller, which is the difference on a phone held to a terminal.
+/// `lgtm://pair?h=...&p=...&t=...&n=...`; one-letter keys keep the QR code a size smaller.
 pub fn writeUrl(w: *std.Io.Writer, host: []const u8, port: u16, token: *const Token, name: []const u8) std.Io.Writer.Error!void {
     try w.print("lgtm://pair?h={s}&p={d}&t={s}&n=", .{ host, port, &token.hex });
     for (name) |c| {
@@ -71,7 +74,18 @@ test "a token is 128 random bits as hex, only itself matches, and a saved one is
         try testing.expect(Token.parse(bad) == null);
 }
 
-test "the pairing url escapes the repository name and nothing else" {
+test "the token lives in the state directory, XDG first" {
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+    var buf: [256]u8 = undefined;
+    try testing.expect(tokenPath(&env, &buf) == null);
+    try env.put("HOME", "/home/me");
+    try testing.expectEqualStrings("/home/me/.local/state/lgtm/serve-token", tokenPath(&env, &buf).?);
+    try env.put("XDG_STATE_HOME", "/state");
+    try testing.expectEqualStrings("/state/lgtm/serve-token", tokenPath(&env, &buf).?);
+}
+
+test "the pairing url escapes the machine name and nothing else" {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try writeUrl(&out.writer, "100.64.0.1", 7777, &Token.parse("0123456789abcdef0123456789abcdef").?, "my repo&co");

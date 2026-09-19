@@ -71,6 +71,14 @@ pub fn run(gpa: Allocator, io: Io, argv: []const []const u8, max_output: usize) 
     return runWithin(gpa, io, argv, max_output, default_timeout);
 }
 
+/// This binary again, as `lgtm <args>` in `cwd`, talking over pipes: a helper that outlives one request.
+pub fn spawnSelf(io: Io, arena: Allocator, cwd: []const u8, args: []const []const u8) !std.process.Child {
+    var exe_buf: [4096]u8 = undefined;
+    const exe = exe_buf[0..try std.process.executablePath(io, &exe_buf)];
+    const argv = try std.mem.concat(arena, []const u8, &.{ &.{exe}, args });
+    return std.process.spawn(io, .{ .argv = argv, .cwd = .{ .path = cwd }, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
+}
+
 /// As `run`, with the caller's own deadline. `gh` over a network and
 /// `git diff` on a large repository do not want the same budget.
 pub fn runWithin(

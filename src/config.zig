@@ -189,6 +189,14 @@ pub const Config = struct {
     /// Empty means everything git reports, which is the behaviour that was
     /// there before this existed.
     ignore: []const []const u8 = &.{},
+    /// `[notify] url`: where to post when the agent needs you and no phone is attached. Empty is off.
+    notify: []const u8 = "",
+    /// `[serve] panes = "all"`: the phone lists every pane, not only agents.
+    serve_all: bool = false,
+    /// `[serve] agents`: the commands a phone may open, by the first word's name.
+    serve_agents: []const []const u8 = &.{},
+    /// `[serve] dirs`: where a phone may open one, beside where agents already work.
+    serve_dirs: []const []const u8 = &.{},
 };
 
 /// One insertable question. The name is what the picker lists; the text is
@@ -206,7 +214,7 @@ pub const Problem = struct {
     text: []const u8,
 };
 
-const Section = enum { nav, ui, diff, snapshot, keys, templates, theme, presets, review };
+const Section = enum { nav, ui, diff, snapshot, keys, templates, theme, presets, review, notify, serve };
 
 /// Accumulates one config across however many files it came from. Merging is
 /// per key, not per file: a repo file that sets one binding leaves the global
@@ -452,6 +460,26 @@ pub const Loader = struct {
                 } else self.unknownKey(src, line, section, key);
             },
             .theme => self.applyTheme(src, line, key, value),
+            .notify => {
+                if (!std.mem.eql(u8, key, "url")) return self.unknownKey(src, line, section, key);
+                const url = self.wantString(src, line, key, value) orelse return;
+                self.cfg.notify = self.arena.allocator().dupe(u8, url) catch return;
+            },
+            .serve => {
+                if (std.mem.eql(u8, key, "agents")) {
+                    self.cfg.serve_agents = self.wantList(src, line, key, value) orelse return;
+                    return;
+                }
+                if (std.mem.eql(u8, key, "dirs")) {
+                    self.cfg.serve_dirs = self.wantList(src, line, key, value) orelse return;
+                    return;
+                }
+                if (!std.mem.eql(u8, key, "panes")) return self.unknownKey(src, line, section, key);
+                const which = self.wantString(src, line, key, value) orelse return;
+                if (std.mem.eql(u8, which, "all") or std.mem.eql(u8, which, "agents")) {
+                    self.cfg.serve_all = std.mem.eql(u8, which, "all");
+                } else self.note(src, line, "panes wants \"agents\" or \"all\", not \"{s}\"", .{which});
+            },
         }
     }
 
@@ -688,6 +716,19 @@ pub const Loader = struct {
         };
     }
 
+    fn wantList(self: *Loader, src: []const u8, line: u32, key: []const u8, v: toml.Value) ?[]const []const u8 {
+        const items = switch (v) {
+            .list => |l| l,
+            else => {
+                self.note(src, line, "{s} wants a list of strings, not {s}", .{ key, v.typeName() });
+                return null;
+            },
+        };
+        const out = self.arena.allocator().alloc([]const u8, items.len) catch return null;
+        for (items, out) |item, *o| o.* = self.arena.allocator().dupe(u8, item) catch return null;
+        return out;
+    }
+
     fn unknownKey(self: *Loader, src: []const u8, line: u32, section: Section, key: []const u8) void {
         self.note(src, line, "unknown key '{s}.{s}'", .{ @tagName(section), key });
     }
@@ -823,6 +864,19 @@ pub const starter =
     \\# Git pathspecs kept off the screen, for generated files that are tracked
     \\# on purpose. The count stays on the status line and zi reveals them.
     \\# ignore = ["package-lock.json", "dist/**"]
+    \\
+    \\# [notify]
+    \\# Where lgtm serve posts when the agent is waiting or has gone quiet and
+    \\# no phone is watching. ntfy or Bark push it to your phone.
+    \\# url = "https://ntfy.sh/pick-a-long-random-topic"
+    \\
+    \\# [serve]
+    \\# Which panes lgtm serve lists for the phone: "agents", or "all" to include
+    \\# shells and everything else.
+    \\# panes = "agents"
+    \\# What the phone may open, and where besides the repos agents work in.
+    \\# agents = ["claude", "codex"]
+    \\# dirs = ["~/code/api"]
     \\
     \\# [presets]
     \\# Questions the compose box inserts at the caret, on <C-i> and <Space>a.
@@ -1485,4 +1539,40 @@ test "every setting the starter names is a setting that exists" {
     // And it is not passing by having matched nothing.
     try testing.expect(std.mem.indexOf(u8, text.items, "scrolloff") != null);
     try testing.expect(std.mem.indexOf(u8, text.items, "[theme]") != null);
+}
+
+test "[notify] url is read, and a key it does not know is reported" {
+    var l = loadText(
+        \\[notify]
+        \\url = "https://ntfy.sh/t"
+        \\topic = "x"
+    );
+    defer l.deinit();
+    try testing.expectEqualStrings("https://ntfy.sh/t", l.cfg.notify);
+    try testing.expect(l.problems.items.len == 1);
+}
+
+test "[serve] panes is agents or all, and anything else is reported" {
+    var l = loadText(
+        \\[serve]
+        \\panes = "all"
+    );
+    defer l.deinit();
+    try testing.expect(l.cfg.serve_all and l.problems.items.len == 0);
+    var bad = loadText(
+        \\[serve]
+        \\panes = "some"
+    );
+    defer bad.deinit();
+    try testing.expect(!bad.cfg.serve_all and bad.problems.items.len == 1);
+    var lists = loadText(
+        \\[serve]
+        \\agents = ["claude", "codex --full-auto"]
+        \\dirs = ["~/code"]
+        \\
+    );
+    defer lists.deinit();
+    try testing.expectEqual(@as(usize, 2), lists.cfg.serve_agents.len);
+    try testing.expectEqualStrings("codex --full-auto", lists.cfg.serve_agents[1]);
+    try testing.expectEqualStrings("~/code", lists.cfg.serve_dirs[0]);
 }

@@ -202,6 +202,9 @@ pub const App = struct {
     /// Every note in the session. Session-lived and owning its own bytes, so
     /// a re-diff resetting the arena cannot take a remark with it (rule 4).
     comments: comments_mod.Store = undefined,
+    /// The phone attached through `lgtm serve`, empty when none is.
+    phone_buf: [64]u8 = undefined,
+    phone_len: usize = 0,
     /// What the compose box will do with what is typed. The box itself does
     /// not know or care; everything that acts on the text reads this.
     compose_for: ComposeFor = .agent,
@@ -740,6 +743,7 @@ pub const App = struct {
             .work_runs = self.review.runsFor(f.path(), f.new_blob, bufs.work),
             .head_runs = self.review.runsFor(f.path(), f.old_blob, bufs.head),
             .torn = self.review.torn,
+            .phone = self.phone_buf[0..self.phone_len],
             .hidden = if (self.review.show_ignored) 0 else self.review.hidden,
             .notes = notes.commentMarks(self),
             // Empty unless `--base` or `--target` moved them, so the badge
@@ -2191,6 +2195,7 @@ pub const App = struct {
             // holds the work the agent has just done, whether or not they ever
             // press anything.
             .agent_quiescent => _ = turns_mod.snapshotTurn(self),
+            .phone => notes.loadPhone(self),
             .snapshot_taken => {},
         }
     }

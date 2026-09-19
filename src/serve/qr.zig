@@ -287,8 +287,7 @@ fn penalty(code: *const Code) usize {
     return score + (@max(pct, 50) - @min(pct, 50)) / 5 * 10;
 }
 
-/// Two module rows per line with half blocks, dark on light whatever the
-/// terminal's colours, and a quiet zone of two modules.
+/// Two module rows per line in half blocks, dark on light whatever the terminal's colours.
 pub fn render(w: *std.Io.Writer, code: *const Code) std.Io.Writer.Error!void {
     const span = code.size + 4;
     var row: usize = 0;

@@ -226,6 +226,54 @@ ignore = ["package-lock.json", "**/*.pb.go", "dist/**"]
 Hidden files are counted on the status line, so nothing is ever hidden
 silently, and `zi` reveals them.
 
+## `[notify]`
+
+| Key | |
+|---|---|
+| `url` | Where `lgtm serve` posts when an agent needs you. Empty is off |
+
+```toml
+[notify]
+url = "https://ntfy.sh/pick-a-long-random-topic"
+```
+
+A POST with the message as its body and `Title: lgtm`, sent with `curl`, when:
+
+- herdr says an agent is waiting on you, or has finished;
+- on other backends, an agent's screen stops changing for 20 seconds after it
+  was moving;
+- and no phone is attached, since an open app already shows it.
+
+At most one every 30 seconds for each agent. [ntfy](https://ntfy.sh) and Bark turn it into a
+push on your phone; anything that takes a webhook works. The topic is the only
+secret, so make it long: whoever knows it reads the messages, which say only
+that an agent is waiting and in which directory.
+
+## `[serve]`
+
+| Key | |
+|---|---|
+| `panes` | `"agents"` (the default) lists only panes running an agent; `"all"` lists every pane, shells too |
+| `agents` | Commands the phone may open, each named by its first word. Empty, the default, means the phone opens nothing |
+| `dirs` | Where the phone may open one, besides the repositories agents already work in. `~/` is your home |
+
+```toml
+[serve]
+panes = "all"
+agents = ["claude", "codex --full-auto"]
+dirs = ["~/code/api"]
+```
+
+The phone sends a name and a directory, never a command line: `lgtm serve`
+refuses any name not listed here and any directory that is neither listed nor
+a repository an agent works in. An agent opens without taking focus on your
+desk: a window in the tmux session `agents` while tmux runs, else a tab in
+herdr or kitty, else a new detached tmux session (`tmux attach -t agents`
+shows it).
+
+An agent is a pane whose program is not a shell, an editor, a pager or a
+multiplexer, or one herdr says is an agent.
+
 ## `[presets]`
 
 Questions for the compose box's `<C-i>` list, and for `<Space>a`. Any names, any

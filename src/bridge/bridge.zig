@@ -392,11 +392,11 @@ pub const Bridge = union(enum) {
     /// split is a pane a send must never land in. Being wrong costs a marker
     /// and a sort position, never a misdirected send.
     const not_agents: []const []const u8 = &.{
-        "ash",  "bash",     "csh",  "dash",  "elvish", "fish",  "ksh",  "nu",
-        "pwsh", "sh",       "tcsh", "xonsh", "zsh",    "emacs", "hx",   "helix",
-        "kak",  "micro",    "nano", "nvim",  "vi",     "vim",   "less", "man",
-        "more", "bat",      "btop", "htop",  "top",    "git",   "ssh",  "tmux",
-        "lgtm", "lgtm-dev",
+        "ash",   "bash",  "csh",      "dash",  "elvish", "fish",  "ksh",  "nu",
+        "pwsh",  "sh",    "tcsh",     "xonsh", "zsh",    "emacs", "hx",   "helix",
+        "kak",   "micro", "nano",     "nvim",  "vi",     "vim",   "less", "man",
+        "more",  "bat",   "btop",     "htop",  "top",    "git",   "ssh",  "tmux",
+        "herdr", "lgtm",  "lgtm-dev",
     };
 
     /// Whether a pane is worth marking as an agent. The *absence* of a known
@@ -542,6 +542,16 @@ pub fn detect(environ: *const std.process.Environ.Map) Bridge {
     return .osc52;
 }
 
+/// `detect`, except that when tmux and herdr both claim us, herdr is innermost if the tmux pane's tty is not our stdin.
+pub fn detectIn(gpa: Allocator, io: std.Io, environ: *const std.process.Environ.Map) Bridge {
+    const br = detect(environ);
+    if (br != .tmux or !nonEmpty(environ, "HERDR_ENV")) return br;
+    var buf: [128]u8 = undefined;
+    const tty = tmux.paneTty(gpa, io, environ.get("TMUX_PANE") orelse return br, &buf);
+    if (tty.len == 0 or fs.stdinIs(io, tty)) return br;
+    return .{ .herdr = panesFrom(environ, "HERDR_PANE_ID") };
+}
+
 /// `$GHOSTTY_RESOURCES_DIR` is injected by Ghostty itself; `$TERM_PROGRAM` is
 /// the conventional one and survives a shell that clears the first. Either
 /// will do, because the question is only which backend to try.
@@ -569,7 +579,7 @@ fn panesFrom(environ: *const std.process.Environ.Map, key: []const u8) Panes {
 
 /// The payload as it goes out: newline refused, carriage returns dropped, one
 /// trailing space guaranteed.
-fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
+pub fn normalise(gpa: Allocator, text: []const u8) Error![]u8 {
     if (std.mem.indexOfScalar(u8, text, '\n') != null) return error.Multiline;
 
     const trimmed = std.mem.trimEnd(u8, text, " \t\r");

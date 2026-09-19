@@ -90,18 +90,40 @@ pub fn writeStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!vo
     try Dir.cwd().writeFile(io, .{ .sub_path = path, .data = bytes });
 }
 
-/// As `writeStateFile`, readable by the owner only. Replaced rather than
-/// rewritten, because creation is the only moment a mode is set.
-pub fn writeSecretStateFile(io: Io, path: []const u8, bytes: []const u8) WriteError!void {
-    std.debug.assert(std.mem.startsWith(u8, path, state_dir ++ "/"));
-
-    try ensureStateDir(io);
+/// Readable by the owner only, parents created. Replaced rather than rewritten,
+/// because creation is the only moment a mode is set.
+pub fn writeSecretFile(io: Io, path: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| try privateDir(io, dir);
     Dir.cwd().deleteFile(io, path) catch {};
     try Dir.cwd().writeFile(io, .{
         .sub_path = path,
         .data = bytes,
         .flags = .{ .exclusive = true, .permissions = .fromMode(0o600) },
     });
+}
+
+/// A directory only its owner can enter, with its parents.
+pub fn privateDir(io: Io, path: []const u8) !void {
+    if (std.fs.path.dirname(path)) |parent| Dir.cwd().createDirPath(io, parent) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+    Dir.cwd().createDir(io, path, .fromMode(0o700)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+}
+
+/// Appends to a file only its owner can read, creating it and its parents.
+pub fn appendSecretFile(io: Io, path: []const u8, bytes: []const u8) !void {
+    if (std.fs.path.dirname(path)) |dir| try privateDir(io, dir);
+    const file = try Dir.cwd().createFile(io, path, .{ .truncate = false, .lock = .exclusive, .permissions = .fromMode(0o600) });
+    defer file.close(io);
+    try file.writePositionalAll(io, bytes, try file.length(io));
+}
+
+pub fn deleteFile(io: Io, path: []const u8) void {
+    Dir.cwd().deleteFile(io, path) catch {};
 }
 
 /// The working directory, resolved, or null when it cannot be had.
@@ -226,6 +248,13 @@ pub const Meta = struct { size: u64, mtime_ns: i128 };
 pub fn statFile(io: Io, path: []const u8) ?Meta {
     const st = Dir.cwd().statFile(io, path, .{}) catch return null;
     return .{ .size = st.size, .mtime_ns = st.mtime.nanoseconds };
+}
+
+/// Whether stdin is the file at `path`: for a terminal, the same device node.
+pub fn stdinIs(io: Io, path: []const u8) bool {
+    const in = std.Io.File.stdin().stat(io) catch return false;
+    const there = Dir.cwd().statFile(io, path, .{}) catch return false;
+    return in.inode == there.inode;
 }
 
 pub fn fileExists(io: Io, path: []const u8) bool {

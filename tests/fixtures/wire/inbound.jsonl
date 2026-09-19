@@ -1,4 +1,13 @@
-{"type":"hello","token":"0123456789abcdef0123456789abcdef","version":0,"device":"iPhone"}
-{"type":"send","text":"run the tests again","submit":true}
-{"type":"send","text":"and look at server.zig"}
+{"type":"hello","token":"0123456789abcdef0123456789abcdef","version":1,"device":"iPhone"}
+{"type":"watch","pane":"tmux:4182:%12"}
+{"type":"send","pane":"tmux:4182:%12","text":"run the tests again","submit":true}
+{"type":"send","pane":"tmux:4182:%12","text":"and look at server.zig"}
 {"type":"ping"}
+{"type":"review","repo":"/Users/me/code/lgtm"}
+{"type":"open","path":"src/retry.zig"}
+{"type":"comment","path":"src/retry.zig","new":0,"old":2,"text":"why remove it?"}
+{"type":"uncomment","id":1}
+{"type":"submit","pane":"tmux:4182:%12"}
+{"type":"key","pane":"tmux:4182:%12","key":"escape"}
+{"type":"spawn","agent":"claude","dir":"/Users/me/code/api"}
+{"type":"close","pane":"tmux:4182:%31"}

@@ -1,58 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// The agent's side of `lgtm serve`: what this backend can do, and its screen.
+// The watched pane's screen: sent when it changed, captured faster while it moves.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-
-const bridge = @import("../bridge/bridge.zig");
-const tmux = @import("../bridge/tmux.zig");
-const wire = @import("wire.zig");
-
-/// `status` is whether a watcher is running for this pane.
-pub fn caps(br: *const bridge.Bridge, pane: []const u8, status: bool) wire.Agent {
-    const readable = br.readable();
-    return .{
-        .backend = br.name(),
-        .pane = pane,
-        .read = readable,
-        .submit = readable,
-        .stream = false,
-        .status = status,
-        .why = switch (br.*) {
-            .tmux, .herdr, .wezterm, .kitty => "",
-            .ghostty => "ghostty cannot be read; run the agent inside tmux, herdr, wezterm or kitty",
-            .osc52 => "no multiplexer to reach the agent through",
-        },
-    };
-}
-
-/// What the pane is running, where the backend can say. Null when it cannot.
-pub fn command(gpa: Allocator, arena: Allocator, io: std.Io, br: *const bridge.Bridge, pane: []const u8) ?[]const u8 {
-    if (br.* != .tmux) return null;
-    const listed = tmux.list(gpa, arena, io, true) catch return null;
-    for (listed) |p| {
-        if (std.mem.eql(u8, p.id, pane)) return p.command;
-    }
-    return null;
-}
 
 pub const Screen = struct {
     hash: u64 = 0,
     seen: bool = false,
 
-    pub const Error = error{PaneGone} || Allocator.Error;
-
     /// Rows, in `arena`, when the screen changed since the last call; else null.
-    pub fn poll(self: *Screen, br: *bridge.Bridge, cx: bridge.Ctx, arena: Allocator, pane: []const u8) Error!?[]const []const u8 {
-        const text = br.read(cx, arena, pane) catch |err| return switch (err) {
-            error.OutOfMemory => error.OutOfMemory,
-            error.PaneGone, error.Failed => error.PaneGone,
-        };
-        return self.changed(arena, text);
-    }
-
-    fn changed(self: *Screen, arena: Allocator, text: []const u8) Allocator.Error!?[]const []const u8 {
+    pub fn changed(self: *Screen, arena: Allocator, text: []const u8) Allocator.Error!?[]const []const u8 {
         const h = std.hash.Wyhash.hash(0, text);
         if (self.seen and h == self.hash) return null;
         self.seen = true;
@@ -107,16 +65,4 @@ test "polling backs off while nothing moves and snaps back when it does" {
     _ = p.after(false);
     p.wake();
     try testing.expectEqual(Pacer.fastest, p.wait);
-}
-
-test "four backends can be read and submitted to, and ghostty says why not" {
-    for ([_]bridge.Bridge{ .{ .tmux = .{} }, .{ .herdr = .{} }, .{ .wezterm = .{} }, .{ .kitty = .{} } }) |b| {
-        const c = caps(&b, "1", false);
-        try testing.expect(c.read and c.submit and !c.status and c.why.len == 0);
-    }
-    const g: bridge.Bridge = .{ .ghostty = .{} };
-    const gc = caps(&g, "", false);
-    try testing.expect(!gc.read and !gc.submit and gc.why.len > 0);
-    const h: bridge.Bridge = .{ .herdr = .{} };
-    try testing.expect(caps(&h, "w1:p1", true).status);
 }

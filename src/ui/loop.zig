@@ -156,7 +156,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // Detection is env vars and cannot fail; the target is the part that can,
     // and it resolves lazily on the first send so a pane opened after lgtm
     // started is still reachable.
-    var br = bridge.detect(environ);
+    var br = bridge.detectIn(gpa, io, environ);
     var saved: SavedTarget = .{};
     // Every multiplexer, not only tmux: `--pane` and the remembered target are
     // about "which pane is the agent in", which is the same question whichever
@@ -205,6 +205,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     // watcher on a working tree the reader cannot see would re-diff away the
     // thing they came to read.
     const live = opts.target == null;
+    var phone: PhoneWatch = .{ .io = io, .queue = &queue };
     if (!opts.once) {
         winsize.register() catch {};
         // How wide every row is measured, before the thread that reads and the
@@ -216,7 +217,9 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         }
         try reader.start();
         if (live) watcher.start() catch {};
+        phone.start();
     }
+    defer if (!opts.once) phone.stop();
     defer {
         if (!opts.once) {
             // Before the reader stops, so the last thing to touch the flag is
@@ -251,6 +254,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.pr.repo_len = @intCast(@min(opts.repo.len, app.pr.repo.len));
     @memcpy(app.pr.repo[0..app.pr.repo_len], opts.repo[0..app.pr.repo_len]);
     notes.loadComments(&app);
+    notes.loadPhone(&app);
     // The store needs an environment to run git in, which only this layer has.
     // Opened before the first diff so `.lgtm/state.json` is read once, and the
     // mark picked up after it, when there are files to attach it to.
@@ -843,3 +847,36 @@ test {
     _ = tired;
     _ = @import("path.zig");
 }
+
+/// `lgtm serve`'s files in `.lgtm/`, which git ignores and so the watcher never reports.
+const PhoneWatch = struct {
+    io: std.Io,
+    queue: *event.Queue,
+    running: std.atomic.Value(bool) = .init(false),
+    thread: ?std.Thread = null,
+
+    fn start(self: *PhoneWatch) void {
+        self.running.store(true, .release);
+        self.thread = std.Thread.spawn(.{}, poll, .{self}) catch null;
+    }
+
+    fn stop(self: *PhoneWatch) void {
+        self.running.store(false, .release);
+        if (self.thread) |t| t.join();
+    }
+
+    /// Whether a phone is attached, not every heartbeat, so the screen redraws only on a change.
+    fn poll(self: *PhoneWatch) void {
+        var last = self.state();
+        while (self.running.load(.acquire)) {
+            std.Io.sleep(self.io, .fromMilliseconds(1000), .awake) catch return;
+            const now = self.state();
+            if (!std.meta.eql(now, last)) self.queue.push(.phone) catch {};
+            last = now;
+        }
+    }
+
+    fn state(self: *PhoneWatch) struct { bool, ?fs.Meta } {
+        return .{ notes.phoneFresh(self.io), fs.statFile(self.io, ".lgtm/phone.jsonl") };
+    }
+};

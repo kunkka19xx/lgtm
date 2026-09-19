@@ -242,6 +242,16 @@ pub fn submitArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []
     return arena.dupe([]const u8, &.{ "tmux", "send-keys", "-t", pane, "Enter" });
 }
 
+/// The terminal `pane` runs on, such as `/dev/ttys012`, or empty when tmux cannot say.
+pub fn paneTty(gpa: Allocator, io: std.Io, pane: []const u8, buf: []u8) []const u8 {
+    const out = proc.run(gpa, io, &.{ "tmux", "display-message", "-p", "-t", pane, "#{pane_tty}" }, 256) catch return "";
+    defer out.deinit(gpa);
+    const name = std.mem.trim(u8, out.stdout, " \t\r\n");
+    if (out.exit_code != 0 or name.len > buf.len) return "";
+    @memcpy(buf[0..name.len], name);
+    return buf[0..name.len];
+}
+
 pub fn readArgv(arena: Allocator, pane: []const u8) Allocator.Error![]const []const u8 {
     return arena.dupe([]const u8, &.{ "tmux", "capture-pane", "-p", "-t", pane });
 }
