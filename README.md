@@ -112,8 +112,7 @@ the clipboard over OSC 52, which works over SSH.
 
 ## From your phone
 
-Walk away and keep talking to your agents. With [lgtm for iOS](https://github.com/kunkka19xx/lgtm-ios)
-and Tailscale on both ends:
+Walk away and keep talking to your agents. With `lgtm-ios` version (inprogress), and Tailscale on both ends:
 
 ```sh
 lgtm serve --listen $(tailscale ip -4)   # every agent in tmux, herdr, WezTerm, kitty
