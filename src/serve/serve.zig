@@ -11,6 +11,7 @@ const fs = @import("../io/fs.zig");
 const net = @import("../io/net.zig");
 const proc = @import("../io/proc.zig");
 const agent = @import("agent.zig");
+const control = @import("control.zig");
 const keys = @import("keys.zig");
 const local = @import("local.zig");
 const pair = @import("pair.zig");
@@ -36,6 +37,10 @@ pub const Options = struct {
 };
 
 const tick_ms = 50;
+/// A bursting tmux pane is captured at most this often.
+const bell_gap_ms = 40;
+/// The lines above the watched screen are sent again at most this often, when they changed.
+const scroll_ms = 2_000;
 const hello_ms = 10_000;
 /// The first list waits this long for a backend to answer, then goes, empty or not.
 const first_list_ms = 2_000;
@@ -147,6 +152,13 @@ fn gone(out: *Io.Writer, pane: []const u8) Io.Writer.Error!void {
     return wire.write(out, .{ .@"error" = .{ .code = .pane_gone, .message = "the pane is gone", .pane = pane } });
 }
 
+/// `s` copied into `buf`, cut to fit: it outlives the frame it came from.
+fn keep(buf: []u8, s: []const u8) []const u8 {
+    const n = @min(s.len, buf.len);
+    @memcpy(buf[0..n], s[0..n]);
+    return buf[0..n];
+}
+
 fn contains(list: []const []const u8, item: []const u8) bool {
     for (list) |x| if (std.mem.eql(u8, x, item)) return true;
     return false;
@@ -212,9 +224,13 @@ const Inbox = struct {
     fn free(self: *Inbox, lines: []const []u8) void {
         for (lines) |l| self.gpa.free(l);
     }
+
+    fn drop(self: *Inbox, lines: [][]u8) void {
+        self.free(lines);
+        self.gpa.free(lines);
+    }
 };
 
-/// Everything a connection needs, alive for the daemon's life.
 const Daemon = struct {
     gpa: Allocator,
     io: Io,
@@ -332,13 +348,23 @@ const Daemon = struct {
         var watch_buf: [128]u8 = undefined;
         var watching: []const u8 = "";
         var screen: agent.Screen = .{};
+        var back: agent.Screen = .{};
+        var shown: usize = 0;
+        var next_scroll: i64 = 0;
         var pacer: agent.Pacer = .{};
         var next_capture: i64 = 0;
+        var captured: i64 = 0;
+        var bell: ?*control.Bell = null;
+        defer if (bell) |b| b.stop(d.gpa, d.io);
         var pane_gone = false;
         var review: ?*Reviewer = null;
         var submit_buf: [128]u8 = undefined;
         var submit_to: []const u8 = "";
+        var say_buf: [128]u8 = undefined;
+        var say_to: []const u8 = "";
         var beat: i64 = 0;
+        // Something was typed into a pane, so its screen is worth reading now.
+        var poke = false;
 
         serving: while (true) {
             var frame: std.heap.ArenaAllocator = .init(d.gpa);
@@ -348,10 +374,7 @@ const Daemon = struct {
             defer view.release();
 
             const got = inbox.take() catch break;
-            defer {
-                inbox.free(got.lines);
-                d.gpa.free(got.lines);
-            }
+            defer inbox.drop(got.lines);
             for (got.lines) |line| {
                 const msg = wire.parse(arena, line) catch |err| {
                     const code: wire.Code = switch (err) {
@@ -380,9 +403,7 @@ const Daemon = struct {
                         break :serving;
                     }
                     const name = if (msg.hello.device.len > 0) msg.hello.device else "a device";
-                    const n = @min(name.len, device_buf.len);
-                    @memcpy(device_buf[0..n], name[0..n]);
-                    device = device_buf[0..n];
+                    device = keep(&device_buf, name);
                     // The newest device wins, so a phone that dropped without closing cannot lock itself out.
                     d.owner.store(me, .release);
                     d.slot.lockUncancelable(d.io);
@@ -397,14 +418,19 @@ const Daemon = struct {
                     .hello => {},
                     .ping => wire.write(out, .pong) catch break :serving,
                     .watch => |wt| {
-                        const n = @min(wt.pane.len, watch_buf.len);
-                        @memcpy(watch_buf[0..n], wt.pane[0..n]);
-                        watching = watch_buf[0..n];
+                        watching = keep(&watch_buf, wt.pane);
                         screen = .{};
-                        pacer.wake();
-                        next_capture = 0;
+                        back = .{};
+                        next_scroll = nowMs(d.io) + 300;
+                        poke = true;
                         pane_gone = false;
-                        if (view.find(watching)) |e| if (e.kind == .pty) local.announce(arena, d.io, e.native, device.?);
+                        if (bell) |b| b.stop(d.gpa, d.io);
+                        bell = null;
+                        if (view.find(watching)) |e| switch (e.kind) {
+                            .pty => local.announce(arena, d.io, e.native, device.?),
+                            .tmux => bell = control.Bell.start(d.gpa, d.io, e.native) catch null,
+                            else => {},
+                        };
                     },
                     .send => |s| {
                         const e = view.find(s.pane) orelse {
@@ -420,8 +446,7 @@ const Daemon = struct {
                             if (sent.ok) "" else ", failed",
                         });
                         wire.write(out, .{ .sent = .{ .pane = s.pane, .ok = sent.ok, .submitted = sent.submitted, .why = sent.why } }) catch break :serving;
-                        pacer.wake();
-                        next_capture = 0;
+                        poke = true;
                     },
                     .key => |k| {
                         const e = view.find(k.pane) orelse {
@@ -436,8 +461,7 @@ const Daemon = struct {
                         d.reg.say("key        {s} to {s}{s}", .{ k.key, k.pane, if (pressed.ok) "" else ", failed" });
                         d.audit(device.?, "key", k.pane, k.key);
                         wire.write(out, .{ .sent = .{ .pane = k.pane, .ok = pressed.ok, .submitted = false, .why = pressed.why } }) catch break :serving;
-                        pacer.wake();
-                        next_capture = 0;
+                        poke = true;
                     },
                     .review => |r| {
                         review = null;
@@ -480,27 +504,26 @@ const Daemon = struct {
                         d.reg.say("close      {s}{s}", .{ c.pane, if (why == null) "" else ", refused" });
                         wire.write(out, .{ .closed = .{ .ok = why == null, .pane = c.pane, .why = why orelse "" } }) catch break :serving;
                     },
-                    .open, .comment, .uncomment => {
+                    .open, .comment, .uncomment, .submit => {
                         const rv = review orelse {
                             refuse(out, .no_review, "choose a repo to review first") catch break :serving;
                             continue;
                         };
-                        rv.send(d.io, line);
-                    },
-                    .submit => |s| {
-                        const rv = review orelse {
-                            refuse(out, .no_review, "choose a repo to review first") catch break :serving;
-                            continue;
+                        // A comment sent now, or a review, goes to an agent in the reviewed repo.
+                        const to = switch (msg) {
+                            .comment => |c| c.pane,
+                            .submit => |sb| sb.pane,
+                            else => "",
                         };
-                        const e = view.find(s.pane);
-                        const why: ?[]const u8 = if (e == null) "the pane is gone" else if (!std.mem.eql(u8, e.?.pane.repo, rv.repo)) "that agent works in another repo" else null;
-                        if (why) |w| {
-                            wire.write(out, .{ .submitted = .{ .ok = false, .why = w } }) catch break :serving;
-                            continue;
+                        if (to.len > 0) {
+                            const e = view.find(to);
+                            const wrong: ?[]const u8 = if (e == null) "the pane is gone" else if (!std.mem.eql(u8, e.?.pane.repo, rv.repo)) "that agent works in another repo" else null;
+                            if (wrong) |why| {
+                                (if (msg == .submit) wire.write(out, .{ .submitted = .{ .ok = false, .why = why } }) else wire.write(out, .{ .noted = .{ .ok = false, .why = why } })) catch break :serving;
+                                continue;
+                            }
+                            if (msg == .submit) submit_to = keep(&submit_buf, to) else say_to = keep(&say_buf, to);
                         }
-                        const n = @min(s.pane.len, submit_buf.len);
-                        @memcpy(submit_buf[0..n], s.pane[0..n]);
-                        submit_to = submit_buf[0..n];
                         rv.send(d.io, line);
                     },
                 }
@@ -516,6 +539,13 @@ const Daemon = struct {
                     refuse(out, .replaced, "another device connected") catch {};
                     break;
                 }
+                if (watching.len > 0 and !pane_gone and now >= next_scroll) {
+                    next_scroll = now + scroll_ms;
+                    if (view.find(watching)) |e| if (panes.history(d.gpa, d.io, arena, e, shown)) |text| {
+                        if (text.len > 0) if (back.changed(arena, text) catch null) |rows|
+                            wire.write(out, .{ .scrollback = .{ .pane = watching, .rows = rows } }) catch break;
+                    } else |_| {};
+                }
                 if (review) |rv| {
                     rv.used = now;
                     if (now - beat >= beat_ms) {
@@ -523,11 +553,20 @@ const Daemon = struct {
                         rv.send(d.io, "{\"type\":\"ping\"}");
                     }
                     const from = rv.inbox.take() catch break;
-                    defer {
-                        rv.inbox.free(from.lines);
-                        d.gpa.free(from.lines);
-                    }
+                    defer rv.inbox.drop(from.lines);
                     for (from.lines) |l| {
+                        if (std.mem.startsWith(u8, l, "{\"type\":\"said\"")) {
+                            const said = std.json.parseFromSliceLeaky(Said, arena, l, .{ .ignore_unknown_fields = true }) catch continue;
+                            const e = view.find(say_to) orelse {
+                                wire.write(out, .{ .noted = .{ .ok = false, .id = said.id, .why = "saved, but the pane is gone" } }) catch break;
+                                continue;
+                            };
+                            const sent = d.deliver(arena, e, said.line, true);
+                            d.audit(name, "comment", say_to, said.line);
+                            wire.write(out, .{ .noted = .{ .ok = sent.ok, .id = said.id, .why = if (sent.ok) "" else sent.why } }) catch break;
+                            poke = true;
+                            continue;
+                        }
                         if (!std.mem.startsWith(u8, l, "{\"type\":\"written\"")) {
                             out.writeAll(l) catch break;
                             out.writeByte('\n') catch break;
@@ -537,8 +576,7 @@ const Daemon = struct {
                         d.reg.say("review     {s}{s}", .{ done.path, if (done.ok) "" else ", failed" });
                         if (done.ok) d.audit(name, "review", submit_to, done.path);
                         wire.write(out, .{ .submitted = done }) catch break;
-                        pacer.wake();
-                        next_capture = 0;
+                        poke = true;
                     }
                     if (from.end != null) {
                         rv.used = 0;
@@ -553,13 +591,24 @@ const Daemon = struct {
                     sent_list = true;
                     wire.write(out, .{ .panes = .{ .panes = view.panes(arena) catch break } }) catch break;
                 }
-                if (watching.len > 0 and now >= next_capture) {
+                if (poke) {
+                    poke = false;
+                    pacer.wake();
+                    next_capture = 0;
+                }
+                const rung = if (bell) |b| now - captured >= bell_gap_ms and b.take() else false;
+                if (watching.len > 0 and (rung or now >= next_capture)) {
+                    captured = now;
                     if (view.find(watching)) |e| {
                         if (panes.read(d.gpa, d.io, arena, e)) |text| {
                             pane_gone = false;
                             const rows = screen.changed(arena, text) catch break;
-                            if (rows) |r| wire.write(out, .{ .screen = .{ .pane = watching, .rows = r } }) catch break;
-                            next_capture = if (e.pane.stream) now else now + pacer.after(rows != null);
+                            if (rows) |r| {
+                                shown = r.len;
+                                wire.write(out, .{ .screen = .{ .pane = watching, .rows = r } }) catch break;
+                            }
+                            // A pty is a socket away, and a tmux pane with a live bell rings when it prints.
+                            next_capture = if (e.kind == .pty) now else if (bell != null and bell.?.alive()) now + agent.Pacer.slowest else now + pacer.after(rows != null);
                         } else |err| switch (err) {
                             error.OutOfMemory => break,
                             error.PaneGone => {
@@ -586,7 +635,6 @@ const Daemon = struct {
         if (device) |name| d.reg.say("detached   {s}", .{name});
     }
 
-    /// The configured command called `name`.
     fn command(d: *Daemon, name: []const u8) ?[]const u8 {
         for (d.agents, d.cfg.cfg.serve_agents) |n, c| if (std.mem.eql(u8, n, name)) return c;
         return null;
@@ -602,12 +650,12 @@ const Daemon = struct {
         return r;
     }
 
-    /// Stops reviewers nobody looked at for `idle_ms`, all but `keep`; every one when `now` is 0.
-    fn reap(d: *Daemon, keep: ?*Reviewer, now: i64) void {
+    /// Stops reviewers nobody looked at for `idle_ms`, all but `current`; every one when `now` is 0.
+    fn reap(d: *Daemon, current: ?*Reviewer, now: i64) void {
         var i: usize = 0;
         while (i < d.reviewers.items.len) {
             const r = d.reviewers.items[i];
-            if (r == keep or (now != 0 and now - r.used < idle_ms)) {
+            if (r == current or (now != 0 and now - r.used < idle_ms)) {
                 i += 1;
                 continue;
             }
@@ -688,6 +736,9 @@ const idle_ms: i64 = 60_000;
 /// What a reviewer answers a `submit` with: the review is written, and `line` is what the agent is told.
 const Written = struct { type: []const u8 = "written", ok: bool, line: []const u8 = "", path: []const u8 = "", count: u32 = 0, why: []const u8 = "" };
 
+/// What a reviewer answers a comment sent now with: the line the agent is told.
+const Said = struct { type: []const u8 = "said", id: u32, line: []const u8 };
+
 /// A `lgtm __review` child for one repo, and the lines it has sent.
 const Reviewer = struct {
     repo: []u8,
@@ -763,10 +814,7 @@ pub fn reviewer(gpa: Allocator, io: Io, environ: *const std.process.Environ.Map,
         defer frame.deinit();
         const arena = frame.allocator();
         const got = try inbox.take();
-        defer {
-            inbox.free(got.lines);
-            gpa.free(got.lines);
-        }
+        defer inbox.drop(got.lines);
         const now = nowMs(io);
         for (got.lines) |line| {
             const msg = wire.parse(arena, line) catch continue;
@@ -774,9 +822,7 @@ pub fn reviewer(gpa: Allocator, io: Io, environ: *const std.process.Environ.Map,
             switch (msg) {
                 .review => asked = true,
                 .open => |o| {
-                    const n = @min(o.path.len, open_buf.len);
-                    @memcpy(open_buf[0..n], o.path[0..n]);
-                    open = open_buf[0..n];
+                    open = keep(&open_buf, o.path);
                     try sendFile(out, arena, desk, open.?);
                 },
                 .comment => |c| {
@@ -789,7 +835,10 @@ pub fn reviewer(gpa: Allocator, io: Io, environ: *const std.process.Environ.Map,
                         } } });
                         continue;
                     };
-                    try wire.write(out, .{ .noted = .{ .ok = true, .id = id } });
+                    if (c.pane.len > 0) {
+                        try std.json.Stringify.value(Said{ .id = id, .line = try desk.say(arena, id) }, .{}, out);
+                        try out.writeByte('\n');
+                    } else try wire.write(out, .{ .noted = .{ .ok = true, .id = id } });
                     try sendReview(out, arena, desk, repo, open);
                 },
                 .uncomment => |u| {
@@ -837,6 +886,7 @@ test {
     _ = @import("reviewing.zig");
     _ = @import("vt.zig");
     _ = agent;
+    _ = control;
     _ = keys;
     _ = spawn;
     _ = local;

@@ -25,7 +25,8 @@ pub const Inbound = union(enum) {
     review: struct { repo: []const u8 },
     open: struct { path: []const u8 },
     /// `new` is the row's working-tree line; 0 on a removed line, which `old` names instead.
-    comment: struct { path: []const u8, new: u32, old: u32, text: []const u8 },
+    /// With `pane`, it is also sent to that agent now rather than with the review.
+    comment: struct { path: []const u8, new: u32, old: u32, text: []const u8, pane: []const u8 = "" },
     uncomment: struct { id: u32 },
     submit: struct { pane: []const u8 },
     /// `agent` is a name from `session.agents`, `dir` one from `session.dirs` or a pane's `repo`.
@@ -87,6 +88,7 @@ pub fn parse(arena: Allocator, line: []const u8) ParseError!Inbound {
             .new = raw.new,
             .old = raw.old,
             .text = raw.text orelse return error.MissingField,
+            .pane = raw.pane orelse "",
         } },
         .uncomment => .{ .uncomment = .{ .id = raw.id orelse return error.MissingField } },
         .submit => .{ .submit = .{ .pane = raw.pane orelse return error.MissingField } },
@@ -147,6 +149,8 @@ pub const Outbound = union(enum) {
     session: struct { version: u32, host: []const u8, review: []const u8, agents: []const []const u8 = &.{}, dirs: []const []const u8 = &.{} },
     panes: struct { panes: []const Pane },
     screen: struct { pane: []const u8, rows: []const []const u8 },
+    /// The watched pane's lines above its screen, oldest first.
+    scrollback: struct { pane: []const u8, rows: []const []const u8 },
     sent: struct { pane: []const u8, ok: bool, submitted: bool, why: []const u8 = "" },
     files: struct { repo: []const u8, files: []const FileEntry },
     file: FileView,
@@ -202,6 +206,7 @@ const outbound_fixture = [_]Outbound{
         .{ .id = "pty:5120", .backend = "pty", .agent = "codex", .stream = true },
     } } },
     .{ .screen = .{ .pane = "tmux:4182:%12", .rows = &.{ "> fix the retry backoff", "", "\u{25cf} Reading server.zig", "  \"quoted\" \\ tab\there" } } },
+    .{ .scrollback = .{ .pane = "tmux:4182:%12", .rows = &.{ "$ zig build test", "All 987 tests passed." } } },
     .{ .sent = .{ .pane = "tmux:4182:%12", .ok = true, .submitted = true } },
     .{ .sent = .{ .pane = "tmux:4182:%12", .ok = false, .submitted = false, .why = "pane is gone" } },
     .{ .files = .{ .repo = "/Users/me/code/lgtm", .files = &.{.{ .path = "src/retry.zig", .status = "modified", .added = 3, .removed = 1, .comments = 1 }} } },
@@ -263,6 +268,9 @@ test "every inbound message in the fixture parses" {
     const sp = (try parse(a.allocator(), lines.next().?)).spawn;
     try testing.expect(std.mem.eql(u8, sp.agent, "claude") and std.mem.eql(u8, sp.dir, "/Users/me/code/api"));
     try testing.expectEqualStrings("tmux:4182:%31", (try parse(a.allocator(), lines.next().?)).close.pane);
+    const now = (try parse(a.allocator(), lines.next().?)).comment;
+    try testing.expect(now.new == 14 and std.mem.eql(u8, now.pane, "tmux:4182:%12"));
+    try testing.expect(c.pane.len == 0);
     try testing.expect(lines.next() == null);
 }
 

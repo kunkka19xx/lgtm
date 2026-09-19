@@ -168,6 +168,19 @@ pub const Reviewing = struct {
         return id;
     }
 
+    /// Marks a comment sent, as the TUI's send-now does, and gives the one line that tells the agent.
+    pub fn say(self: *Reviewing, arena: Allocator, id: u32) ![]const u8 {
+        const n = self.notes.find(id) orelse return error.NoSuchLine;
+        n.state = .sent;
+        self.notes.dirty = true;
+        self.save();
+        const body = try arena.dupe(u8, std.mem.trim(u8, n.body, " \t\r\n"));
+        for (body) |*c| if (c.* == '\n' or c.* == '\r') {
+            c.* = ' ';
+        };
+        return std.fmt.allocPrint(arena, "{s}:{d} - {s}", .{ n.path, n.line, body });
+    }
+
     pub fn uncomment(self: *Reviewing, id: u32) void {
         self.notes.remove(id);
         self.save();

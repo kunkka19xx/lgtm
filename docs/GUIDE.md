@@ -581,7 +581,10 @@ reconnects on its own after a restart.
 
 - **Agents**: every agent on the machine, the one waiting for you first, with
   what it last said. Tap one for its screen, live, and swipe sideways for the
-  next. Type and tap Send, and it lands in that agent's input and is submitted;
+  next. Scroll up for what it did earlier: up to 2000 lines above the screen
+  (not under `lgtm agent`, which keeps no history). The wrap button reflows
+  long lines to the phone's width, and draws a terminal-wide rule as one line
+  rather than several. Type and tap Send, and it lands in that agent's input and is submitted;
   hold Send to insert without pressing Enter. Above the box are the keys a
   phone keyboard lacks, the likeliest first: the numbers and Esc when the agent
   asks you something, Esc and ^C while it works, arrows and Tab otherwise, and
@@ -590,7 +593,9 @@ reconnects on its own after a restart.
 - **Review**: the changed files of any repository an agent works in, starting
   with the one `lgtm serve` runs in; pick another from the title, or tap the
   review button on an agent's screen. Their diffs with syntax, and your
-  comments. Tap a line to comment on it. **Send** writes the review to that
+  comments. Tap a line to comment on it, and either keep the comment for the
+  review or send it to the agent now, as `path:line - comment`, the way `<C-s>`
+  in the compose box does here. **Send** writes the review to that
   repository's `.lgtm/phone-review-N.md` and tells the agent working there
   where it is. Comments follow the code as the agent edits it, as they
   do here.
@@ -849,8 +854,9 @@ review with its own `.gitignore`:
 | `.lgtm/phone-review-N.md` | what the phone's Send wrote |
 | `.lgtm/phone` | the phone attached right now, if one is |
 
-The phone's pairing token is the one thing kept outside a repository, in
-`~/.local/state/lgtm/serve-token`, because it belongs to the machine.
+The phone's pairing token and its audit log are the only things kept outside a
+repository, in `~/.local/state/lgtm/` as `serve-token` and `serve.log`,
+because they belong to the machine.
 
 Kill `lgtm` and restart it; you lose scroll position and nothing else.
 

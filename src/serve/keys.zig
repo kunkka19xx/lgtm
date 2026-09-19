@@ -29,12 +29,10 @@ fn names(key: Key) Names {
     };
 }
 
-/// What a `lgtm agent` pty is written.
 pub fn bytes(key: Key) []const u8 {
     return names(key).bytes;
 }
 
-/// The command that presses `key` in `pane`.
 pub fn argv(arena: Allocator, kind: Kind, pane: []const u8, key: Key) Allocator.Error![]const []const u8 {
     const n = names(key);
     return switch (kind) {

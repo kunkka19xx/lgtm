@@ -20,8 +20,7 @@ pub fn name(command: []const u8) []const u8 {
     return std.fs.path.basename(it.next() orelse "");
 }
 
-/// Opens `command` in `dir` in a running multiplexer, tmux first, else a detached tmux session.
-/// The new pane's id when the backend says it, else null and it shows up in the next list.
+/// tmux first, else herdr or kitty, else a detached tmux session; the new pane's id when the backend says it.
 pub fn open(gpa: Allocator, io: Io, arena: Allocator, reg: *panes.Registry, command: []const u8, dir: []const u8) Error!?[]const u8 {
     var words: std.ArrayList([]const u8) = .empty;
     var it = std.mem.tokenizeScalar(u8, command, ' ');

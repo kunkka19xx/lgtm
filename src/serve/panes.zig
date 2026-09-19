@@ -11,6 +11,7 @@ const tmux = @import("../bridge/tmux.zig");
 const wezterm = @import("../bridge/wezterm.zig");
 const kitty = @import("../bridge/kitty.zig");
 const herdr = @import("../bridge/herdr.zig");
+const scrape = @import("../bridge/scrape.zig");
 const proc = @import("../io/proc.zig");
 const local = @import("local.zig");
 const notify = @import("notify.zig");
@@ -19,7 +20,6 @@ const wire = @import("wire.zig");
 pub const Kind = enum { tmux, herdr, wezterm, kitty, pty };
 const kinds = @typeInfo(Kind).@"enum".fields.len;
 
-/// A listed pane, and what reaching it takes.
 pub const Entry = struct {
     pane: wire.Pane,
     kind: Kind,
@@ -40,7 +40,6 @@ fn nowMs(io: Io) i64 {
 pub const Registry = struct {
     gpa: Allocator,
     io: Io,
-    /// `[serve] panes = "all"`: list panes that are not agents too.
     all: bool,
     /// `[notify] url`; empty is off.
     url: []const u8,
@@ -176,7 +175,6 @@ pub const Registry = struct {
         if (changed) _ = self.seq.fetchAdd(1, .release);
     }
 
-    /// The listing, or an error when the backend is not there to ask.
     fn list(self: *Registry, kind: Kind, arena: Allocator) ![]Entry {
         if (kind == .pty) return fromLocal(arena, try local.list(self.gpa, arena, self.io, self.sock_dir));
         const jobs: ?[]const u8 = if (kind == .tmux or kind == .wezterm) blk: {
@@ -273,7 +271,6 @@ const Memory = struct {
         return got.value_ptr;
     }
 
-    /// Drops panes that were not listed this cycle.
     fn prune(m: *Memory, gpa: Allocator) void {
         var it = m.panes.iterator();
         while (it.next()) |kv| {
@@ -285,8 +282,7 @@ const Memory = struct {
         }
     }
 
-    /// The git repo holding `dir`, asked once per directory.
-    /// Owned by the process: a repo string outlives every batch that names it.
+    /// Asked once per directory, and owned by the process: a repo outlives every batch that names it.
     fn repo(m: *Memory, gpa: Allocator, io: Io, dir: []const u8) ![]const u8 {
         if (dir.len == 0) return "";
         if (m.repos.get(dir)) |r| return r;
@@ -300,7 +296,6 @@ const Memory = struct {
     }
 };
 
-/// A pane's screen, whichever backend holds it.
 pub fn read(gpa: Allocator, io: Io, arena: Allocator, e: Entry) error{ PaneGone, OutOfMemory }![]const u8 {
     if (e.kind == .pty) return local.read(arena, io, e.native);
     var br = bridgeFor(e.kind);
@@ -309,6 +304,27 @@ pub fn read(gpa: Allocator, io: Io, arena: Allocator, e: Entry) error{ PaneGone,
         error.OutOfMemory => error.OutOfMemory,
         else => error.PaneGone,
     };
+}
+
+/// The lines above a pane's screen, up to 2000, oldest first. `shown` is how many rows its screen had.
+pub fn history(gpa: Allocator, io: Io, arena: Allocator, e: Entry, shown: usize) ![]const u8 {
+    const exact = e.kind == .tmux or e.kind == .wezterm;
+    const argv: []const []const u8 = switch (e.kind) {
+        .tmux => &.{ "tmux", "capture-pane", "-p", "-S", "-2000", "-E", "-1", "-t", e.native },
+        .wezterm => &.{ "wezterm", "cli", "get-text", "--pane-id", e.native, "--start-line", "-2000", "--end-line", "-1" },
+        .herdr => &.{ "herdr", "pane", "read", e.native, "--source", "recent", "--lines", "2000" },
+        .kitty => &.{ "kitten", "@", "get-text", "--match", try std.fmt.allocPrint(arena, "id:{s}", .{e.native}), "--extent", "all" },
+        .pty => return "",
+    };
+    const out = try proc.run(gpa, io, argv, list_max);
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return error.Unavailable;
+    const text = scrape.trimBlankTail(try arena.dupe(u8, out.stdout));
+    if (exact) return text;
+    // The rest end with the screen itself, which comes in its own message.
+    var end = text.len;
+    for (0..shown) |_| end = std.mem.lastIndexOfScalar(u8, text[0..end], '\n') orelse 0;
+    return text[0..end];
 }
 
 pub fn bridgeFor(kind: Kind) bridge.Bridge {
@@ -360,6 +376,7 @@ fn parseTmux(arena: Allocator, text: []const u8) Allocator.Error![]Entry {
             .title = f.rest(),
             .dir = dir,
             .agent = current,
+            .stream = true,
         } });
     }
     return out.toOwnedSlice(arena);
@@ -468,7 +485,6 @@ fn parseForeground(arena: Allocator, text: []const u8) Allocator.Error!std.Strin
     return map;
 }
 
-/// Whether `ps` lists a process called `name`.
 fn running(ps: []const u8, name: []const u8) bool {
     var lines = std.mem.tokenizeScalar(u8, ps, '\n');
     while (lines.next()) |line| {
