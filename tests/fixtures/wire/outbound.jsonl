@@ -1,5 +1,5 @@
 {"type":"session","version":1,"host":"mac-mini","review":"/Users/me/code/lgtm","agents":["claude","codex"],"dirs":["/Users/me/code/api"]}
-{"type":"panes","panes":[{"id":"herdr:term_65bca13b","backend":"herdr","group":["w1","w1:t1"],"title":"claude","dir":"/Users/me/code/api","repo":"/Users/me/code/api","agent":"claude","state":"blocked","source":"herdr","read":true,"submit":true,"stream":false,"why":"","preview":["Do you want to proceed?","1. Yes","2. No"]},{"id":"tmux:4182:%12","backend":"tmux","group":["work","1:zsh"],"title":"✳ fix retry","dir":"","repo":"","agent":"claude","state":"working","source":"quiet","read":true,"submit":true,"stream":false,"why":"","preview":[]},{"id":"pty:5120","backend":"pty","group":[],"title":"","dir":"","repo":"","agent":"codex","state":"unknown","source":"none","read":true,"submit":true,"stream":true,"why":"","preview":[]}]}
+{"type":"panes","panes":[{"id":"herdr:term_65bca13b","backend":"herdr","group":["w1","w1:t1"],"title":"claude","dir":"/Users/me/code/api","repo":"/Users/me/code/api","agent":"claude","state":"blocked","source":"herdr","read":true,"submit":true,"stream":false,"why":"","preview":["Do you want to proceed?","1. Yes","2. No"],"cols":0},{"id":"tmux:4182:%12","backend":"tmux","group":["work","1:zsh"],"title":"✳ fix retry","dir":"","repo":"","agent":"claude","state":"working","source":"quiet","read":true,"submit":true,"stream":false,"why":"","preview":[],"cols":104},{"id":"pty:5120","backend":"pty","group":[],"title":"","dir":"","repo":"","agent":"codex","state":"unknown","source":"none","read":true,"submit":true,"stream":true,"why":"","preview":[],"cols":0}]}
 {"type":"screen","pane":"tmux:4182:%12","rows":["> fix the retry backoff","","● Reading server.zig","  \"quoted\" \\ tab\there"]}
 {"type":"scrollback","pane":"tmux:4182:%12","rows":["$ zig build test","All 987 tests passed."]}
 {"type":"sent","pane":"tmux:4182:%12","ok":true,"submitted":true,"why":""}
@@ -10,6 +10,7 @@
 {"type":"submitted","ok":true,"path":".lgtm/phone-review-1.md","count":1,"why":""}
 {"type":"spawned","ok":true,"pane":"tmux:4182:%31","why":""}
 {"type":"closed","ok":false,"pane":"pty:5120","why":"stop it where it runs"}
+{"type":"attached","ok":true,"pane":"tmux:4182:%12","path":"/Users/me/code/api/.lgtm/attachments/20260919-101500-shot.jpg","why":""}
 {"type":"error","code":"token","message":"wrong token","pane":""}
 {"type":"error","code":"pane_gone","message":"the pane is gone","pane":"tmux:4182:%12"}
 {"type":"pong"}

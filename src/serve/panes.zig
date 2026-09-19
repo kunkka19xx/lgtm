@@ -310,7 +310,8 @@ pub fn read(gpa: Allocator, io: Io, arena: Allocator, e: Entry) error{ PaneGone,
 pub fn history(gpa: Allocator, io: Io, arena: Allocator, e: Entry, shown: usize) ![]const u8 {
     const exact = e.kind == .tmux or e.kind == .wezterm;
     const argv: []const []const u8 = switch (e.kind) {
-        .tmux => &.{ "tmux", "capture-pane", "-p", "-S", "-2000", "-E", "-1", "-t", e.native },
+        // With no history tmux answers with the screen's first row, so its size comes first.
+        .tmux => &.{ "tmux", "display", "-p", "-t", e.native, "#{history_size}", ";", "capture-pane", "-p", "-S", "-2000", "-E", "-1", "-t", e.native },
         .wezterm => &.{ "wezterm", "cli", "get-text", "--pane-id", e.native, "--start-line", "-2000", "--end-line", "-1" },
         .herdr => &.{ "herdr", "pane", "read", e.native, "--source", "recent", "--lines", "2000" },
         .kitty => &.{ "kitten", "@", "get-text", "--match", try std.fmt.allocPrint(arena, "id:{s}", .{e.native}), "--extent", "all" },
@@ -319,7 +320,12 @@ pub fn history(gpa: Allocator, io: Io, arena: Allocator, e: Entry, shown: usize)
     const out = try proc.run(gpa, io, argv, list_max);
     defer out.deinit(gpa);
     if (out.exit_code != 0) return error.Unavailable;
-    const text = scrape.trimBlankTail(try arena.dupe(u8, out.stdout));
+    var text = scrape.trimBlankTail(try arena.dupe(u8, out.stdout));
+    if (e.kind == .tmux) {
+        const nl = std.mem.indexOfScalar(u8, text, '\n') orelse return "";
+        if (std.mem.eql(u8, text[0..nl], "0")) return "";
+        text = text[nl + 1 ..];
+    }
     if (exact) return text;
     // The rest end with the screen itself, which comes in its own message.
     var end = text.len;
@@ -352,7 +358,7 @@ fn preview(arena: Allocator, text: []const u8) Allocator.Error![]const []const u
     return arena.dupe([]const u8, rows[rows.len - n ..]);
 }
 
-const tmux_format = "#{pid}\t#{pane_id}\t#{session_name}\t#{window_index}:#{window_name}\t#{pane_current_path}\t#{pane_tty}\t#{pane_current_command}\t#{pane_title}";
+const tmux_format = "#{pid}\t#{pane_id}\t#{session_name}\t#{window_index}:#{window_name}\t#{pane_current_path}\t#{pane_tty}\t#{pane_current_command}\t#{pane_width}\t#{pane_title}";
 const tmux_argv = [_][]const u8{ "tmux", "list-panes", "-a", "-F", tmux_format };
 
 /// The server's pid is in the id because tmux reuses pane numbers after a restart.
@@ -369,6 +375,7 @@ fn parseTmux(arena: Allocator, text: []const u8) Allocator.Error![]Entry {
         const dir = f.next() orelse "";
         const tty = f.next() orelse "";
         const current = f.next() orelse "";
+        const cols = std.fmt.parseInt(u32, f.next() orelse "", 10) catch 0;
         try out.append(arena, .{ .kind = .tmux, .native = id, .tty = tty, .pane = .{
             .id = try std.fmt.allocPrint(arena, "tmux:{s}:{s}", .{ pid, id }),
             .backend = "tmux",
@@ -377,6 +384,7 @@ fn parseTmux(arena: Allocator, text: []const u8) Allocator.Error![]Entry {
             .dir = dir,
             .agent = current,
             .stream = true,
+            .cols = cols,
         } });
     }
     return out.toOwnedSlice(arena);
@@ -415,7 +423,7 @@ fn parseHerdr(arena: Allocator, text: []const u8) ![]Entry {
 
 /// The tty is in the id because WezTerm's pane numbers restart with the GUI.
 fn parseWezterm(arena: Allocator, text: []const u8) ![]Entry {
-    const P = struct { pane_id: u64, tab_id: u64 = 0, workspace: []const u8 = "", title: []const u8 = "", cwd: []const u8 = "", tty_name: []const u8 = "" };
+    const P = struct { pane_id: u64, tab_id: u64 = 0, workspace: []const u8 = "", title: []const u8 = "", cwd: []const u8 = "", tty_name: []const u8 = "", size: struct { cols: u32 = 0 } = .{} };
     const list = try std.json.parseFromSliceLeaky([]const P, arena, text, .{ .ignore_unknown_fields = true });
     var out: std.ArrayList(Entry) = .empty;
     for (list) |p| {
@@ -425,6 +433,7 @@ fn parseWezterm(arena: Allocator, text: []const u8) ![]Entry {
             .group = try arena.dupe([]const u8, &.{ p.workspace, try std.fmt.allocPrint(arena, "tab {d}", .{p.tab_id}) }),
             .title = p.title,
             .dir = urlPath(p.cwd),
+            .cols = p.size.cols,
         } });
     }
     return out.toOwnedSlice(arena);
@@ -433,7 +442,7 @@ fn parseWezterm(arena: Allocator, text: []const u8) ![]Entry {
 /// The shell's pid is in the id because kitty's window numbers restart with kitty.
 fn parseKitty(arena: Allocator, text: []const u8) ![]Entry {
     const Proc = struct { cmdline: []const []const u8 = &.{} };
-    const W = struct { id: u64, title: []const u8 = "", cwd: []const u8 = "", pid: u64 = 0, foreground_processes: []const Proc = &.{} };
+    const W = struct { id: u64, title: []const u8 = "", cwd: []const u8 = "", pid: u64 = 0, columns: u32 = 0, foreground_processes: []const Proc = &.{} };
     const T = struct { title: []const u8 = "", windows: []const W = &.{} };
     const O = struct { id: u64 = 0, tabs: []const T = &.{} };
     const list = try std.json.parseFromSliceLeaky([]const O, arena, text, .{ .ignore_unknown_fields = true });
@@ -451,6 +460,7 @@ fn parseKitty(arena: Allocator, text: []const u8) ![]Entry {
             .title = w.title,
             .dir = w.cwd,
             .agent = if (bridge.Bridge.looksLikeAgent(agent)) agent else "",
+            .cols = w.columns,
         } });
     };
     return out.toOwnedSlice(arena);
@@ -521,7 +531,7 @@ const testing = std.testing;
 test "tmux panes carry the server in their id and their session and window as the group" {
     var a: std.heap.ArenaAllocator = .init(testing.allocator);
     defer a.deinit();
-    const got = try parseTmux(a.allocator(), "4182\t%12\twork\t1:zsh\t/code/api\t/dev/ttys006\t2.1.274\t\xe2\x9c\xb3 fix\tretry\nbad line\n");
+    const got = try parseTmux(a.allocator(), "4182\t%12\twork\t1:zsh\t/code/api\t/dev/ttys006\t2.1.274\t104\t\xe2\x9c\xb3 fix\tretry\nbad line\n");
     try testing.expectEqual(@as(usize, 1), got.len);
     const p = got[0].pane;
     try testing.expectEqualStrings("tmux:4182:%12", p.id);
@@ -531,6 +541,7 @@ test "tmux panes carry the server in their id and their session and window as th
     try testing.expectEqualStrings("/code/api", p.dir);
     try testing.expectEqualStrings("\xe2\x9c\xb3 fix\tretry", p.title);
     try testing.expectEqualStrings("ttys006", ttyName(got[0].tty));
+    try testing.expectEqual(@as(u32, 104), p.cols);
 }
 
 test "herdr's list gives the agent and its state, and the terminal makes the id" {

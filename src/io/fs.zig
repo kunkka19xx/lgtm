@@ -122,6 +122,22 @@ pub fn appendSecretFile(io: Io, path: []const u8, bytes: []const u8) !void {
     try file.writePositionalAll(io, bytes, try file.length(io));
 }
 
+/// Writes or appends `sub` under `root`, creating its directories; a `.lgtm/` made here gets its self-ignore.
+pub fn writeUnder(io: Io, root: []const u8, sub: []const u8, bytes: []const u8, append: bool) !void {
+    var dir = try Dir.cwd().openDir(io, root, .{});
+    defer dir.close(io);
+    if (std.fs.path.dirname(sub)) |parent| dir.createDirPath(io, parent) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => |e| return e,
+    };
+    if (std.mem.startsWith(u8, sub, state_dir ++ "/")) {
+        dir.writeFile(io, .{ .sub_path = state_dir ++ "/.gitignore", .data = self_ignore, .flags = .{ .exclusive = true } }) catch {};
+    }
+    const file = try dir.createFile(io, sub, .{ .truncate = !append });
+    defer file.close(io);
+    try file.writePositionalAll(io, bytes, if (append) try file.length(io) else 0);
+}
+
 pub fn deleteFile(io: Io, path: []const u8) void {
     Dir.cwd().deleteFile(io, path) catch {};
 }

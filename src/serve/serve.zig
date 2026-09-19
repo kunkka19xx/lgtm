@@ -11,6 +11,7 @@ const fs = @import("../io/fs.zig");
 const net = @import("../io/net.zig");
 const proc = @import("../io/proc.zig");
 const agent = @import("agent.zig");
+const attach = @import("attach.zig");
 const control = @import("control.zig");
 const keys = @import("keys.zig");
 const local = @import("local.zig");
@@ -363,6 +364,7 @@ const Daemon = struct {
         var say_buf: [128]u8 = undefined;
         var say_to: []const u8 = "";
         var beat: i64 = 0;
+        var upload: attach.Upload = .{};
         // Something was typed into a pane, so its screen is worth reading now.
         var poke = false;
 
@@ -503,6 +505,30 @@ const Daemon = struct {
                         if (why == null) d.audit(device.?, "close", c.pane, e.pane.agent);
                         d.reg.say("close      {s}{s}", .{ c.pane, if (why == null) "" else ", refused" });
                         wire.write(out, .{ .closed = .{ .ok = why == null, .pane = c.pane, .why = why orelse "" } }) catch break :serving;
+                    },
+                    .attach => |at| {
+                        const e = view.find(at.pane) orelse {
+                            gone(out, at.pane) catch break :serving;
+                            continue;
+                        };
+                        // Inside the repo the agent can read it without asking; outside one, beside the token.
+                        const in_repo = e.pane.repo.len > 0;
+                        const root = if (in_repo) e.pane.repo else std.fs.path.dirname(d.audit_path) orelse ".";
+                        const secs = Io.Timestamp.now(d.io, .real).toSeconds();
+                        const saved = upload.take(d.io, arena, root, in_repo, at.name, at.part, at.data, at.last, secs) catch |err| {
+                            wire.write(out, .{ .attached = .{ .ok = false, .pane = at.pane, .why = switch (err) {
+                                error.NotAnImage => "only a jpg, png, heic, gif or webp image",
+                                error.OutOfOrder => "the image arrived out of order; send it again",
+                                error.TooBig => "an image over 20 MB",
+                                else => "the image could not be saved",
+                            } } }) catch break :serving;
+                            continue;
+                        } orelse continue;
+                        const sent = d.deliver(arena, e, saved, false);
+                        d.audit(device.?, "attach", at.pane, saved);
+                        d.reg.say("attach     {s}", .{saved});
+                        wire.write(out, .{ .attached = .{ .ok = sent.ok, .pane = at.pane, .path = saved, .why = sent.why } }) catch break :serving;
+                        poke = true;
                     },
                     .open, .comment, .uncomment, .submit => {
                         const rv = review orelse {
@@ -886,6 +912,7 @@ test {
     _ = @import("reviewing.zig");
     _ = @import("vt.zig");
     _ = agent;
+    _ = attach;
     _ = control;
     _ = keys;
     _ = spawn;

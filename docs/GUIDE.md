@@ -583,13 +583,16 @@ reconnects on its own after a restart.
   what it last said. Tap one for its screen, live, and swipe sideways for the
   next. Scroll up for what it did earlier: up to 2000 lines above the screen
   (not under `lgtm agent`, which keeps no history). The wrap button reflows
-  long lines to the phone's width, and draws a terminal-wide rule as one line
-  rather than several. Type and tap Send, and it lands in that agent's input and is submitted;
-  hold Send to insert without pressing Enter. Above the box are the keys a
-  phone keyboard lacks, the likeliest first: the numbers and Esc when the agent
-  asks you something, Esc and ^C while it works, arrows and Tab otherwise, and
-  the rest behind the keyboard button. Esc and ^C wait a moment, so a second
-  tap takes them back.
+  long lines to the phone's width: text the agent broke at the terminal's edge
+  joins back into one paragraph, and a terminal-wide rule is drawn as one line. Type and tap Send, and it lands in that agent's input and is submitted;
+  hold Send to insert without pressing Enter. The paperclip sends a photo or a
+  new picture: it is saved in the agent's repository under
+  `.lgtm/attachments/`, and its path lands in the agent's input for you to
+  write around, which is how Claude Code reads an image. The keyboard bubble beside the
+  box opens a 3x3 grid right above it: the arrows as a d-pad, Esc and ^C
+  above them, Shift-Tab and Tab below, or a keypad of the agent's choices
+  while it waits for you. Esc and ^C wait a moment, so a second tap takes
+  them back.
 - **Review**: the changed files of any repository an agent works in, starting
   with the one `lgtm serve` runs in; pick another from the title, or tap the
   review button on an agent's screen. Their diffs with syntax, and your
@@ -853,6 +856,7 @@ review with its own `.gitignore`:
 | `.lgtm/phone.jsonl` | the phone's comments |
 | `.lgtm/phone-review-N.md` | what the phone's Send wrote |
 | `.lgtm/phone` | the phone attached right now, if one is |
+| `.lgtm/attachments/` | images the phone sent an agent |
 
 The phone's pairing token and its audit log are the only things kept outside a
 repository, in `~/.local/state/lgtm/` as `serve-token` and `serve.log`,

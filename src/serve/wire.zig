@@ -32,6 +32,8 @@ pub const Inbound = union(enum) {
     /// `agent` is a name from `session.agents`, `dir` one from `session.dirs` or a pane's `repo`.
     spawn: struct { agent: []const u8, dir: []const u8 },
     close: struct { pane: []const u8 },
+    /// One base64 chunk of an image for `pane`; `part` 0 starts it, `last` ends it.
+    attach: struct { pane: []const u8, name: []const u8, part: u32, data: []const u8, last: bool },
 };
 
 pub const ParseError = error{ Malformed, UnknownType, MissingField } || Allocator.Error;
@@ -46,6 +48,10 @@ const Raw = struct {
     key: ?[]const u8 = null,
     agent: ?[]const u8 = null,
     dir: ?[]const u8 = null,
+    name: ?[]const u8 = null,
+    part: u32 = 0,
+    data: ?[]const u8 = null,
+    last: bool = false,
     text: ?[]const u8 = null,
     submit: bool = false,
     path: ?[]const u8 = null,
@@ -97,6 +103,13 @@ pub fn parse(arena: Allocator, line: []const u8) ParseError!Inbound {
             .dir = raw.dir orelse return error.MissingField,
         } },
         .close => .{ .close = .{ .pane = raw.pane orelse return error.MissingField } },
+        .attach => .{ .attach = .{
+            .pane = raw.pane orelse return error.MissingField,
+            .name = raw.name orelse return error.MissingField,
+            .part = raw.part,
+            .data = raw.data orelse return error.MissingField,
+            .last = raw.last,
+        } },
     };
 }
 
@@ -124,6 +137,8 @@ pub const Pane = struct {
     /// Why `read` or `submit` is false, in words a person can act on.
     why: []const u8 = "",
     preview: []const []const u8 = &.{},
+    /// The pane's width in columns, 0 when the backend does not say.
+    cols: u32 = 0,
 };
 
 pub const FileEntry = struct { path: []const u8, status: []const u8, added: u32, removed: u32, comments: u32 };
@@ -159,6 +174,8 @@ pub const Outbound = union(enum) {
     /// `pane` is the new pane's id, or empty when it only shows up in the next `panes`.
     spawned: struct { ok: bool, pane: []const u8 = "", why: []const u8 = "" },
     closed: struct { ok: bool, pane: []const u8, why: []const u8 = "" },
+    /// `path` is where the image was saved, and what was typed into the agent's input.
+    attached: struct { ok: bool, pane: []const u8, path: []const u8 = "", why: []const u8 = "" },
     @"error": struct { code: Code, message: []const u8, pane: []const u8 = "" },
     pong,
 };
@@ -202,7 +219,7 @@ const outbound_fixture = [_]Outbound{
             .source = .herdr,
             .preview = &.{ "Do you want to proceed?", "1. Yes", "2. No" },
         },
-        .{ .id = "tmux:4182:%12", .backend = "tmux", .group = &.{ "work", "1:zsh" }, .title = "\u{2733} fix retry", .agent = "claude", .state = .working, .source = .quiet },
+        .{ .id = "tmux:4182:%12", .backend = "tmux", .group = &.{ "work", "1:zsh" }, .title = "\u{2733} fix retry", .agent = "claude", .state = .working, .source = .quiet, .cols = 104 },
         .{ .id = "pty:5120", .backend = "pty", .agent = "codex", .stream = true },
     } } },
     .{ .screen = .{ .pane = "tmux:4182:%12", .rows = &.{ "> fix the retry backoff", "", "\u{25cf} Reading server.zig", "  \"quoted\" \\ tab\there" } } },
@@ -225,6 +242,7 @@ const outbound_fixture = [_]Outbound{
     .{ .submitted = .{ .ok = true, .path = ".lgtm/phone-review-1.md", .count = 1 } },
     .{ .spawned = .{ .ok = true, .pane = "tmux:4182:%31" } },
     .{ .closed = .{ .ok = false, .pane = "pty:5120", .why = "stop it where it runs" } },
+    .{ .attached = .{ .ok = true, .pane = "tmux:4182:%12", .path = "/Users/me/code/api/.lgtm/attachments/20260919-101500-shot.jpg" } },
     .{ .@"error" = .{ .code = .token, .message = "wrong token" } },
     .{ .@"error" = .{ .code = .pane_gone, .message = "the pane is gone", .pane = "tmux:4182:%12" } },
     .pong,
@@ -271,6 +289,8 @@ test "every inbound message in the fixture parses" {
     const now = (try parse(a.allocator(), lines.next().?)).comment;
     try testing.expect(now.new == 14 and std.mem.eql(u8, now.pane, "tmux:4182:%12"));
     try testing.expect(c.pane.len == 0);
+    const at = (try parse(a.allocator(), lines.next().?)).attach;
+    try testing.expect(at.part == 0 and !at.last and std.mem.eql(u8, at.name, "shot.jpg") and std.mem.eql(u8, at.data, "/9j/4AAQ"));
     try testing.expect(lines.next() == null);
 }
 

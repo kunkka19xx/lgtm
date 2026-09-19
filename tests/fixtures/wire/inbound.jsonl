@@ -12,3 +12,4 @@
 {"type":"spawn","agent":"claude","dir":"/Users/me/code/api"}
 {"type":"close","pane":"tmux:4182:%31"}
 {"type":"comment","path":"src/retry.zig","new":14,"old":0,"text":"cap it at 5","pane":"tmux:4182:%12"}
+{"type":"attach","pane":"tmux:4182:%12","name":"shot.jpg","part":0,"data":"/9j/4AAQ","last":false}
