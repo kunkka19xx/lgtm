@@ -42,6 +42,7 @@ const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
 const sql_lang = @import("lang/sql.zig");
 const markdown_lang = @import("lang/markdown.zig");
+const shell_lang = @import("lang/shell.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -64,6 +65,7 @@ pub const languages = [_]*const LangDef{
     &dockerfile_lang.def,
     &sql_lang.def,
     &markdown_lang.def,
+    &shell_lang.def,
 };
 
 /// The language a path is in, by extension or by name, lower-cased.
@@ -104,8 +106,10 @@ fn lowered(text: []const u8, buf: *[max_name]u8) []const u8 {
 /// whole or up to its first dot, because the suffix there says which build it
 /// is for and never which language it is in.
 fn byName_(base: []const u8, buf: *[max_name]u8) ?*const LangDef {
-    const dot = std.mem.indexOfScalar(u8, base, '.');
-    const stem = if (dot) |n| base[0..n] else base;
+    // A leading dot is not part of the name: `.bashrc` is `bashrc`.
+    const named = if (base.len > 1 and base[0] == '.') base[1..] else base;
+    const dot = std.mem.indexOfScalar(u8, named, '.');
+    const stem = if (dot) |n| named[0..n] else named;
     if (stem.len == 0 or stem.len > max_name) return null;
     const want = lowered(stem, buf);
 
@@ -418,6 +422,13 @@ test "a file known by name rather than by extension" {
     try testing.expect(forPath("dockerfile/notes.txt") == null);
     try testing.expect(forPath("Dockerfiles") == null);
     try testing.expect(forPath(".dockerignore") == null);
+
+    // A shell script is as often a dotfile as a `.sh`.
+    try testing.expectEqualStrings("shell", forPath("scripts/install.sh").?.name);
+    try testing.expectEqualStrings("shell", forPath("home/.bashrc").?.name);
+    try testing.expectEqualStrings("shell", forPath(".zshrc").?.name);
+    try testing.expectEqualStrings("shell", forPath("aur/PKGBUILD").?.name);
+    try testing.expect(forPath(".zshrc/notes.txt") == null);
 }
 
 test "guard rails fall back to plain rather than failing" {

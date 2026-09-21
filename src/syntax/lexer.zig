@@ -470,6 +470,7 @@ const Scan = struct {
 
             for (self.def.line_comment) |lc| {
                 if (!self.match(lc)) continue;
+                if (self.def.comment_word and self.i > 0 and !wordBreak(self.text[self.i - 1])) continue;
                 const start = self.i;
                 self.toLineEnd();
                 return self.emit(start, self.i, .comment);
@@ -1499,6 +1500,7 @@ const json_lang = @import("lang/json.zig");
 const yaml_lang = @import("lang/yaml.zig");
 const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
+const shell_lang = @import("lang/shell.zig");
 const sql_lang = @import("lang/sql.zig");
 const markdown_lang = @import("lang/markdown.zig");
 
@@ -1523,6 +1525,11 @@ fn isDelimRow(line: []const u8) bool {
 
 fn isSpace(c: u8) bool {
     return c == ' ' or c == '\t' or c == '\n' or c == '\r';
+}
+
+/// What a word may start after: whitespace, or an operator it can follow without one.
+fn wordBreak(c: u8) bool {
+    return isSpace(c) or c == ';' or c == '&' or c == '|' or c == '(';
 }
 
 fn expectTiles(runs: []const Run, text: []const u8, from: u32, to: u32) !void {
@@ -3478,6 +3485,44 @@ test "a yaml key needs the space its grammar asks for" {
     try expectTiles(runs, src, 0, @intCast(src.len));
     try testing.expectEqual(Kind.text, kindOf(runs, src, "dbdata").?);
     try testing.expectEqual(Kind.type_name, kindOf(runs, src, "name").?);
+}
+
+test "a shell script: both function forms, and a # that is not a comment" {
+    const src =
+        \\#!/usr/bin/env bash
+        \\set -euo pipefail
+        \\
+        \\deploy-app() {
+        \\  local tag="$1"
+        \\  echo 'it\'s quoted' >&2
+        \\  nix build --no-link .#lgtm 2>&1
+        \\}
+        \\
+        \\function rollback {
+        \\  if [ -n "$tag" ]; then kill %1; fi
+        \\}
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&shell_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "#!/usr/bin/env bash").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "local").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "function").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "echo").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"$1\"").?);
+    // No escape in single quotes: the literal ends at the backslashed one.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "'it\\'").?);
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "lgtm 2>&1").?);
+
+    // Both forms name the lines under them, which is what a hunk header says.
+    var st = try lx.structure(gpa, src);
+    defer st.deinit(gpa);
+    try testing.expectEqualStrings("deploy-app", st.enclosingFn(5).?.name);
+    try testing.expectEqualStrings("rollback", st.enclosingFn(10).?.name);
 }
 
 test "a toml table names the lines under it" {

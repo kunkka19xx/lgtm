@@ -66,6 +66,9 @@ pub const LangDef = struct {
     /// `Dockerfile.dev` is one too.
     filenames: []const []const u8 = &.{},
     line_comment: []const []const u8 = &.{},
+    /// Shell: the marker opens a comment only at the start of a word, or
+    /// `nix build .#lgtm` and `[ $# -gt 0 ]` read as one to end of line.
+    comment_word: bool = false,
     block_comment: ?BlockComment = null,
     /// Zig's `\\`: a string literal that runs to the end of the line.
     line_string: []const []const u8 = &.{},
