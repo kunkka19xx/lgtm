@@ -27,6 +27,11 @@ fn colour(kind: lexer.Kind) []const u8 {
         .type_name => "\x1b[38;5;180m",
         .fn_name => "\x1b[38;5;75m",
         .punct => "\x1b[38;5;244m",
+        .strong => "\x1b[1m",
+        .emphasis => "\x1b[3m",
+        .strikethrough => "\x1b[9m",
+        .list_mark => "\x1b[38;5;215m",
+        .heading => "\x1b[1;38;5;180m",
     };
 }
 
