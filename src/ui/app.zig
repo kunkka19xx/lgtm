@@ -534,6 +534,10 @@ pub const App = struct {
         for (before.items) |b| {
             const now = self.review.buffersFor(b.path).work orelse continue;
             self.comments.carry(b.path, b.text, now.bytes) catch {};
+            // And the other direction: a remark the map dropped earlier is
+            // live again the moment its line is back, rather than staying
+            // stale for the rest of the checkout.
+            self.comments.revive(b.path, now.bytes);
         }
         notes.saveComments(self);
 

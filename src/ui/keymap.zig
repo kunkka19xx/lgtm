@@ -535,6 +535,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('r'), c('c') }, .command = .thread_reply, .desc = "reply to the comment here, on the request", .group = .comment },
     .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
     .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
+    // The same key the list and the box post with, over the remark the cursor
+    // is on. `<C-s>` reads the same way one line up: the whole review there,
+    // one remark where a remark is what is in front of you.
+    .{ .chords = &.{ctrl('p')}, .command = .comment_post_one, .modes = Modes.normal_only, .desc = "post the comment here to the pull request", .group = .comment },
     .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .comment },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
@@ -698,7 +702,10 @@ pub const default_bindings: []const Binding = &.{
     // Somebody else's remark, open to be read. The same two words as the
     // overlay, so answering one does not depend on which of them it was read
     // in. Everything else there is a motion over the text.
-    .{ .chords = &.{c('r')}, .command = .thread_reply, .modes = Modes.view_only, .desc = "reply", .group = .comment },
+    // Undescribed on purpose: a remark with a thread opens in the overlay, so
+    // the only ones that reach this box have nothing to answer. The key stays
+    // for the hand that reaches for it, and says why there is nothing to do.
+    .{ .chords = &.{c('r')}, .command = .thread_reply, .modes = Modes.view_only },
     .{ .chords = &.{c(event.code.escape)}, .command = .compose_cancel, .modes = Modes.view_only },
     .{ .chords = &.{c('q')}, .command = .compose_cancel, .modes = Modes.view_only },
 };

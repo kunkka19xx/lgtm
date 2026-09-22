@@ -566,9 +566,6 @@ pub fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
     return diffText(arena, f, null);
 }
 
-/// As `diffHead`, from the hunk that contains `at` rather than the first.
-/// What a comment is *about*, which is the one thing its row does not
-/// already say.
 /// Everything said in one conversation, for the filter to reach. The row
 /// shows only the message leading it, and a word from a reply must still find
 /// it, or folding would be hiding.
@@ -576,15 +573,16 @@ fn conversationText(app: *App, arena: Allocator, n: comments_mod.Comment) ?[]con
     var buf: [thread_mod.max_messages]*comments_mod.Comment = undefined;
     var out: std.ArrayList(u8) = .empty;
     out.print(arena, "{s}:{d}", .{ n.path, n.line }) catch return null;
-    const t = n.thread();
-    for (app.comments.allAt(n.path, n.line, &buf)) |c| {
-        if (c.thread() != t) continue;
+    for (app.comments.threadAt(n, &buf)) |c| {
         var one: [256]u8 = undefined;
         out.print(arena, "  {s} {s}", .{ c.author, compose_mod.flatten(&one, c.body) }) catch break;
     }
     return out.items;
 }
 
+/// As `diffHead`, from the hunk that contains `at` rather than the first.
+/// What a comment is *about*, which is the one thing its row does not
+/// already say.
 pub fn diffText(arena: Allocator, f: diff.FileDiff, at: ?u32) []const u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines: usize = 0;

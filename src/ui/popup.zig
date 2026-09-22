@@ -545,6 +545,39 @@ test "the popup footer marks exactly its key names, and no other text" {
     }
 }
 
+test "the box's footer spends its room on what the remark is for" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var screen = try vaxis.Screen.init(testing.allocator, .{ .cols = 80, .rows = 4, .x_pixel = 0, .y_pixel = 0 });
+    defer screen.deinit(testing.allocator);
+    const win: vaxis.Window = .{ .x_off = 0, .y_off = 0, .parent_x_off = 0, .parent_y_off = 0, .width = 80, .height = 4, .screen = &screen };
+    const f: Frame = .{ .win = win, .arena = arena, .theme = @import("theme.zig").default, .glyphs = frame_mod.Glyphs.unicode };
+
+    const on_pr: ComposeView = .{
+        .text = "",
+        .kind = .{ .fresh = .{ .path = "a.zig", .line = 2 } },
+        .posts = true,
+        .bindings = keymap.default_bindings,
+    };
+    const keys = try composeKeys(f, on_pr);
+
+    // Posting leads, because a remark that is never posted is never read -
+    // and the footer sheds from the end, which is where it used to sit.
+    try testing.expectEqualStrings("save", keys[0].desc);
+    try testing.expectEqualStrings("save + post", keys[1].desc);
+    try testing.expectEqualStrings("<C-p>", keys[1].keys);
+    try testing.expectEqualStrings("save + send", keys[2].desc);
+    // `<Esc>` is in `?`, not along the bottom of every box.
+    for (keys) |k| try testing.expect(!std.mem.eql(u8, k.desc, "cancel"));
+
+    // No request to post to, so the key that needs one is not advertised.
+    var off_pr = on_pr;
+    off_pr.posts = false;
+    for (try composeKeys(f, off_pr)) |k| try testing.expect(!std.mem.eql(u8, k.desc, "save + post"));
+}
+
 test "a footer too wide for the box sheds whole groups, and never all of them" {
     var a: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer a.deinit();
@@ -1345,9 +1378,10 @@ pub fn drawCompose(f: Frame, v: frame_mod.ComposeView, top: u16, height: u16) Al
 /// what the box is for. A footer that said "send" would promise the wrong thing
 /// about where the text is about to go.
 ///
-/// `<Esc>` comes second on purpose: the footer drops trailing groups that do
-/// not fit, and a box whose only visible keys are ways to commit reads as one
-/// there is no way out of.
+/// `<Esc>` is not in it. Every modal box in the world leaves on `<Esc>`, and
+/// the row is too short to spend on the one key nobody has to be told: the
+/// footer sheds from the end, and what it used to shed was `save + post` - the
+/// key that decides whether a remark ever reaches the request.
 ///
 /// `o` and `i` are written rather than looked up, because they are vim's and
 /// stay vim's - the box's *motions* are not remappable, only the things it
@@ -1361,10 +1395,11 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
         .agent, .view => "send",
     };
 
-    // Read only, so the footer is the overlay's two words rather than the
-    // box's: nothing here is typed and nothing here is saved.
+    // Read only, so the footer is one word rather than the box's row: nothing
+    // here is typed and nothing here is saved. Not "reply" either - a remark
+    // with a thread opens in the overlay now, so the only ones that reach this
+    // box are the ones with nothing to answer.
     if (v.kind == .view) {
-        try add(f, v.bindings, .note_view, &out, .thread_reply, "reply");
         try add(f, v.bindings, .note_view, &out, .compose_cancel, "close");
         return out.toOwnedSlice(f.arena);
     }
@@ -1374,16 +1409,17 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
         .{ .keys = "i", .desc = "insert" },
     });
     try add(f, v.bindings, .note_input, &out, .compose_submit, commit);
-    try add(f, v.bindings, .note_input, &out, .compose_cancel, "cancel");
-    // Before the rest, because the footer sheds groups from the end and this
-    // is the one a reader needs on their second sentence.
-    if (!v.normal) try add(f, v.bindings, .note_input, &out, .compose_newline, "line");
     // Only the two that write a remark here: an amend and a reply go to the
-    // forge and nowhere else, so "save + send" would promise nothing.
+    // forge and nowhere else, so "save + send" would promise nothing. Posting
+    // leads, because it is what puts the remark where the author will read it
+    // - and what gives it a thread to be answered on.
     if (v.kind.savesHere()) {
-        try add(f, v.bindings, .note_input, &out, .compose_send_now, "save + send");
         if (v.posts) try add(f, v.bindings, .note_input, &out, .compose_post_now, "save + post");
+        try add(f, v.bindings, .note_input, &out, .compose_send_now, "save + send");
     }
+    // After them: Enter saves, so a second line needs a key - but a reader
+    // wanting one is already typing and will find it in `?`.
+    if (!v.normal) try add(f, v.bindings, .note_input, &out, .compose_newline, "line");
     if (!v.normal) {
         try add(f, v.bindings, .note_input, &out, .compose_presets, "preset");
         if (!v.kind.isComment()) try add(f, v.bindings, .note_input, &out, .compose_mention, "file");

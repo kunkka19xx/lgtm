@@ -453,9 +453,9 @@ rule is easier to hold than fourteen more rows.
 | `comment_send_one` | `<C-s>` |
 | `comment_send_all` | `<C-x>` |
 | `comment_drop` | `<C-d>` |
-| `comment_post_one` | `<C-p>` |
+| `comment_post_one` | `<C-p>`, in the diff and in the comment list |
 | `compose_post_now` | `<C-p>` |
-| `thread_reply` | `<Space>rc`, and `r` in the thread and in a remark opened to read |
+| `thread_reply` | `<Space>rc`, `r` in the thread, and `r` in a remark read in the box |
 | `thread_select` | `<CR>` in the thread |
 | `thread_close` | `<Esc>` or `q` in the thread |
 

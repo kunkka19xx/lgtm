@@ -24,6 +24,16 @@ const render = @import("render.zig");
 const template = @import("../bridge/template.zig");
 const walks = @import("walks.zig");
 
+/// What is in the box, into a caller's buffer. It has to be copied before the
+/// box closes: `closeCompose` declares the buffer empty, and a slice of it
+/// read afterwards is a slice of nothing. A note keeps its line breaks, so
+/// this is the text rather than the flattened line.
+fn copyTyped(app: *const App, buf: *[compose_mod.max_bytes]u8) []const u8 {
+    const typed = app.compose.text();
+    @memcpy(buf[0..typed.len], typed);
+    return buf[0..typed.len];
+}
+
 pub fn closeCompose(app: *App) void {
     app.compose.close();
     app.preset_index = null;
@@ -153,11 +163,7 @@ pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !voi
     }
 }
 
-/// `<C-s>` from inside a comment: save it *and* send it, so a remark
-/// that cannot wait for the batch does not have to be typed, saved,
-/// found again and sent. It is the same key that submits the whole
-/// review from normal mode, which reads as "hand this over" either way.
-/// App.What the box holds, saved as a comment. Null when there was nothing to
+/// What the box holds, saved as a comment. Null when there was nothing to
 /// save, or when the box is not holding one.
 ///
 /// Shared by the two keys that save and then do something with it, which
@@ -168,9 +174,7 @@ pub fn saveComposedComment(app: *App, body: u16) !?u32 {
     if (!app.compose_for.savesHere()) return null;
 
     var raw_buf: [compose_mod.max_bytes]u8 = undefined;
-    const typed = app.compose.text();
-    @memcpy(raw_buf[0..typed.len], typed);
-    const raw = raw_buf[0..typed.len];
+    const raw = copyTyped(app, &raw_buf);
     if (raw.len == 0) {
         app.notice.set("nothing to save", .{});
         return null;
@@ -178,21 +182,34 @@ pub fn saveComposedComment(app: *App, body: u16) !?u32 {
     const what = app.compose_for;
     closeCompose(app);
 
-    var id: u32 = 0;
-    switch (what) {
-        .edit => |eid| {
-            try app.comments.edit(eid, raw);
-            id = eid;
-        },
-        .fresh => |spot| id = try app.comments.addFull(spot.path, spot.line, raw, notes.textOfNewLine(app, spot.line), spot.deleted, spot.span),
-        else => {},
-    }
+    const id = try storeComposed(app, what, raw);
     notes.saveComments(app);
     app.rebuildRows(.line) catch {};
     app.clampScroll(body);
     return if (id == 0) null else id;
 }
 
+/// The typed text into the store, as whatever the box was pointed at. Zero
+/// when it was pointed at something the store does not hold. Both keys that
+/// save go through here, so a new field on `fresh` cannot reach one and miss
+/// the other.
+fn storeComposed(app: *App, what: app_mod.ComposeFor, raw: []const u8) !u32 {
+    return switch (what) {
+        .edit => |id| blk: {
+            try app.comments.edit(id, raw);
+            break :blk id;
+        },
+        // The line's text goes with the note, so a restart can find it again
+        // when the file moved underneath.
+        .fresh => |at| try app.comments.addFull(at.path, at.line, raw, notes.textOfNewLine(app, at.line), at.deleted, at.span),
+        else => 0,
+    };
+}
+
+/// `<C-s>` from inside a comment: save it *and* send it, so a remark that
+/// cannot wait for the batch does not have to be typed, saved, found again and
+/// sent. It is the same key that submits the whole review from normal mode,
+/// which reads as "hand this over" either way.
 pub fn composeSendNow(app: *App, body: u16) !void {
     if (!app.compose_for.isComment()) {
         // Not a comment: the key means the same thing the plain send does.
@@ -201,29 +218,7 @@ pub fn composeSendNow(app: *App, body: u16) !void {
     }
     const id = try saveComposedComment(app, body) orelse return;
     const n = app.comments.find(id) orelse return;
-
-    // Handed over, so it is sent: it drops out of the next `review-N.md`
-    // rather than asking twice, and editing it reopens it the way editing
-    // any sent comment does.
-    n.state = .sent;
-    app.comments.dirty = true;
-    notes.saveComments(app);
-
-    var buf: [compose_mod.max_bytes]u8 = undefined;
-    var flat: [compose_mod.max_bytes]u8 = undefined;
-    const one = compose_mod.flatten(&flat, n.body);
-    var where: [64]u8 = undefined;
-    const at = if (n.span > 1)
-        std.fmt.bufPrint(&where, "{s}:{d}-{d}", .{ n.path, n.line, n.end() }) catch n.path
-    else
-        std.fmt.bufPrint(&where, "{s}:{d}", .{ n.path, n.line }) catch n.path;
-    const line = if (app.pr.number == 0)
-        std.fmt.bufPrint(&buf, "{s} - {s}", .{ at, one }) catch one
-    else
-        std.fmt.bufPrint(&buf, "PR #{d} {s} - {s}", .{ app.pr.number, at, one }) catch one;
-    app.outgoing.clearRetainingCapacity();
-    try app.outgoing.appendSlice(app.gpa, line);
-    app.want_send = .send;
+    try notes.sendOne(app, n);
 }
 
 /// `<C-p>` in the box: save and post, without the detour through the list.
@@ -231,74 +226,57 @@ pub fn composeSendNow(app: *App, body: u16) !void {
 /// is happening reaches the screen before the call blocks.
 pub fn composePostNow(app: *App, body: u16) !void {
     if (!app.compose_for.isComment()) return;
-    if (pr_mod.postRepo(app) == null) {
-        app.notice.set("not reviewing a pull request", .{});
-        return;
-    }
+    _ = pr_mod.needRepo(app) orelse return;
     const id = try saveComposedComment(app, body) orelse return;
     pr_mod.postComment(app, id);
 }
 
 pub fn composeSubmit(app: *App, body: u16) !void {
-    {
-        {
-            // Flattened here and nowhere else: hard rule 1 is about what
-            // `send-keys` does with a newline, and this is the last point
-            // where one can still exist.
-            var flat: [compose_mod.max_bytes]u8 = undefined;
-            const line = compose_mod.flatten(&flat, app.compose.text());
-            // Copied out before closing, for the same reason the prompt
-            // does it above: `closeCompose` declares the buffer empty, and
-            // a slice of it read afterwards is a slice of nothing. A note
-            // keeps its line breaks, so it needs the text rather than the
-            // flattened line.
-            var raw_buf: [compose_mod.max_bytes]u8 = undefined;
-            const typed = app.compose.text();
-            @memcpy(raw_buf[0..typed.len], typed);
-            const raw = raw_buf[0..typed.len];
-            const how = app.compose_to;
-            // Before the close, which clears both.
-            const what = app.compose_for;
-            closeCompose(app);
-            if (line.len == 0) {
-                app.notice.set("nothing to send", .{});
-                return;
-            }
-            switch (what) {
-                // Both wait for the forge: a call that fails must not leave a
-                // remark here saying something GitHub never heard.
-                .reply => |root| return pr_mod.reply(app, root, raw),
-                .amend => |a| return pr_mod.amend(app, a.id, a.remote, raw),
-                .edit => |id| {
-                    try app.comments.edit(id, raw);
-                    app.notice.set("comment updated", .{});
-                },
-                .fresh => |at| {
-                    // The line's text goes with the note, so a restart can
-                    // find it again when the file moved underneath.
-                    _ = try app.comments.addFull(at.path, at.line, raw, notes.textOfNewLine(app, at.line), at.deleted, at.span);
-                    var kb: [32]u8 = undefined;
-                    app.notice.set("comment added - {s} submits the review", .{
-                        app.keyFor(.submit_review, .normal, &kb),
-                    });
-                },
-                .agent, .view => {
-                    app.outgoing.clearRetainingCapacity();
-                    try app.outgoing.appendSlice(app.gpa, line);
-                    app.want_send = how;
-                    app.clampScroll(body);
-                    return;
-                },
-            }
-            notes.saveComments(app);
-            // The note is a row now, and the reader should still be on the
-            // line they noted rather than pushed off it.
-            const on = notes.commentLine(app);
-            app.rebuildRows(.reset) catch {};
-            if (on) |at| _ = walks.gotoNewLine(app, at.line);
-            app.clampScroll(body);
-        }
+    // Flattened here and nowhere else: hard rule 1 is about what `send-keys`
+    // does with a newline, and this is the last point where one can still
+    // exist.
+    var flat: [compose_mod.max_bytes]u8 = undefined;
+    const line = compose_mod.flatten(&flat, app.compose.text());
+    var raw_buf: [compose_mod.max_bytes]u8 = undefined;
+    const raw = copyTyped(app, &raw_buf);
+    const how = app.compose_to;
+    // Before the close, which clears both.
+    const what = app.compose_for;
+    closeCompose(app);
+    if (line.len == 0) {
+        app.notice.set("nothing to send", .{});
+        return;
     }
+    switch (what) {
+        // Both wait for the forge: a call that fails must not leave a remark
+        // here saying something GitHub never heard.
+        .reply => |root| return pr_mod.reply(app, root, raw),
+        .amend => |a| return pr_mod.amend(app, a.id, a.remote, raw),
+        .edit, .fresh => {
+            _ = try storeComposed(app, what, raw);
+            var kb: [32]u8 = undefined;
+            if (what == .edit)
+                app.notice.set("comment updated", .{})
+            else
+                app.notice.set("comment added - {s} submits the review", .{
+                    app.keyFor(.submit_review, .normal, &kb),
+                });
+        },
+        .agent, .view => {
+            app.outgoing.clearRetainingCapacity();
+            try app.outgoing.appendSlice(app.gpa, line);
+            app.want_send = how;
+            app.clampScroll(body);
+            return;
+        },
+    }
+    notes.saveComments(app);
+    // The note is a row now, and the reader should still be on the line they
+    // noted rather than pushed off it.
+    const on = notes.commentLine(app);
+    app.rebuildRows(.reset) catch {};
+    if (on) |at| _ = walks.gotoNewLine(app, at.line);
+    app.clampScroll(body);
 }
 
 /// The `Ctrl-i` list. Escape closes it and gives the box back; Enter drops
@@ -306,6 +284,10 @@ pub fn composeSubmit(app: *App, body: u16) !void {
 pub fn feedPresets(app: *App, key: event.Key, idx: usize) void {
     const list = presets(app);
     const n = list.len;
+    // Four keys each way, all wrapping. Spelled once so the arrows, the
+    // letters and the control pairs cannot drift apart.
+    const prev = if (idx == 0) n -| 1 else idx - 1;
+    const next = if (idx + 1 >= n) 0 else idx + 1;
     switch (key.codepoint) {
         event.code.escape => app.preset_index = null,
         event.code.enter => {
@@ -320,16 +302,12 @@ pub fn feedPresets(app: *App, key: event.Key, idx: usize) void {
             }
             app.preset_index = null;
         },
-        event.code.up => app.preset_index = if (idx == 0) n -| 1 else idx - 1,
-        event.code.down => app.preset_index = if (idx + 1 >= n) 0 else idx + 1,
-        'k' => app.preset_index = if (idx == 0) n -| 1 else idx - 1,
-        'j' => app.preset_index = if (idx + 1 >= n) 0 else idx + 1,
+        event.code.up, 'k' => app.preset_index = prev,
+        event.code.down, 'j' => app.preset_index = next,
         else => {
-            if (key.mods.ctrl and (key.codepoint == 'p')) {
-                app.preset_index = if (idx == 0) n -| 1 else idx - 1;
-            } else if (key.mods.ctrl and (key.codepoint == 'n')) {
-                app.preset_index = if (idx + 1 >= n) 0 else idx + 1;
-            }
+            if (!key.mods.ctrl) return;
+            if (key.codepoint == 'p') app.preset_index = prev;
+            if (key.codepoint == 'n') app.preset_index = next;
         },
     }
 }
@@ -488,7 +466,7 @@ pub fn composeView(app: *App, arena: Allocator) render.ComposeView {
     };
 }
 
-/// App.What the cursor, or the selection, is pointing at.
+/// What the cursor, or the selection, is pointing at.
 pub fn refAt(app: *App) ?App.Ref {
     const f = app.current() orelse return null;
     const path = f.path();
@@ -995,7 +973,8 @@ test "a remapped cancel still leaves a remark opened to be read" {
     };
     fx.app.km.bindings = &moved;
 
-    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 900 });
+    // No remote, so it opens in the box rather than in the overlay.
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 0 });
     try notes.commentView(&fx.app, app_mod.body_rows);
     try fx.expectMode(.note_view);
 
