@@ -225,7 +225,7 @@ pub fn commentRead(app: *App, n: *comments_mod.Comment) void {
     app.compose_to = .copy;
     app.compose.startView(n.body);
     app.preset_index = null;
-    app.mode = .note_input;
+    app.mode = .note_view;
 }
 
 /// The note the cursor is pointing at: the one on this line, or the one
@@ -813,7 +813,7 @@ test "a remark from the request opens to be read, never to be edited" {
     try commentView(&fx.app, 20);
 
     // It used to refuse to open at all.
-    try testing.expect(fx.app.mode == .note_input);
+    try testing.expect(fx.app.mode == .note_view);
     try testing.expect(fx.app.compose_for == .view);
     try testing.expectEqualStrings(body, fx.app.compose.text());
 
@@ -826,6 +826,23 @@ test "a remark from the request opens to be read, never to be edited" {
     try testing.expectEqual(@as(usize, 5), fx.app.compose.cursor);
     _ = fx.app.compose.feed(.{ .codepoint = '0', .mods = .{} });
     try testing.expectEqual(@as(usize, 0), fx.app.compose.cursor);
+}
+
+test "somebody else's remark answers from the box it was read in" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.pr.number = 16;
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "this retry never backs off", .author = "someone", .outdated = false, .remote = 900 });
+    try commentView(&fx.app, 20);
+    try testing.expect(fx.app.mode == .note_view);
+
+    // `r` is a key there, not a letter: nothing in that box is typed.
+    try fx.press("r");
+    try testing.expectEqual(@as(u64, 900), fx.app.compose_for.reply);
+    try testing.expect(!fx.app.compose.read_only);
+    try testing.expectEqualStrings("", fx.app.compose.text());
+    try testing.expect(fx.app.mode == .note_input);
 }
 
 test "a remark of the reader's own on the request opens to be edited there" {

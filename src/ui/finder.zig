@@ -476,9 +476,18 @@ pub fn feedFiles(app: *App, key: event.Key, body: u16) !void {
                         const want_line = n.line;
                         // Which remark, not only which line: the row picked
                         // may be the second on its line.
-                        app.comment_sel = n.id;
+                        const want_id = n.id;
+                        app.comment_sel = want_id;
                         closeFiles(app);
                         try walks.showComment(app, want_path[0..len], want_line, body);
+                        // Reading it is what the row was picked for, so the
+                        // box opens here rather than after one more key. Only
+                        // where the jump actually landed on it: a remark whose
+                        // file has gone has a notice to say so, and a box over
+                        // that notice would hide the answer.
+                        if (notes.commentUnderCursor(app)) |at| {
+                            if (at.id == want_id) try notes.commentOpen(app);
+                        }
                         return;
                     }
                 }
@@ -958,6 +967,32 @@ test "a conversation is one row, and every message in it is still findable" {
     // Folding must not hide: a word only the reply says still finds it.
     try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "jittered") != null);
     try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "backs off") != null);
+}
+
+test "picking a remark from the list opens it, not only the line it is on" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    _ = try fx.app.comments.add("a.zig", 2, "this retry never backs off");
+    try fx.press("<Space>lc");
+    try fx.expectMode(.finder);
+    try fx.press("<CR>");
+
+    // One key, not two: the row was picked to read it.
+    try fx.expectMode(.note_input);
+    try testing.expectEqualStrings("this retry never backs off", fx.app.compose.text());
+}
+
+test "picking a conversation from the list opens the thread over it" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 10 });
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "and the answer", .author = "other", .outdated = false, .remote = 11, .reply_to = 10 });
+
+    try fx.press("<Space>lc");
+    try fx.press("<CR>");
+    try fx.expectMode(.thread);
 }
 
 test "the list acts on the remark a row names, not on its position" {

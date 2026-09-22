@@ -61,17 +61,47 @@ pub fn feedCompose(app: *App, key: event.Key, body: u16) !void {
 /// letter someone is typing. A multi-chord binding in `compose` mode is
 /// therefore ignored rather than half-honoured.
 pub fn composeCommand(app: *App, key: event.Key) ?keymap.Command {
+    // A box that cannot be typed into has its own set: there, a plain letter
+    // is a key rather than text.
+    if (app.compose.read_only) {
+        if (bound(app, key, .note_view)) |cmd| return cmd;
+        // The box's own cancel still leaves it. A config that remapped that
+        // key moved it out of the set above, and a read-only box with no way
+        // out of it would be the result.
+        const cmd = bound(app, key, .note_input) orelse return null;
+        return if (cmd == .compose_cancel) cmd else null;
+    }
+    return bound(app, key, .note_input);
+}
+
+fn bound(app: *App, key: event.Key, mode: event.Mode) ?keymap.Command {
     for (app.km.bindings) |b| {
-        if (!b.modes.has(.note_input) or b.chords.len != 1) continue;
+        if (!b.modes.has(mode) or b.chords.len != 1) continue;
         const ch = b.chords[0];
         if (ch.cp == key.codepoint and ch.ctrl == key.mods.ctrl) return b.command;
     }
     return null;
 }
 
+/// The read-only box's keys. Answering is the point of opening somebody
+/// else's remark at all, and the reply goes to the request, so it is keyed on
+/// the remark rather than on the copy being read.
+fn viewDo(app: *App, cmd: keymap.Command) void {
+    switch (cmd) {
+        .compose_cancel => closeCompose(app),
+        .thread_reply => {
+            const id = app.compose_for.commentId() orelse return;
+            const n = app.comments.find(id) orelse return;
+            // On failure `reply` only leaves a notice, and the box stays up
+            // with the remark still in it.
+            thread_mod.reply(app, n);
+        },
+        else => {},
+    }
+}
+
 pub fn composeDo(app: *App, cmd: keymap.Command, key: event.Key, body: u16) !void {
-    // A remark opened to be read has one key that means anything.
-    if (app.compose.read_only and cmd != .compose_cancel) return;
+    if (app.compose.read_only) return viewDo(app, cmd);
     switch (cmd) {
         .compose_cancel => {
             // One level at a time: out of insert, then out of the box.
@@ -951,6 +981,26 @@ test "the box's feature keys are bindings, and a remap moves them" {
     try fx.expectMode(.note_input);
     // First press leaves insert, second leaves the box - the two levels are
     // the command's, not the key's.
+    try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, app_mod.body_rows);
+    try fx.expectMode(.normal);
+}
+
+test "a remapped cancel still leaves a remark opened to be read" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var a: [4]keymap.Chord = undefined;
+    const moved = [_]keymap.Binding{
+        .{ .chords = try keytext.parseChords("<C-g>", &a), .command = .compose_cancel, .modes = keymap.Modes.compose_only },
+    };
+    fx.app.km.bindings = &moved;
+
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 900 });
+    try notes.commentView(&fx.app, app_mod.body_rows);
+    try fx.expectMode(.note_view);
+
+    // The box's own keys went with the remap, and a box with no way out of it
+    // is the one thing this must not become.
     try fx.app.handle(.{ .key = .{ .codepoint = 'g', .mods = .{ .ctrl = true } } }, app_mod.body_rows);
     try fx.expectMode(.normal);
 }

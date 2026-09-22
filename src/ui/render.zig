@@ -165,6 +165,7 @@ fn modeLabel(mode: event.Mode) []const u8 {
         .help => i18n.t("HELP"),
         .thread => i18n.t("THREAD"),
         .note_input => i18n.t("NOTE"),
+        .note_view => i18n.t("NOTE"),
         .finder => i18n.t("FIND"),
         .insert => i18n.t("INSERT"),
     };

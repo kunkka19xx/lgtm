@@ -504,6 +504,14 @@ test "every default binding parses back from the way the popup spells it" {
     }
 }
 
+test "the read-only box's footer has two keys to read from the keymap" {
+    var buf: [32]u8 = undefined;
+    try testing.expectEqualStrings("r", firstKeyFor(default_bindings, .thread_reply, .note_view, &buf));
+    try testing.expectEqualStrings("<Esc>", firstKeyFor(default_bindings, .compose_cancel, .note_view, &buf));
+    // And none of it reaches the box that *is* typed into, where `r` is text.
+    try testing.expectEqualStrings("", firstKeyFor(default_bindings, .thread_reply, .note_input, &buf));
+}
+
 test "key names a user might reasonably write" {
     var out: [Keymap.max_sequence]Chord = undefined;
 

@@ -1361,9 +1361,11 @@ fn composeKeys(f: Frame, v: ComposeView) Allocator.Error![]const keytext.HelpEnt
         .agent, .view => "send",
     };
 
-    // A row of keys that do nothing is worse than none.
+    // Read only, so the footer is the overlay's two words rather than the
+    // box's: nothing here is typed and nothing here is saved.
     if (v.kind == .view) {
-        try add(f, v.bindings, .note_input, &out, .compose_cancel, "close");
+        try add(f, v.bindings, .note_view, &out, .thread_reply, "reply");
+        try add(f, v.bindings, .note_view, &out, .compose_cancel, "close");
         return out.toOwnedSlice(f.arena);
     }
 

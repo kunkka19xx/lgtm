@@ -455,7 +455,7 @@ rule is easier to hold than fourteen more rows.
 | `comment_drop` | `<C-d>` |
 | `comment_post_one` | `<C-p>` |
 | `compose_post_now` | `<C-p>` |
-| `thread_reply` | `<Space>rc`, and `r` in the thread |
+| `thread_reply` | `<Space>rc`, and `r` in the thread and in a remark opened to read |
 | `thread_select` | `<CR>` in the thread |
 | `thread_close` | `<Esc>` or `q` in the thread |
 

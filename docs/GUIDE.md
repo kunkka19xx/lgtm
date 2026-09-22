@@ -276,7 +276,10 @@ followed by the hunk it sits in: a remark squeezed into a column is a remark you
 cannot read, so it is not in the column. Typing part of one still finds it.
 A conversation is one row there too, marked `+2` for the messages it stands for,
 and typing a word from any of them finds it - folding a conversation must not
-hide what was said in it.
+hide what was said in it. Enter goes to the remark and opens it where it sits:
+the box on one alone, the thread overlay on a conversation. A row was picked to
+read what it says, so reading it is not a second key. Where the file it was
+written on has gone, the jump says so instead and nothing opens.
 
 #### On a pull request
 
@@ -328,7 +331,9 @@ comment rather than a line, and it stays behind when the overlay closes, so
 one remark `<Space>vc` still opens the box directly, titled
 `@author path:line - VIEW`. Somebody else's you cannot edit or delete: it lives
 on the request, and a changed copy here would say something its author never
-wrote.
+wrote. Nothing there is typed, so the letters are keys: `r` answers it without
+going back to the diff first, the vim motions read it, and `<Esc>` or `q`
+closes.
 
 **`r` replies.** A review is a conversation, so the overlay is not only a
 reading view: `r` on any message opens an empty box aimed at the thread, titled

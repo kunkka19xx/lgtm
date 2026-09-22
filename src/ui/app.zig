@@ -2117,7 +2117,7 @@ pub const App = struct {
                 if (self.mode == .command) return cmdline.feedPrompt(self, k, body);
                 if (self.mode == .help) return self.feedHelp(k, body);
                 if (self.mode == .finder) return finder_mod.feedFiles(self, k, body);
-                if (self.mode == .note_input) return outgoing.feedCompose(self, k, body);
+                if (self.mode == .note_input or self.mode == .note_view) return outgoing.feedCompose(self, k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
