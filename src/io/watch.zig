@@ -30,6 +30,7 @@ const fs = @import("fs.zig");
 const notify = @import("notify.zig");
 const proc = @import("proc.zig");
 const event = @import("../core/event.zig");
+const git = @import("../core/git.zig");
 
 pub const default_poll_ms: i64 = 500;
 pub const default_debounce_ms: i64 = 200;
@@ -94,6 +95,17 @@ pub const Poller = struct {
     /// re-armed only by a new change - one silence is one signal, held
     /// here rather than by every caller that would otherwise have to.
     quiet_armed: bool = false,
+    /// The branch the last poll saw, and whether it moved since the one before.
+    ///
+    /// Read out of the `git status` that was already running rather than from
+    /// a second subprocess: `--branch` adds one header line to the output and
+    /// costs nothing. A checkout on a clean tree changes no file git reports,
+    /// so without this it is invisible - and the diff, and which remarks
+    /// belong to the review, both depend on which branch this is.
+    branch_buf: [256]u8 = undefined,
+    branch_len: u16 = 0,
+    branch_moved: bool = false,
+
     /// Whether a poll has happened yet. The first one is not a change, it is
     /// finding out what is there - and everything looks new against an empty
     /// baseline. Emitting treats that as a change on purpose, because a
@@ -111,6 +123,30 @@ pub const Poller = struct {
         self.clearPending();
         self.pending.deinit(self.gpa);
         self.* = undefined;
+    }
+
+    /// The branch the last poll saw. Empty until the first poll, and empty
+    /// outside a repository.
+    pub fn branch(self: *const Poller) []const u8 {
+        return self.branch_buf[0..self.branch_len];
+    }
+
+    /// Whether the branch changed on the last tick, cleared by asking. Asked
+    /// after `tick` for the same reason `quiet` is: a different question about
+    /// the same poll, and folding it in would make every caller handle it.
+    pub fn headMoved(self: *Poller) bool {
+        const moved = self.branch_moved;
+        self.branch_moved = false;
+        return moved;
+    }
+
+    fn noteBranch(self: *Poller, name: []const u8) void {
+        if (std.mem.eql(u8, name, self.branch())) return;
+        // The first poll is finding out what is there, not a change: at
+        // startup the main loop has already read the branch for itself.
+        if (self.seen_first) self.branch_moved = true;
+        self.branch_len = @intCast(@min(name.len, self.branch_buf.len));
+        @memcpy(self.branch_buf[0..self.branch_len], name[0..self.branch_len]);
     }
 
     fn clearPrev(self: *Poller) void {
@@ -197,7 +233,7 @@ pub const Poller = struct {
         var argv: std.ArrayList([]const u8) = .empty;
         defer argv.deinit(self.gpa);
         try proc.gitArgv(self.gpa, &argv, self.opts.repo);
-        try argv.appendSlice(self.gpa, &.{ "status", "--porcelain", "--untracked-files=all" });
+        try argv.appendSlice(self.gpa, &.{ "status", "--branch", "--porcelain", "--untracked-files=all" });
 
         const out = try proc.run(self.gpa, self.io, argv.items, 16 << 20);
         defer out.deinit(self.gpa);
@@ -211,6 +247,13 @@ pub const Poller = struct {
 
         var it = std.mem.splitScalar(u8, out.stdout, '\n');
         while (it.next()) |line| {
+            // `--branch`'s header, which is not a path: `statusPath` would
+            // read `## main` as a file called `main` and report it changing
+            // every time the branch's ahead count did.
+            if (std.mem.startsWith(u8, line, "## ")) {
+                self.noteBranch(git.parseBranch(line));
+                continue;
+            }
             if (line.len < 4) continue;
             const rel = statusPath(line);
             if (rel.len == 0) continue;
@@ -388,6 +431,16 @@ pub const Watcher = struct {
             const want = if (self.poller.settling()) self.poller.opts.debounce_ms else poll;
             const waited = self.waitForChange(want) orelse return;
             elapsed += waited;
+            // Before the paths, because a checkout usually rewrites files
+            // too: the main loop re-diffs once it knows which branch it is
+            // re-diffing, rather than once against the old scope and again
+            // against the new one.
+            if (self.poller.headMoved()) {
+                const name = self.poller.gpa.dupe(u8, self.poller.branch()) catch &.{};
+                if (name.len > 0) {
+                    self.queue.push(.{ .head_moved = name }) catch self.poller.gpa.free(name);
+                }
+            }
             if (self.poller.tick(elapsed) catch null) |paths| {
                 self.queue.push(.{ .files_changed = paths }) catch {
                     event.Queue.freePayload(self.poller.gpa, .{ .files_changed = paths });
@@ -411,6 +464,34 @@ pub const Watcher = struct {
 };
 
 const testing = std.testing;
+
+test "the first poll learns the branch, and a later one that differs is a checkout" {
+    // A checkout on a clean tree rewrites no file git reports, so this is the
+    // only thing that sees it. The first poll must not count: at startup the
+    // main loop has already read the branch, and reporting a move there would
+    // put one branch's remarks away before anyone had written any.
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{ .environ = testing.environ });
+    defer threaded.deinit();
+    var p = Poller.init(testing.allocator, threaded.io(), .{});
+    defer p.deinit();
+
+    p.noteBranch("main");
+    try testing.expect(!p.headMoved());
+    try testing.expectEqualStrings("main", p.branch());
+
+    p.seen_first = true;
+    // The same branch again is every poll for the rest of the session, and
+    // rewriting `.git/HEAD` by checking out what is already out is one of them.
+    p.noteBranch("main");
+    try testing.expect(!p.headMoved());
+
+    p.noteBranch("feature");
+    try testing.expectEqualStrings("feature", p.branch());
+    try testing.expect(p.headMoved());
+    // Asking clears it: one checkout is one event, however long before the
+    // main loop drains the queue.
+    try testing.expect(!p.headMoved());
+}
 
 test "the doorbell shortens the wait but never replaces the poll" {
     // The contract the whole design rests on: an event decides *when* to ask,

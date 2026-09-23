@@ -36,6 +36,48 @@ fn insideRepo(gpa: Allocator, io: std.Io, repo: ?[]const u8) bool {
     return out.exit_code == 0;
 }
 
+/// The branch, read from the header line `git status --branch --porcelain`
+/// prints ahead of the files.
+///
+/// `## main`, `## main...origin/main [ahead 1]` when it tracks something, and
+/// `## HEAD (no branch)` detached. A repository with no commits says
+/// `## No commits yet on main`, which names the branch that does not exist
+/// yet, and that is still the right answer: it names where the first
+/// commit is going to land.
+///
+/// Detached normalises to `HEAD`, which is what `rev-parse --abbrev-ref` says
+/// there too - the watcher reads one and startup reads the other, and a
+/// disagreement would read as a branch change on the first poll.
+pub fn parseBranch(line: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, line, "## ")) return "";
+    var rest = line[3..];
+    const no_commits = "No commits yet on ";
+    if (std.mem.startsWith(u8, rest, no_commits)) rest = rest[no_commits.len..];
+    if (std.mem.indexOf(u8, rest, "...")) |i| rest = rest[0..i];
+    if (std.mem.indexOfScalar(u8, rest, ' ')) |i| rest = rest[0..i];
+    return rest;
+}
+
+/// The branch right now, into `buf`, or empty when git cannot say.
+///
+/// One subprocess, at startup only: from then on the watcher reads the
+/// branch out of the `git status` it was already running, so following a
+/// checkout costs nothing per poll.
+pub fn currentBranch(gpa: Allocator, io: std.Io, repo: ?[]const u8, buf: []u8) []const u8 {
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(gpa);
+    proc.gitArgv(gpa, &argv, repo) catch return "";
+    argv.appendSlice(gpa, &.{ "rev-parse", "--abbrev-ref", "HEAD" }) catch return "";
+
+    const out = proc.run(gpa, io, argv.items, 1 << 12) catch return "";
+    defer out.deinit(gpa);
+    if (out.exit_code != 0) return "";
+    const name = std.mem.trim(u8, out.stdout, " \t\r\n");
+    const n = @min(name.len, buf.len);
+    @memcpy(buf[0..n], name[0..n]);
+    return buf[0..n];
+}
+
 /// Diffs the working tree against HEAD, staged and unstaged both.
 ///
 /// One subprocess for every path, never one per file: fork plus exec plus git
@@ -902,4 +944,19 @@ test "an unmerged path is both sides, whatever the letters are" {
     try std.testing.expectEqual(Stage.both, classify('U', 'U'));
     try std.testing.expectEqual(Stage.both, classify('A', 'U'));
     try std.testing.expectEqual(Stage.both, classify('U', 'D'));
+}
+
+test "the branch comes out of the status header, whatever shape git gave it" {
+    // The plain form, the tracking form, detached, and a repository with no
+    // commits. Detached has to come out as `HEAD`, because that is what
+    // `rev-parse --abbrev-ref` says at startup - disagreeing would read as a
+    // checkout on the first poll and swap the remarks for no reason.
+    try std.testing.expectEqualStrings("main", parseBranch("## main"));
+    try std.testing.expectEqualStrings("main", parseBranch("## main...origin/main"));
+    try std.testing.expectEqualStrings("feat/x", parseBranch("## feat/x...origin/feat/x [ahead 1]"));
+    try std.testing.expectEqualStrings("HEAD", parseBranch("## HEAD (no branch)"));
+    try std.testing.expectEqualStrings("main", parseBranch("## No commits yet on main"));
+    // A file line is not a branch line, so nothing here can be mistaken
+    // for one, or the other way round.
+    try std.testing.expectEqualStrings("", parseBranch(" M src/ui/app.zig"));
 }

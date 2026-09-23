@@ -253,6 +253,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     app.pr.number = opts.pr;
     app.pr.repo_len = @intCast(@min(opts.repo.len, app.pr.repo.len));
     @memcpy(app.pr.repo[0..app.pr.repo_len], opts.repo[0..app.pr.repo_len]);
+    // Before the comments are read, because the branch is what says which
+    // file they are in. One subprocess, here only: from here the watcher
+    // reads the branch out of the `git status` it was running anyway.
+    var branch_buf: [256]u8 = undefined;
+    app.setBranch(git.currentBranch(gpa, io, null, &branch_buf));
     notes.loadComments(&app);
     notes.loadPhone(&app);
     // The store needs an environment to run git in, which only this layer has.

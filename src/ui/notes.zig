@@ -556,13 +556,58 @@ pub fn commentCode(app: *const App, arena: Allocator, path: []const u8, line: u3
     return "";
 }
 
-/// Where this review's remarks live. One file per scope rather than a
-/// field on each comment: nothing has to filter, and "my remarks on this
-/// pull request" is a file read.
+/// Room for `.lgtm/branch-<slug>.jsonl` with the longest slug below.
+pub const PathBuf = [slug_max + 32]u8;
+
+/// The name the file this review's remarks live in. One file per scope rather
+/// than a field on each comment: nothing has to filter, and "my remarks on
+/// this pull request" is a file read.
+///
+/// A pull request is its own scope because its review is two refs. The working
+/// tree is scoped by branch because a remark written on one branch is about
+/// code the next branch does not have - shared, they re-anchored by text into
+/// whatever happened to match, which is the one thing that
+/// `core/comments.zig` otherwise refuses to do.
+///
+/// No branch - not a repository, or git could not say - keeps the old shared
+/// name, which is also what makes the migration below a no-op there.
 pub fn commentsPath(app: *const App, buf: []u8) []const u8 {
-    if (app.pr.number == 0) return ".lgtm/comments.jsonl";
-    return std.fmt.bufPrint(buf, ".lgtm/pr-{d}.jsonl", .{app.pr.number}) catch
-        ".lgtm/comments.jsonl";
+    if (app.pr.number != 0) {
+        return std.fmt.bufPrint(buf, ".lgtm/pr-{d}.jsonl", .{app.pr.number}) catch shared_path;
+    }
+    if (app.branch().len == 0) return shared_path;
+    var slug_buf: [slug_max]u8 = undefined;
+    return std.fmt.bufPrint(buf, ".lgtm/branch-{s}.jsonl", .{slug(&slug_buf, app.branch())}) catch shared_path;
+}
+
+/// The name every working tree shared before the scope was per branch, and
+/// still the name outside a repository.
+const shared_path = ".lgtm/comments.jsonl";
+
+/// The oldest name of all: what this file was called back when the feature
+/// went by another name.
+const legacy_path = ".lgtm/notes.jsonl";
+
+/// Long enough for any branch name worth having, short enough that the whole
+/// file name clears every filesystem's limit.
+const slug_max = 120;
+
+/// A branch name as a file name. `feat/thing` is a directory that does not
+/// exist, so everything outside the portable set becomes `-`.
+///
+/// Two branches can collide - `a/b` and `a-b` land on one file - and what that
+/// costs is the behaviour every branch had before this existed, which is a
+/// shared file rather than a lost one. A hash would make it impossible and
+/// make `.lgtm/` unreadable to the person whose directory it is.
+fn slug(buf: *[slug_max]u8, name: []const u8) []const u8 {
+    const n = @min(name.len, buf.len);
+    for (name[0..n], 0..) |c, i| {
+        buf[i] = switch (c) {
+            'a'...'z', 'A'...'Z', '0'...'9', '.', '_', '-' => c,
+            else => '-',
+        };
+    }
+    return buf[0..n];
 }
 
 pub fn saveComments(app: *App) void {
@@ -570,7 +615,7 @@ pub fn saveComments(app: *App) void {
     var out: std.ArrayList(u8) = .empty;
     defer out.deinit(app.gpa);
     comments_mod.write(&out, app.gpa, &app.comments) catch return;
-    var buf: [64]u8 = undefined;
+    var buf: PathBuf = undefined;
     fs_mod.writeStateFile(app.io, commentsPath(app, &buf), out.items) catch return;
     app.comments.dirty = false;
 }
@@ -579,9 +624,29 @@ pub fn saveComments(app: *App) void {
 pub fn swapComments(app: *App, number: u32) void {
     if (app.pr.number == number) return;
     saveComments(app);
+    app.pr.number = number;
+    reopenComments(app);
+}
+
+/// The same for a checkout: the working tree's remarks are per branch, so
+/// leaving one puts its set away and brings the new branch's out.
+pub fn swapBranch(app: *App, name: []const u8) void {
+    if (std.mem.eql(u8, app.branch(), name)) return;
+    // Under the *old* name, before the scope moves: saving afterwards would
+    // write one branch's remarks into the other's file.
+    saveComments(app);
+    app.setBranch(name);
+    reopenComments(app);
+}
+
+/// The store, emptied and refilled from whatever `commentsPath` now names.
+/// The caller has already saved under the old name and moved the scope.
+fn reopenComments(app: *App) void {
     app.comments.deinit();
     app.comments = .init(app.gpa);
-    app.pr.number = number;
+    // Ids are per store, so anything holding one now points at a remark
+    // that is no longer there.
+    app.comment_sel = 0;
     loadComments(app);
 }
 
@@ -627,24 +692,34 @@ pub fn phoneFresh(io: std.Io) bool {
 
 pub fn loadComments(app: *App) void {
     if (!app.persist) return;
-    // `.lgtm/notes.jsonl` is the name this file had before the feature was
-    // called comments. Read once and it is written back under the new
-    // name: renaming a concept should not lose a reader's remarks.
-    var buf: [64]u8 = undefined;
+    var buf: PathBuf = undefined;
     const path = commentsPath(app, &buf);
-    // The rename predates the scopes, so only the working tree ever wore
-    // the old name. Offering it to every scope handed one file's remarks
-    // to whichever pull request was opened first.
-    const text = fs_mod.readFile(app.io, app.gpa, path, 1 << 20) catch
-        if (app.pr.number == 0)
-            fs_mod.readFile(app.io, app.gpa, ".lgtm/notes.jsonl", 1 << 20) catch return
-        else
-            return;
-    defer app.gpa.free(text);
-    comments_mod.read(&app.comments, text) catch {};
-    if (app.comments.len() > 0 and !fs_mod.fileExists(app.io, path)) {
+
+    if (fs_mod.readFile(app.io, app.gpa, path, 1 << 20)) |text| {
+        defer app.gpa.free(text);
+        comments_mod.read(&app.comments, text) catch {};
+        return;
+    } else |_| {}
+
+    // Nothing under this scope's name yet, so look for a file written under a
+    // name this one used to have. Only the working tree ever wore either:
+    // offering them to every scope handed one file's remarks to whichever
+    // pull request was opened first.
+    if (app.pr.number != 0) return;
+    for ([_][]const u8{ shared_path, legacy_path }) |old| {
+        if (std.mem.eql(u8, old, path)) continue;
+        const text = fs_mod.readFile(app.io, app.gpa, old, 1 << 20) catch continue;
+        defer app.gpa.free(text);
+        comments_mod.read(&app.comments, text) catch {};
+        if (app.comments.len() == 0) continue;
         app.comments.dirty = true;
         saveComments(app);
+        // Taken over rather than copied, and only once the copy is on disk:
+        // left behind, the next branch checked out would find it and adopt
+        // the same remarks a second time, which is the bug the scope is here
+        // to fix. The bytes are not lost - they are in `path`.
+        if (!app.comments.dirty) fs_mod.deleteFile(app.io, old);
+        return;
     }
 }
 
@@ -903,6 +978,68 @@ test "without a login nothing is claimed, so a remark stays read only" {
     try fx.press("<CR>");
     try fx.expectMode(.thread);
     try testing.expect(!fx.app.compose.open);
+}
+
+test "the remarks file is named for what the review is of" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+    var buf: PathBuf = undefined;
+
+    // No branch - not a repository, or git could not say - keeps the name
+    // every working tree shared before this existed.
+    try testing.expectEqualStrings(".lgtm/comments.jsonl", commentsPath(&fx.app, &buf));
+
+    fx.app.setBranch("main");
+    try testing.expectEqualStrings(".lgtm/branch-main.jsonl", commentsPath(&fx.app, &buf));
+
+    // A branch is a ref, so it can hold characters a file name cannot.
+    fx.app.setBranch("chore/reply-comment-fix");
+    try testing.expectEqualStrings(".lgtm/branch-chore-reply-comment-fix.jsonl", commentsPath(&fx.app, &buf));
+
+    // A pull request is two refs read out of git, so the local checkout has
+    // nothing to do with it and its own scope wins.
+    fx.app.pr.number = 16;
+    try testing.expectEqualStrings(".lgtm/pr-16.jsonl", commentsPath(&fx.app, &buf));
+}
+
+test "a checkout in another pane puts this branch's remarks away and says so" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.setBranch("main");
+    _ = try fx.app.comments.add("a.zig", 2, "why 99 here");
+    try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
+
+    // Following rather than asking: a remark written on `main` is about code
+    // `feature` does not have, and leaving it on screen would re-anchor it by
+    // text into whatever happened to match.
+    try fx.app.followBranch("feature", app_mod.body_rows);
+    try testing.expectEqualStrings("feature", fx.app.branch());
+    try testing.expectEqual(@as(usize, 0), fx.app.comments.len());
+    // Nothing is lost silently: the one word the reader gets says where they
+    // are and what went with the branch they left.
+    try fx.expectNotice("now on feature");
+    try fx.expectNotice("1 comment on main");
+
+    // Checking out what is already out is every poll, and must do nothing.
+    fx.app.notice.clear();
+    try fx.app.followBranch("feature", app_mod.body_rows);
+    try testing.expectEqualStrings("", fx.app.notice.text());
+}
+
+test "a pull request review follows the name and changes nothing else" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.pr.number = 16;
+    fx.app.setBranch("main");
+    _ = try fx.app.comments.add("a.zig", 2, "on the request");
+
+    // The review is two refs out of git, so a checkout cannot disturb it and
+    // the remarks are already scoped to the request.
+    try fx.app.followBranch("feature", app_mod.body_rows);
+    try testing.expectEqualStrings("feature", fx.app.branch());
+    try testing.expectEqual(@as(usize, 1), fx.app.comments.len());
 }
 
 test "a notice is drawn in the reader's language" {
