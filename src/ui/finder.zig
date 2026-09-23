@@ -476,9 +476,18 @@ pub fn feedFiles(app: *App, key: event.Key, body: u16) !void {
                         const want_line = n.line;
                         // Which remark, not only which line: the row picked
                         // may be the second on its line.
-                        app.comment_sel = n.id;
+                        const want_id = n.id;
+                        app.comment_sel = want_id;
                         closeFiles(app);
                         try walks.showComment(app, want_path[0..len], want_line, body);
+                        // Reading it is what the row was picked for, so the
+                        // box opens here rather than after one more key. Only
+                        // where the jump actually landed on it: a remark whose
+                        // file has gone has a notice to say so, and a box over
+                        // that notice would hide the answer.
+                        if (notes.commentUnderCursor(app)) |at| {
+                            if (at.id == want_id) try notes.commentOpen(app);
+                        }
                         return;
                     }
                 }
@@ -557,9 +566,6 @@ pub fn diffHead(arena: Allocator, f: diff.FileDiff) []const u8 {
     return diffText(arena, f, null);
 }
 
-/// As `diffHead`, from the hunk that contains `at` rather than the first.
-/// What a comment is *about*, which is the one thing its row does not
-/// already say.
 /// Everything said in one conversation, for the filter to reach. The row
 /// shows only the message leading it, and a word from a reply must still find
 /// it, or folding would be hiding.
@@ -567,15 +573,16 @@ fn conversationText(app: *App, arena: Allocator, n: comments_mod.Comment) ?[]con
     var buf: [thread_mod.max_messages]*comments_mod.Comment = undefined;
     var out: std.ArrayList(u8) = .empty;
     out.print(arena, "{s}:{d}", .{ n.path, n.line }) catch return null;
-    const t = n.thread();
-    for (app.comments.allAt(n.path, n.line, &buf)) |c| {
-        if (c.thread() != t) continue;
+    for (app.comments.threadAt(n, &buf)) |c| {
         var one: [256]u8 = undefined;
         out.print(arena, "  {s} {s}", .{ c.author, compose_mod.flatten(&one, c.body) }) catch break;
     }
     return out.items;
 }
 
+/// As `diffHead`, from the hunk that contains `at` rather than the first.
+/// What a comment is *about*, which is the one thing its row does not
+/// already say.
 pub fn diffText(arena: Allocator, f: diff.FileDiff, at: ?u32) []const u8 {
     var out: std.ArrayList(u8) = .empty;
     var lines: usize = 0;
@@ -958,6 +965,32 @@ test "a conversation is one row, and every message in it is still findable" {
     // Folding must not hide: a word only the reply says still finds it.
     try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "jittered") != null);
     try testing.expect(std.mem.indexOf(u8, fx.app.pick_list.items[0].filter, "backs off") != null);
+}
+
+test "picking a remark from the list opens it, not only the line it is on" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    _ = try fx.app.comments.add("a.zig", 2, "this retry never backs off");
+    try fx.press("<Space>lc");
+    try fx.expectMode(.finder);
+    try fx.press("<CR>");
+
+    // One key, not two: the row was picked to read it.
+    try fx.expectMode(.note_input);
+    try testing.expectEqualStrings("this retry never backs off", fx.app.compose.text());
+}
+
+test "picking a conversation from the list opens the thread over it" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 10 });
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "and the answer", .author = "other", .outdated = false, .remote = 11, .reply_to = 10 });
+
+    try fx.press("<Space>lc");
+    try fx.press("<CR>");
+    try fx.expectMode(.thread);
 }
 
 test "the list acts on the remark a row names, not on its position" {

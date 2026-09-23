@@ -368,6 +368,25 @@ pub const Store = struct {
         return buf[0..n];
     }
 
+    /// Every remark on `n`'s line that belongs to `n`'s thread, in store order.
+    ///
+    /// The folded conversation: `allAt` is the whole line, whatever thread,
+    /// and `conversationAt` reaches the other lines a thread has spread to.
+    /// This is the middle one, which is what a gutter dot and a list row each
+    /// stand for.
+    pub fn threadAt(self: *Store, n: Comment, buf: []*Comment) []*Comment {
+        const t = n.thread();
+        var k: usize = 0;
+        for (self.list.items) |*c| {
+            if (k == buf.len) break;
+            if (c.thread() != t) continue;
+            if (c.line != n.line or !std.mem.eql(u8, c.path, n.path)) continue;
+            buf[k] = c;
+            k += 1;
+        }
+        return buf[0..k];
+    }
+
     /// How many more messages follow `n` in its conversation on its own line,
     /// or null when an earlier message leads it there.
     ///
@@ -450,30 +469,59 @@ pub const Store = struct {
     /// there. If it is nowhere, the comment is stale - never silently moved to a
     /// line that merely happens to have the right number (rule 7).
     pub fn reconcile(self: *Store, path: []const u8, text: []const u8) void {
+        self.reanchor(path, text, false);
+    }
+
+    /// Stale remarks only, run on every re-diff beside `carry`: one whose line
+    /// comes back comes back with it. `carry` cannot do this - a remark the
+    /// line map dropped has nothing to carry from - and this pays for the
+    /// search over the few remarks that are stale rather than over every one.
+    pub fn revive(self: *Store, path: []const u8, text: []const u8) void {
+        self.reanchor(path, text, true);
+    }
+
+    /// The search both run. `stale_only` is what separates them: `carry` has
+    /// already placed the live ones, so re-searching them would second-guess
+    /// an exact line map with a text match.
+    fn reanchor(self: *Store, path: []const u8, text: []const u8, stale_only: bool) void {
         for (self.list.items) |*n| {
-            if (n.state == .stale or n.anchor.len == 0) continue;
+            if (n.anchor.len == 0) continue;
+            if (stale_only and n.state != .stale) continue;
             if (!std.mem.eql(u8, n.path, path)) continue;
 
-            var found: ?u32 = null;
-            var no: u32 = 0;
-            var it = std.mem.splitScalar(u8, text, '\n');
-            while (it.next()) |raw| {
-                no += 1;
-                const line = std.mem.trimEnd(u8, raw, "\r");
-                if (!std.mem.eql(u8, line, n.anchor)) continue;
-                // The nearest occurrence to where the comment thinks it is: a
-                // line that appears twice should not drag the comment to the top
-                // of the file.
-                if (found == null or dist(no, n.line) < dist(found.?, n.line)) found = no;
-            }
-            if (found) |to| {
-                if (to != n.line) self.dirty = true;
-                n.line = to;
-            } else {
+            if (anchorLine(text, n.anchor, n.line)) |to| {
+                if (to != n.line) {
+                    n.line = to;
+                    self.dirty = true;
+                }
+                // Stale says the file no longer has this line. The file has it
+                // again, so the remark is live again - and a remark that stays
+                // stale beside the line it is about can never be posted on it.
+                if (n.state == .stale) {
+                    n.state = .open;
+                    self.dirty = true;
+                }
+            } else if (!stale_only and n.state != .stale) {
                 n.state = .stale;
                 self.dirty = true;
             }
         }
+    }
+
+    /// Where `line` sits in `text`, as a 1-based line number, or null when it
+    /// is nowhere. The nearest occurrence to `near`: a line that appears twice
+    /// must not drag a remark to the top of the file.
+    fn anchorLine(text: []const u8, want: []const u8, near: u32) ?u32 {
+        var found: ?u32 = null;
+        var no: u32 = 0;
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |raw| {
+            no += 1;
+            const line = std.mem.trimEnd(u8, raw, "\r");
+            if (!std.mem.eql(u8, line, want)) continue;
+            if (found == null or dist(no, near) < dist(found.?, near)) found = no;
+        }
+        return found;
     }
 
     /// Carries every comment on `path` from one version of the file to the next.
@@ -506,7 +554,7 @@ pub const Store = struct {
     }
 };
 
-fn dist(a: u32, b: u32) u32 {
+pub fn dist(a: u32, b: u32) u32 {
     return if (a > b) a - b else b - a;
 }
 
@@ -749,6 +797,31 @@ test "a comment whose line is gone after a restart goes stale, not somewhere wro
     store.reconcile("a.zig", "fn a() void {\n}\n");
     try testing.expectEqual(State.stale, store.items()[0].state);
     try testing.expectEqual(@as(usize, 1), store.len());
+}
+
+test "a remark whose line comes back is live again, not stale for ever" {
+    // Stale said the file no longer had the line. When the file has it again,
+    // a remark that stayed stale could never be posted on that line, and
+    // nothing in the tool would ever have said why.
+    var store: Store = .init(testing.allocator);
+    defer store.deinit();
+    _ = try store.addAnchored("a.zig", 2, "why this way?", "    const x = 1;");
+
+    store.reconcile("a.zig", "fn a() void {\n}\n");
+    try testing.expectEqual(State.stale, store.items()[0].state);
+
+    // Back, two lines lower than it was: the search places it and the remark
+    // goes with it.
+    store.revive("a.zig", "fn a() void {\n\n    const x = 1;\n}\n");
+    try testing.expectEqual(State.open, store.items()[0].state);
+    try testing.expectEqual(@as(u32, 3), store.items()[0].line);
+
+    // And a reconcile does the same, which is what a restart runs.
+    store.reconcile("a.zig", "fn a() void {\n}\n");
+    try testing.expectEqual(State.stale, store.items()[0].state);
+    store.reconcile("a.zig", "    const x = 1;\n");
+    try testing.expectEqual(State.open, store.items()[0].state);
+    try testing.expectEqual(@as(u32, 1), store.items()[0].line);
 }
 
 test "a line that appears twice takes the nearest one" {

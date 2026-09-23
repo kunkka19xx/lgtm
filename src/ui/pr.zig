@@ -452,6 +452,15 @@ pub fn postRepo(app: *const App) ?[]const u8 {
     return app.pr.repo[0..app.pr.repo_len];
 }
 
+/// The same, saying so when there is none. Every key that needs the forge asks
+/// through this, so five of them cannot drift into five sentences.
+pub fn needRepo(app: *App) ?[]const u8 {
+    return postRepo(app) orelse {
+        app.notice.set("not reviewing a pull request", .{});
+        return null;
+    };
+}
+
 /// Arms a call and says so, holding the text it is to carry. The loop makes
 /// it on the next pass, by which time the notice is already drawn.
 fn armWith(app: *App, req: Pending, body: []const u8) void {
@@ -480,10 +489,7 @@ pub fn prepare(app: *App, arena: Allocator, req: Pending) ?Want {
 /// approval needs nothing to say; the other two do, or there is no reason
 /// to have notified anybody.
 pub fn postReview(app: *App, want: gh.Event, note: []const u8) void {
-    if (postRepo(app) == null) {
-        app.notice.set("not reviewing a pull request", .{});
-        return;
-    }
+    _ = needRepo(app) orelse return;
     if (unposted(app) == 0 and want != .approve and note.len == 0) {
         if (app.comments.len() == 0) {
             app.notice.set("no comments to post", .{});
@@ -499,10 +505,7 @@ pub fn postReview(app: *App, want: gh.Event, note: []const u8) void {
 /// text goes to the forge first and the store waits. Armed rather than made,
 /// like every other call, so the notice reaches the screen before `gh` blocks.
 pub fn amend(app: *App, id: u32, remote: u64, body: []const u8) void {
-    if (postRepo(app) == null) {
-        app.notice.set("not reviewing a pull request", .{});
-        return;
-    }
+    _ = needRepo(app) orelse return;
     armWith(app, .{ .amend = .{ .id = id, .remote = remote } }, body);
 }
 
@@ -593,10 +596,7 @@ pub fn prepareAmend(app: *App, arena: Allocator, req: Amend) ?Want {
 /// A message answering a thread, armed rather than made: the notice reaches
 /// the screen before `gh` blocks.
 pub fn reply(app: *App, root: u64, body: []const u8) void {
-    if (postRepo(app) == null) {
-        app.notice.set("not reviewing a pull request", .{});
-        return;
-    }
+    _ = needRepo(app) orelse return;
     armWith(app, .{ .reply = .{ .root = root } }, body);
 }
 
@@ -657,8 +657,6 @@ pub fn unposted(app: *const App) usize {
     return n;
 }
 
-/// The call itself, from the loop, one frame after the notice that says it
-/// is happening.
 /// The half of a post only the main thread may do: read the comment store,
 /// build the body, and list the remarks it covers. Into the job's arena, which
 /// the worker and then the frame reporting it both outlive this call to read.
@@ -699,21 +697,23 @@ pub fn preparePost(app: *App, arena: Allocator, req: Post) ?Want {
     } };
 }
 
-/// `<C-p>` in the comment list: the one under the cursor, on its own.
-/// GitHub's "add single comment" beside its "submit review", which is the
-/// split every reader already knows from the web.
+/// `<C-p>`: the remark the reader is looking at, whichever surface that is -
+/// the highlighted row in the comment list, or the one the cursor sits on in
+/// the diff. GitHub's "add single comment" beside its "submit review", which
+/// is the split every reader already knows from the web.
 pub fn postOne(app: *App) void {
-    const n = notes.listSelected(app) orelse return;
+    if (app.mode == .finder) {
+        const n = notes.listSelected(app) orelse return;
+        return postComment(app, n.id);
+    }
+    const n = notes.commentHere(app) orelse return;
     postComment(app, n.id);
 }
 
 /// One remark on its own, from wherever the reader is looking at it.
 pub fn postComment(app: *App, id: u32) void {
     const n = app.comments.find(id) orelse return;
-    if (postRepo(app) == null) {
-        app.notice.set("not reviewing a pull request", .{});
-        return;
-    }
+    _ = needRepo(app) orelse return;
     if (n.posted) {
         app.notice.set("already posted", .{});
         return;
@@ -1449,6 +1449,30 @@ test "deleting a remark of the reader's own asks first, then takes it off the re
 
     try apply(&fx.app, job, .dropped);
     try testing.expect(fx.app.comments.find(id) == null);
+}
+
+test "the post key works on the remark under the cursor, not only in the list" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.onPr(16, "o/r", "me");
+    const id = try fx.app.comments.add("a.zig", 2, "this retry never backs off");
+    try fx.app.rebuildRows(.line);
+    try notes.commentView(&fx.app, app_mod.body_rows);
+    try fx.press("<Esc>");
+
+    try fx.press("<C-p>");
+    const req = fx.app.pr.pending.?.post;
+    try testing.expectEqual(id, req.one.?);
+
+    // Nothing under the cursor is the one case that has to say so: a key that
+    // did nothing would read as a failed post.
+    fx.app.pr.pending = null;
+    fx.app.comments.remove(id);
+    try fx.app.rebuildRows(.line);
+    try fx.press("<C-p>");
+    try testing.expect(fx.app.pr.pending == null);
+    try testing.expect(fx.app.notice.text().len > 0);
 }
 
 test "a reply is a call, and the thread waits for the forge to mint an id" {

@@ -305,7 +305,10 @@ pub const Modes = packed struct(u8) {
     /// The thread overlay. It has no filter line, so unlike the two lists it
     /// can have `j` and `k` themselves rather than their capitals.
     thread: bool = false,
-    _pad: u2 = 0,
+    /// The box with somebody else's remark in it. Nothing there is typed, so
+    /// plain letters are bindings the way they are in the overlay.
+    view: bool = false,
+    _pad: u1 = 0,
 
     pub const both: Modes = .{ .normal = true, .visual = true };
     pub const normal_only: Modes = .{ .normal = true };
@@ -327,6 +330,9 @@ pub const Modes = packed struct(u8) {
     /// Inside the thread overlay. Nothing else is live while it is up, the
     /// way nothing else is live under `?`.
     pub const thread_only: Modes = .{ .thread = true };
+    /// Inside the read-only box. Its keys are the overlay's, because the two
+    /// show the same thing and a reader arrives at them the same way.
+    pub const view_only: Modes = .{ .view = true };
 
     pub fn has(self: Modes, mode: event.Mode) bool {
         return switch (mode) {
@@ -335,6 +341,7 @@ pub const Modes = packed struct(u8) {
             .help => self.help,
             .finder => self.finder,
             .note_input => self.compose,
+            .note_view => self.view,
             .thread => self.thread,
             // The prompt modes never reach the keymap: `prompt.zig` takes the
             // keys, because they are text rather than actions.
@@ -528,6 +535,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ leader, c('r'), c('c') }, .command = .thread_reply, .desc = "reply to the comment here, on the request", .group = .comment },
     .{ .chords = &.{ leader, c('l'), c('c') }, .command = .comment_list, .desc = "list every comment in the review", .group = .comment },
     .{ .chords = &.{ leader, c('s'), c('c') }, .command = .comment_send, .desc = "send this comment to the agent on its own", .group = .comment },
+    // The same key the list and the box post with, over the remark the cursor
+    // is on. `<C-s>` reads the same way one line up: the whole review there,
+    // one remark where a remark is what is in front of you.
+    .{ .chords = &.{ctrl('p')}, .command = .comment_post_one, .modes = Modes.normal_only, .desc = "post the comment here to the pull request", .group = .comment },
     .{ .chords = &.{ctrl('s')}, .command = .submit_review, .desc = "write the review file and tell the agent", .group = .comment },
     .{ .chords = &.{c('/')}, .command = .search_forward, .desc = "search the review", .group = .find },
     .{ .chords = &.{c('n')}, .command = .search_next, .desc = "next and previous match", .group = .find },
@@ -687,6 +698,16 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{ctrl('u')}, .command = .page_up, .modes = Modes.thread_only },
     .{ .chords = &.{ c('g'), c('g') }, .command = .top, .modes = Modes.thread_only },
     .{ .chords = &.{c('G')}, .command = .bottom, .modes = Modes.thread_only },
+
+    // Somebody else's remark, open to be read. The same two words as the
+    // overlay, so answering one does not depend on which of them it was read
+    // in. Everything else there is a motion over the text.
+    // Undescribed on purpose: a remark with a thread opens in the overlay, so
+    // the only ones that reach this box have nothing to answer. The key stays
+    // for the hand that reaches for it, and says why there is nothing to do.
+    .{ .chords = &.{c('r')}, .command = .thread_reply, .modes = Modes.view_only },
+    .{ .chords = &.{c(event.code.escape)}, .command = .compose_cancel, .modes = Modes.view_only },
+    .{ .chords = &.{c('q')}, .command = .compose_cancel, .modes = Modes.view_only },
 };
 
 pub const Match = union(enum) {
@@ -938,7 +959,7 @@ test "every binding is live in at least one mode" {
     // one that was.
     for (default_bindings) |b| {
         try testing.expect(b.modes.normal or b.modes.visual or b.modes.help or
-            b.modes.finder or b.modes.compose or b.modes.thread);
+            b.modes.finder or b.modes.compose or b.modes.thread or b.modes.view);
     }
 }
 

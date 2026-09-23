@@ -248,6 +248,7 @@ A dozen remarks is a dozen interruptions, or it is one file.
 | `<Space>rc` | reply to the one here, on the request |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send just this one, now |
+| `<C-p>` | post the one here to the pull request |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | write `.lgtm/review-3.md` and tell the agent about it |
 
@@ -276,7 +277,10 @@ followed by the hunk it sits in: a remark squeezed into a column is a remark you
 cannot read, so it is not in the column. Typing part of one still finds it.
 A conversation is one row there too, marked `+2` for the messages it stands for,
 and typing a word from any of them finds it - folding a conversation must not
-hide what was said in it.
+hide what was said in it. Enter goes to the remark and opens it where it sits:
+the box on one alone, the thread overlay on a conversation. A row was picked to
+read what it says, so reading it is not a second key. Where the file it was
+written on has gone, the jump says so instead and nothing opens.
 
 #### On a pull request
 
@@ -312,23 +316,29 @@ five. Two remarks you wrote yourself on one line are two conversations and stay
 two rows. A reply that re-anchored to a different line is drawn on the line it
 actually sits on, not folded away under the message it answers.
 
-**`<Space>vc` on a line carrying a conversation opens the thread.** Every
-message stacked, author and how long ago on each, the code the first one was
-written against above them, and your own marked `(you)` and selected when there
-is one. `j` and `k` move between messages, `<C-d>` and `<C-u>` scroll a taller
-thread half a box at a time, `gg` and `G` reach the ends, `<CR>` opens the
-selected message to edit, `r` answers the conversation, `d` deletes the
-selected message, and `<Esc>` closes. `d` rather than `<C-d>`, which is the
-half page here as it is in the diff.
+**`<Space>vc` opens the thread on anything that lives on the request.** A
+conversation opens there, and so does a single remark on a pull request: on a
+request a remark is a conversation of one, and answering it is what the
+overlay's keys are for. Every message stacked, author and how long ago on each,
+the code the first one was written against above them, and your own marked
+`(you)` and selected when there is one. `j` and `k` move between messages,
+`<C-d>` and `<C-u>` scroll a taller thread half a box at a time, `gg` and `G`
+reach the ends, `<CR>` opens the selected message to edit, `r` answers the
+conversation, `d` deletes the selected message, and `<Esc>` closes. `d` rather
+than `<C-d>`, which is the half page here as it is in the diff.
 
 The thread is also how you say *which* remark you mean. A line on an open
 request commonly carries somebody else's and your own; the selection is a
 comment rather than a line, and it stays behind when the overlay closes, so
-`<Space>dc` afterwards deletes the one you had highlighted. On a line carrying
-one remark `<Space>vc` still opens the box directly, titled
-`@author path:line - VIEW`. Somebody else's you cannot edit or delete: it lives
-on the request, and a changed copy here would say something its author never
-wrote.
+`<Space>dc` afterwards deletes the one you had highlighted. Your own remark on
+the request opens there too, which is what makes `r` reachable on it: `<CR>` is
+the edit, one key rather than none.
+
+A remark that is on no request - one a phone left - still opens in the box
+directly, titled `@author path:line - VIEW`. Somebody else's you cannot edit or
+delete, because a changed copy here would say something its author never wrote.
+Nothing there is typed, so the letters are keys: the vim motions read it, and
+`<Esc>` or `q` closes.
 
 **`r` replies.** A review is a conversation, so the overlay is not only a
 reading view: `r` on any message opens an empty box aimed at the thread, titled
@@ -381,8 +391,12 @@ one total: `3 of mine, 4 from the request`.
 **Your own remarks get a second home.** `:post` hands the collected ones to the
 request as one review; `:approve` and `:request-changes` are the same batch with
 a different verdict, and anything you type after the command becomes the
-review's opening sentence. In the list, `<C-p>` posts just the highlighted one,
-which is GitHub's "add single comment" beside its "submit review".
+review's opening sentence. `<C-p>` posts just one, which is GitHub's "add
+single comment" beside its "submit review": the highlighted row in the list,
+the remark under the cursor in the diff, and what is in the box when the box is
+open. Posting is also what gives a remark of yours a thread, so `r` can answer
+it later - until then it lives only in `.lgtm/` and there is nothing to reply
+to.
 
 Posting and sending are separate facts, so a remark can go to your agent *and*
 to the author, and neither hides it from the other. Posting a second time sends
@@ -726,6 +740,7 @@ A second `,` keeps going back rather than turning round, the way vim's does.
 | `<Space>rc` | reply to the one here, on the request |
 | `<Space>lc` | list every comment |
 | `<Space>sc` | send this one on its own |
+| `<C-p>` | post the one here to the pull request |
 | `<Space>dc` | delete the one here |
 | `<C-s>` | submit the review, and mark what you read |
 

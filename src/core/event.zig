@@ -11,6 +11,10 @@ pub const Mode = enum {
     normal,
     visual,
     note_input,
+    /// Somebody else's remark, open in the box to be read. Its own mode so
+    /// that the keys which work there are keymap rows: in a box that cannot
+    /// be typed into, a letter is free to mean something again.
+    note_view,
     finder,
     /// The `?` overlay. Its own mode so that the keys which close it are rows
     /// in the keymap like everything else, and so every other binding is
@@ -252,11 +256,12 @@ test "deinit frees the payloads of events nobody drained" {
     q.deinit();
 }
 
-test "all eight modes are declared" {
+test "all nine modes are declared" {
     // Six from the original set, plus `help` - added when `?` gained an
-    // overlay whose close keys had to be keymap rows like any other - and
-    // `thread`, added for the same reason over a conversation.
-    try std.testing.expectEqual(@as(usize, 8), @typeInfo(Mode).@"enum".fields.len);
+    // overlay whose close keys had to be keymap rows like any other -
+    // `thread`, added for the same reason over a conversation, and
+    // `note_view`, for the box that holds a remark nobody here may change.
+    try std.testing.expectEqual(@as(usize, 9), @typeInfo(Mode).@"enum".fields.len);
 }
 
 test "unreachable event variants are declared, not retrofitted" {

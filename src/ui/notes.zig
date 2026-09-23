@@ -11,6 +11,7 @@ const i18n = @import("../i18n/i18n.zig");
 const app_mod = @import("app.zig");
 const App = app_mod.App;
 const comments_mod = @import("../core/comments.zig");
+const dist = comments_mod.dist;
 const event_mod = @import("../core/event.zig");
 const compose_mod = @import("compose.zig");
 const finder_mod = @import("finder.zig");
@@ -140,12 +141,7 @@ pub fn commentAdd(app: *App) Allocator.Error!void {
         app.notice.set("nothing here to comment on", .{});
         return;
     };
-    app.compose_for = .{ .fresh = at };
-    app.compose_to = .copy;
-    app.outgoing.clearRetainingCapacity();
-    app.compose.start("");
-    app.preset_index = null;
-    app.mode = .note_input;
+    openBox(app, .{ .fresh = at }, .copy, "");
 }
 
 /// `<Space>gc`: a comment box holding the selected lines in a
@@ -168,15 +164,10 @@ pub fn commentSuggest(app: *App) Allocator.Error!void {
     }
     try seed.appendSlice(app.gpa, "```");
 
-    app.compose_for = .{ .fresh = at };
-    app.compose_to = .copy;
-    app.outgoing.clearRetainingCapacity();
-    app.compose.start(seed.items);
+    openBox(app, .{ .fresh = at }, .copy, seed.items);
     // Inside the fence: the reader came to change that, not to write
     // around it.
     app.compose.cursor = "```suggestion\n".len;
-    app.preset_index = null;
-    app.mode = .note_input;
 
     // A selection can shrink for a good reason - a removed line has
     // nothing to replace - but shrinking silently looks broken.
@@ -191,39 +182,46 @@ pub fn commentSuggest(app: *App) Allocator.Error!void {
 /// the only thing that can say *which* remark is meant. One remark alone
 /// opens in the box as it always has.
 pub fn commentOpen(app: *App) Allocator.Error!void {
-    const n = commentUnderCursor(app) orelse {
-        app.notice.set("no comment here", .{});
-        return;
-    };
+    const n = commentHere(app) orelse return;
     if (thread_mod.worthOpening(app, n)) return thread_mod.open(app, n);
     return commentEdit(app);
 }
 
 /// The same box, seeded with what the comment already says.
 pub fn commentEdit(app: *App) Allocator.Error!void {
-    const n = commentUnderCursor(app) orelse {
-        app.notice.set("no comment here", .{});
-        return;
-    };
+    const n = commentHere(app) orelse return;
     // Somebody else's opens to be read. Refusing to open it at all left the
     // only full copy of it in a gutter marker.
     if (n.theirs() and !mine(app, n.*)) return commentRead(app, n);
-    app.compose_for = if (n.theirs())
+    // The reader's own that lives on the request: saving is a call to the
+    // forge, not a store write, and the box has to know which before it opens.
+    const kind: app_mod.ComposeFor = if (n.theirs())
         .{ .amend = .{ .id = n.id, .remote = n.remote } }
     else
         .{ .edit = n.id };
-    app.compose_to = .copy;
-    app.compose.start(n.body);
-    app.preset_index = null;
-    app.mode = .note_input;
+    openBox(app, kind, .copy, n.body);
 }
 
 /// A remark from the request, in the box with no way to change it: editing a
 /// copy would say something its author never wrote.
 pub fn commentRead(app: *App, n: *comments_mod.Comment) void {
-    app.compose_for = .{ .view = n.id };
-    app.compose_to = .copy;
+    openBox(app, .{ .view = n.id }, .copy, "");
+    // Read only, caret at the top: nothing in this one is typed.
     app.compose.startView(n.body);
+    app.mode = .note_view;
+}
+
+/// The box, pointed at one thing. Every way into it goes through here: the
+/// five fields were set one by one at each of them, and two that disagreed are
+/// how `<C-s>` in a reply box once saved a remark instead of sending it.
+pub fn openBox(app: *App, kind: app_mod.ComposeFor, to: App.Delivery, seed: []const u8) void {
+    app.compose_for = kind;
+    app.compose_to = to;
+    // Whatever the last send left behind. Nothing reads it until `want_send`
+    // is set and every path that sets it fills the buffer first, but a box
+    // opening over a stale payload is one fewer thing to have to know.
+    app.outgoing.clearRetainingCapacity();
+    app.compose.start(seed);
     app.preset_index = null;
     app.mode = .note_input;
 }
@@ -244,6 +242,16 @@ pub fn commentUnderCursor(app: *App) ?*comments_mod.Comment {
         if (app.comments.find(app.comment_sel)) |n| return n;
     }
     return app.comments.at(at.path, at.line);
+}
+
+/// The same, saying so when there is none. Every key that acts on "the
+/// comment here" asks through this, so they cannot disagree about what to say
+/// when there is nothing under the cursor.
+pub fn commentHere(app: *App) ?*comments_mod.Comment {
+    return commentUnderCursor(app) orelse {
+        app.notice.set("no comment here", .{});
+        return null;
+    };
 }
 
 /// `<Space>vc`: the nearest note, opened to read and edit - or to read
@@ -297,40 +305,49 @@ pub fn listSelected(app: *App) ?*comments_mod.Comment {
 /// saying, so it is where saying it should be possible.
 pub fn listSendOne(app: *App) !void {
     const n = listSelected(app) orelse return;
+    finder_mod.closeFiles(app);
+    try sendOne(app, n);
+    app.rebuildRows(.line) catch {};
+}
+
+/// One remark handed over: its line queued for the agent, and marked sent.
+///
+/// Handed over, so it is sent: it drops out of the next `review-N.md` rather
+/// than asking twice, and editing it reopens it the way editing any sent
+/// comment does.
+pub fn sendOne(app: *App, n: *comments_mod.Comment) !void {
     var buf: [compose_mod.max_bytes]u8 = undefined;
     var flat: [compose_mod.max_bytes]u8 = undefined;
-    const one = compose_mod.flatten(&flat, n.body);
-    // The pull request comes first for the same reason the review file
-    // names it: `path:line` on somebody else's tree is a different line
-    // here.
-    const line = if (app.pr.number == 0)
-        std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, one }) catch one
-    else
-        std.fmt.bufPrint(&buf, "PR #{d} {s}:{d} - {s}", .{ app.pr.number, n.path, n.line, one }) catch one;
+    const line = oneLine(app, &buf, &flat, n.*);
     n.state = .sent;
     app.comments.dirty = true;
+    saveComments(app);
 
-    finder_mod.closeFiles(app);
     app.outgoing.clearRetainingCapacity();
     try app.outgoing.appendSlice(app.gpa, line);
     app.want_send = .send;
-    saveComments(app);
-    app.rebuildRows(.line) catch {};
 }
 
 pub fn listDrop(app: *App) void {
     const n = listSelected(app) orelse return;
     if (n.theirs()) return dropTheirs(app, n);
-    app.comments.remove(n.id);
-    saveComments(app);
+    drop(app, n.id);
     finder_mod.buildPickList(app);
-    app.rebuildRows(.line) catch {};
     if (app.comments.len() == 0) {
         finder_mod.closeFiles(app);
         app.notice.set("comment deleted - none left", .{});
         return;
     }
     app.notice.set("comment deleted", .{});
+}
+
+/// One of this checkout's own, gone: off the store, onto disk, out of the
+/// rows. What lives on the request goes through `dropTheirs` instead, which
+/// has to ask the forge.
+fn drop(app: *App, id: u32) void {
+    app.comments.remove(id);
+    saveComments(app);
+    app.rebuildRows(.line) catch {};
 }
 
 /// `<Space>sc`: this one comment, into the compose box, ready to send.
@@ -340,31 +357,37 @@ pub fn listDrop(app: *App) void {
 /// cannot wait for the batch: one line, the reference and the text, into
 /// the box where it can be edited before it goes.
 pub fn commentSend(app: *App) !void {
-    const n = commentUnderCursor(app) orelse {
-        app.notice.set("no comment here", .{});
-        return;
-    };
+    const n = commentHere(app) orelse return;
     var buf: [compose_mod.max_bytes]u8 = undefined;
     var flat: [compose_mod.max_bytes]u8 = undefined;
-    const body = compose_mod.flatten(&flat, n.body);
-    const seed = std.fmt.bufPrint(&buf, "{s}:{d} - {s}", .{ n.path, n.line, body }) catch n.body;
+    openBox(app, .agent, .send, oneLine(app, &buf, &flat, n.*));
+}
 
-    app.compose_for = .agent;
-    app.compose_to = .send;
-    app.compose.start(seed);
-    app.preset_index = null;
-    app.mode = .note_input;
+/// One remark as the single line the agent is handed: where it is, then what
+/// it says, flattened to obey hard rule 1. The three keys that send one
+/// remark all read from here, so the reference cannot come out three ways.
+///
+/// The request's number leads when there is one, for the same reason the
+/// review file names it: `path:line` on somebody else's tree is a different
+/// line here. `buf` and `flat` are the caller's because the result points into
+/// them.
+pub fn oneLine(app: *const App, buf: []u8, flat: []u8, n: comments_mod.Comment) []const u8 {
+    const body = compose_mod.flatten(flat, n.body);
+    var where: [64]u8 = undefined;
+    const at = if (n.span > 1)
+        std.fmt.bufPrint(&where, "{s}:{d}-{d}", .{ n.path, n.line, n.end() }) catch n.path
+    else
+        std.fmt.bufPrint(&where, "{s}:{d}", .{ n.path, n.line }) catch n.path;
+    return if (app.pr.number == 0)
+        std.fmt.bufPrint(buf, "{s} - {s}", .{ at, body }) catch body
+    else
+        std.fmt.bufPrint(buf, "PR #{d} {s} - {s}", .{ app.pr.number, at, body }) catch body;
 }
 
 pub fn commentDelete(app: *App) void {
-    const n = commentUnderCursor(app) orelse {
-        app.notice.set("no comment here", .{});
-        return;
-    };
+    const n = commentHere(app) orelse return;
     if (n.theirs()) return dropTheirs(app, n);
-    app.comments.remove(n.id);
-    saveComments(app);
-    app.rebuildRows(.line) catch {};
+    drop(app, n.id);
     app.notice.set("comment deleted", .{});
 }
 
@@ -654,9 +677,7 @@ pub fn commentMarks(app: *App) []const render.CommentMark {
 fn worstOn(app: *App, n: comments_mod.Comment) render.CommentMark.State {
     var buf: [thread_mod.max_messages]*comments_mod.Comment = undefined;
     var worst = markState(n);
-    const t = n.thread();
-    for (app.comments.allAt(n.path, n.line, &buf)) |c| {
-        if (c.thread() != t) continue;
+    for (app.comments.threadAt(n, &buf)) |c| {
         const st = markState(c.*);
         if (st.worseThan(worst)) worst = st;
     }
@@ -703,10 +724,6 @@ pub fn noComments(app: *App) void {
     app.notice.set("no comments yet - {s} writes one", .{
         app.keyFor(.comment_add, .normal, &key),
     });
-}
-
-pub fn dist(a: u32, b: u32) u32 {
-    return if (a > b) a - b else b - a;
 }
 
 const testing = std.testing;
@@ -804,16 +821,18 @@ test "the remark the reader picked is the one that opens" {
     try testing.expectEqualStrings("mine", commentUnderCursor(&fx.app).?.body);
 }
 
-test "a remark from the request opens to be read, never to be edited" {
+test "a remark nobody here wrote, and with no thread, opens to be read" {
     var fx = try app_mod.Fixture.init(testing.allocator);
     defer fx.deinit();
 
+    // No remote: one that came from a phone rather than from the request.
+    // Anything with a thread opens in the overlay, where answering lives.
     const body = "this retry never backs off";
     _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = body, .author = "someone", .outdated = false, .remote = 0 });
     try commentView(&fx.app, 20);
 
     // It used to refuse to open at all.
-    try testing.expect(fx.app.mode == .note_input);
+    try testing.expect(fx.app.mode == .note_view);
     try testing.expect(fx.app.compose_for == .view);
     try testing.expectEqualStrings(body, fx.app.compose.text());
 
@@ -828,6 +847,23 @@ test "a remark from the request opens to be read, never to be edited" {
     try testing.expectEqual(@as(usize, 0), fx.app.compose.cursor);
 }
 
+test "a remark on the request opens the thread even as the only message in it" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    fx.app.pr.number = 16;
+    _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "this retry never backs off", .author = "someone", .outdated = false, .remote = 900 });
+    try commentView(&fx.app, 20);
+    // A conversation of one is still a conversation: answering it is what the
+    // overlay is for, and a box with no reply key was a dead end.
+    try fx.expectMode(.thread);
+
+    try fx.press("r");
+    try testing.expectEqual(@as(u64, 900), fx.app.compose_for.reply);
+    try testing.expectEqualStrings("", fx.app.compose.text());
+    try fx.expectMode(.note_input);
+}
+
 test "a remark of the reader's own on the request opens to be edited there" {
     var fx = try app_mod.Fixture.init(testing.allocator);
     defer fx.deinit();
@@ -837,18 +873,24 @@ test "a remark of the reader's own on the request opens to be edited there" {
     @memcpy(fx.app.pr.login[0..fx.app.pr.login_len], "kunkka19xx");
     const id = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "mine, posted", .author = "Kunkka19xx", .remote = 777 });
 
+    // On the request, so the overlay opens over it and `<CR>` is the edit.
     try commentView(&fx.app, 20);
-    // Editable, and `<CR>` knows it has to reach the forge.
+    try fx.expectMode(.thread);
+    try fx.press("<CR>");
     try testing.expect(!fx.app.compose.read_only);
     try testing.expectEqual(id, fx.app.compose_for.amend.id);
     try testing.expectEqual(@as(u64, 777), fx.app.compose_for.amend.remote);
+    try fx.press("<Esc>");
+    try fx.press("<Esc>");
 
-    // Somebody else's on the same request is read and no more.
+    // Somebody else's on the same request says why instead, and leaves the
+    // conversation up.
     fx.app.comments.remove(id);
     _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "theirs", .author = "someone", .outdated = false, .remote = 778 });
     try commentView(&fx.app, 20);
-    // Read, and not an amend: one field cannot be both.
-    try testing.expect(fx.app.compose_for == .view);
+    try fx.press("<CR>");
+    try fx.expectMode(.thread);
+    try testing.expect(!fx.app.compose.open);
 }
 
 test "without a login nothing is claimed, so a remark stays read only" {
@@ -858,7 +900,9 @@ test "without a login nothing is claimed, so a remark stays read only" {
     // `gh` could not be asked. Guessing would offer an edit that 404s.
     _ = try fx.app.comments.adopt(.{ .path = "a.zig", .line = 2, .span = 1, .body = "mine, posted", .author = "kunkka19xx", .remote = 777 });
     try commentView(&fx.app, 20);
-    try testing.expect(fx.app.compose.read_only);
+    try fx.press("<CR>");
+    try fx.expectMode(.thread);
+    try testing.expect(!fx.app.compose.open);
 }
 
 test "a notice is drawn in the reader's language" {

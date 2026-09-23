@@ -78,9 +78,13 @@ pub fn alive(app: *App) bool {
     return messages(app, &buf).len > 0;
 }
 
-/// Whether a remark is worth an overlay. One alone on its line is not: it
-/// opens in the compose box the way it always has.
+/// Whether a remark is worth an overlay. A conversation always is, and so is
+/// a remark that lives on the request even when it is alone: there it is a
+/// conversation of one, and answering it is what the overlay's keys are for.
+/// A remark of this checkout's own has nothing to answer yet, so it opens in
+/// the compose box the way it always has.
 pub fn worthOpening(app: *App, on: *const comments_mod.Comment) bool {
+    if (on.thread() != 0) return true;
     var buf: [max_messages]*comments_mod.Comment = undefined;
     return app.comments.conversationAt(on.path, on.line, &buf).len > 1;
 }
@@ -173,6 +177,8 @@ fn act(app: *App, list: []const *comments_mod.Comment, at: usize) !void {
 /// thread's root, which is all the forge's endpoint takes - a reply has no
 /// line of its own.
 pub fn reply(app: *App, on: *const comments_mod.Comment) void {
+    // The number, not the repository: this only opens a box, and the call it
+    // eventually makes checks for itself.
     if (app.pr.number == 0) {
         app.notice.set("not reviewing a pull request", .{});
         return;
@@ -198,20 +204,12 @@ pub fn reply(app: *App, on: *const comments_mod.Comment) void {
     }
 
     if (app.mode == .thread) app.compose_from = .thread;
-    app.compose_for = .{ .reply = root };
-    app.compose_to = .copy;
-    app.compose.start("");
-    app.preset_index = null;
-    app.mode = .note_input;
+    notes.openBox(app, .{ .reply = root }, .copy, "");
 }
 
 /// The same from outside the overlay, on whatever remark the cursor is at.
 pub fn replyHere(app: *App) void {
-    const n = notes.commentUnderCursor(app) orelse {
-        app.notice.set("no comment here", .{});
-        return;
-    };
-    reply(app, n);
+    reply(app, notes.commentHere(app) orelse return);
 }
 
 /// How long ago, in one unit: `2d` answers "an hour or a month later" in

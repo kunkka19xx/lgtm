@@ -534,6 +534,10 @@ pub const App = struct {
         for (before.items) |b| {
             const now = self.review.buffersFor(b.path).work orelse continue;
             self.comments.carry(b.path, b.text, now.bytes) catch {};
+            // And the other direction: a remark the map dropped earlier is
+            // live again the moment its line is back, rather than staying
+            // stale for the rest of the checkout.
+            self.comments.revive(b.path, now.bytes);
         }
         notes.saveComments(self);
 
@@ -2117,7 +2121,7 @@ pub const App = struct {
                 if (self.mode == .command) return cmdline.feedPrompt(self, k, body);
                 if (self.mode == .help) return self.feedHelp(k, body);
                 if (self.mode == .finder) return finder_mod.feedFiles(self, k, body);
-                if (self.mode == .note_input) return outgoing.feedCompose(self, k, body);
+                if (self.mode == .note_input or self.mode == .note_view) return outgoing.feedCompose(self, k, body);
                 // A notice describes the last keystroke, so the next one
                 // clears it - and clearing before dispatch means the command
                 // about to run can leave one of its own.
