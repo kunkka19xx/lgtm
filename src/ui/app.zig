@@ -205,6 +205,15 @@ pub const App = struct {
     /// The phone attached through `lgtm serve`, empty when none is.
     phone_buf: [64]u8 = undefined,
     phone_len: usize = 0,
+    /// The branch this checkout is on, and empty outside a repository.
+    ///
+    /// Which review the remarks in `.lgtm/` belong to: a comment written on
+    /// one branch is about code the next branch does not have, and the store
+    /// would otherwise re-anchor it by text into whatever happened to match.
+    /// A pull request scope overrides it, because there the review is two
+    /// refs and the local checkout has nothing to do with it.
+    branch_buf: [256]u8 = undefined,
+    branch_len: u16 = 0,
     /// What the compose box will do with what is typed. The box itself does
     /// not know or care; everything that acts on the text reads this.
     compose_for: ComposeFor = .agent,
@@ -478,6 +487,58 @@ pub const App = struct {
     /// A new generation, and the reader put back where they were. The work
     /// is `review.regenerate`; what is left here is the part that is about a
     /// reader rather than a diff.
+    /// A checkout in another pane, followed rather than asked about.
+    ///
+    /// Asked about was the other option and it is the wrong one: this tool
+    /// runs beside an agent, an agent making a branch is ordinary traffic, and
+    /// a modal that steals the keyboard mid-sentence because somebody else's
+    /// pane ran `git checkout` is hostile. Following is also what the rest of
+    /// the tool already does when the repository moves under it - the review
+    /// is re-derived, and nothing here is durable that `.lgtm/` does not hold.
+    ///
+    /// Nothing is lost: the remarks on the branch being left are written out
+    /// under its own name and come back when it is checked out again. The
+    /// notice is what says so, because a swap nobody was told about would be
+    /// the same silent re-homing this is here to stop.
+    pub fn followBranch(self: *App, name: []const u8, body: u16) !void {
+        if (name.len == 0 or std.mem.eql(u8, name, self.branch())) return;
+        // A pull request review is two refs read out of git, so the local
+        // checkout cannot disturb it and its remarks are already scoped to the
+        // request. Follow the name so the badge stays honest, and leave
+        // everything else alone.
+        if (self.pr.number != 0) {
+            self.setBranch(name);
+            return;
+        }
+
+        var was: [256]u8 = undefined;
+        const from = was[0..self.branch_len];
+        @memcpy(from, self.branch());
+        const kept = self.comments.len();
+
+        notes.swapBranch(self, name);
+        // The reader was reading a diff of code this checkout no longer has.
+        try self.rediff();
+        self.clampScroll(body);
+
+        if (kept > 0 and from.len > 0) {
+            self.notice.set("now on {s} - {d} comment{s} on {s} put away", .{
+                name, kept, if (kept == 1) "" else "s", from,
+            });
+        } else {
+            self.notice.set("now on {s}", .{name});
+        }
+    }
+
+    pub fn branch(self: *const App) []const u8 {
+        return self.branch_buf[0..self.branch_len];
+    }
+
+    pub fn setBranch(self: *App, name: []const u8) void {
+        self.branch_len = @intCast(@min(name.len, self.branch_buf.len));
+        @memcpy(self.branch_buf[0..self.branch_len], name[0..self.branch_len]);
+    }
+
     pub fn rediff(self: *App) !void {
         const span = metrics.span(.rediff);
         defer span.end();
@@ -2200,6 +2261,13 @@ pub const App = struct {
             // press anything.
             .agent_quiescent => _ = turns_mod.snapshotTurn(self),
             .phone => notes.loadPhone(self),
+            // Somebody checked out something else in another pane. The
+            // review on screen is of code that is no longer here, and the
+            // remarks beside it are about a branch this one is not.
+            .head_moved => |name| {
+                try self.followBranch(name, body);
+                event.Queue.freePayload(self.gpa, .{ .head_moved = name });
+            },
             .snapshot_taken => {},
         }
     }

@@ -411,7 +411,8 @@ three lines. Nothing can be suggested for a line that is gone.
 
 Comments are kept per review: those written on `--pr 16` live in
 `.lgtm/pr-16.jsonl` and appear only while you are reviewing #16. Your working
-tree keeps its own in `.lgtm/comments.jsonl`.
+tree keeps one file per branch, `.lgtm/branch-main.jsonl` and so on, because a
+remark written on one branch is about code the next branch does not have.
 
 What the agent is told changes too. A pull request is somebody else's tree, so
 `src/config.zig:8` means nothing in your checkout. The review file opens by
@@ -436,6 +437,17 @@ survives quitting `lgtm`: come back tomorrow and it still means the same thing.
 
 The mark never hides anything. You are always looking at the whole diff against
 `HEAD`; the bars are an annotation on top of it.
+
+**A checkout in another pane is followed, not asked about.** Your agent runs
+`git checkout -b fix/thing` and `lgtm` re-diffs against the branch it is now
+on, says `now on fix/thing` and moves the badge. Nothing is lost: the remarks
+you had written are saved under the branch you were on and come back the moment
+you check it out again. There is no dialog, because an agent making a branch is
+ordinary traffic and a box that stole the keyboard mid-sentence would be worse
+than the problem.
+
+A pull request review is not affected at all: `--pr 16` reads both sides out of
+git by ref, so nothing in your checkout can disturb it.
 
 ### 5. Watch for a weakened test
 
@@ -860,7 +872,7 @@ review with its own `.gitignore`:
 
 | | |
 |---|---|
-| `.lgtm/comments.jsonl` | your comments on the working tree |
+| `.lgtm/branch-NAME.jsonl` | your comments on that branch's working tree |
 | `.lgtm/pr-N.jsonl` | your comments on pull request N |
 | `.lgtm/review-N.md` | what `<C-s>` wrote |
 | `.lgtm/state.json` | the session, the turn count, where you read to |

@@ -77,6 +77,9 @@ pub const Event = union(enum) {
     snapshot_taken: struct { turn: u32, ref: []const u8 },
     /// `.lgtm/phone` or `.lgtm/phone.jsonl` changed: a phone came or went, or commented.
     phone,
+    /// Somebody checked out something else. The new branch, owned by the queue
+    /// until drained and freed by the consumer, like `files_changed`.
+    head_moved: []const u8,
     // Later: lsp_response, agent_edit (ACP).
 };
 
@@ -119,6 +122,7 @@ pub const Queue = struct {
                 for (paths) |p| gpa.free(p);
                 gpa.free(paths);
             },
+            .head_moved => |name| gpa.free(name),
             .snapshot_taken => |s| gpa.free(s.ref),
             else => {},
         }
@@ -265,8 +269,8 @@ test "all nine modes are declared" {
 }
 
 test "unreachable event variants are declared, not retrofitted" {
-    // Same reasoning as the modes above: two of these seven are unproducible in
+    // Same reasoning as the modes above: two of these eight are unproducible in
     // v0.1, and declaring them costs nothing next to revisiting every dispatch
     // site later.
-    try std.testing.expectEqual(@as(usize, 7), @typeInfo(Event).@"union".fields.len);
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(Event).@"union".fields.len);
 }
