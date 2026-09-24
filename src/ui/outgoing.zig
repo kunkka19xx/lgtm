@@ -619,6 +619,77 @@ pub fn appendLines(app: *App, out: *std.ArrayList(u8)) Allocator.Error!void {
 /// Newlines are fine here. Hard rule 1 is about what `send-keys` does with
 /// one, and this never reaches `send-keys`: `y` is the clipboard whatever
 /// the backend is.
+/// Whether `cmd` has a binding live in `mode`.
+fn keysIn(bindings: []const keymap.Binding, cmd: keymap.Command, mode: event.Mode) bool {
+    for (bindings) |b| {
+        if (b.command == cmd and b.modes.has(mode)) return true;
+    }
+    return false;
+}
+
+fn append(app: *App, comptime fmt: []const u8, args: anytype) Allocator.Error!void {
+    var buf: [keytext.max_row_keys_bytes]u8 = undefined;
+    try app.outgoing.appendSlice(app.gpa, std.fmt.bufPrint(&buf, fmt, args) catch return);
+}
+
+/// `<C-y>` in the `?` overlay: the selected row as the `[keys]` lines that
+/// would bind it, on the clipboard.
+///
+/// A paste rather than a write, for the reason `:theme` names its line instead
+/// of saving it - the config file is hand-written and lgtm does not rewrite it.
+/// Composing the line is the fiddly part, and the popup is already rendering
+/// the spelling the parser accepts.
+pub fn copyBinding(app: *App) Allocator.Error!void {
+    var scratch: std.heap.ArenaAllocator = .init(app.gpa);
+    defer scratch.deinit();
+
+    const mode = app.help.from;
+    const rows = try keytext.helpEntries(
+        app.km.bindings,
+        mode,
+        app.help.shown(),
+        app.help.filter.text(),
+        scratch.allocator(),
+    );
+    if (app.help.index >= rows.len or rows[app.help.index].cmds.len == 0) {
+        app.notice.set("nothing selected", .{});
+        return;
+    }
+    // A merged row gives a line each: `gg G` is one row and two commands, and
+    // binding only `top` would be half a remap with nothing to say so.
+    const cmds = rows[app.help.index].cmds;
+
+    app.outgoing.clearRetainingCapacity();
+    for (cmds, 0..) |cmd, i| {
+        // Compose rows are drawn in the normal-mode popup but their keys are
+        // live in the box, so the row's mode is not always theirs.
+        const live: event.Mode = if (keysIn(app.km.bindings, cmd, mode)) mode else .note_input;
+        if (i > 0) try app.outgoing.append(app.gpa, '\n');
+        try append(app, "{s} = [", .{@tagName(cmd)});
+
+        var n: usize = 0;
+        for (app.km.bindings) |b| {
+            if (b.command != cmd or !b.modes.has(live)) continue;
+            var kbuf: [keytext.max_keys_bytes]u8 = undefined;
+            defer n += 1;
+            try append(app, "{s}\"{s}\"", .{
+                if (n > 0) ", " else "",
+                keytext.bufWriteChords(b.chords, &kbuf),
+            });
+        }
+        try app.outgoing.append(app.gpa, ']');
+    }
+
+    app.want_send = .copy;
+    // Named, because the clipboard is the one place the reader cannot see
+    // what they just took.
+    if (cmds.len == 1) {
+        app.notice.set("copied {s} - paste it under [keys]", .{@tagName(cmds[0])});
+    } else {
+        app.notice.set("copied {d} lines - paste them under [keys]", .{cmds.len});
+    }
+}
+
 pub fn yank(app: *App, extent: App.Extent) Allocator.Error!void {
     const f = app.current() orelse {
         app.notice.set("nothing here to yank", .{});
@@ -816,6 +887,35 @@ test "y yanks the text, the way the key means in vim" {
     try fx.press("Vj");
     try fx.press("y");
     try testing.expectEqualStrings("fn alpha() {\n    const x = 1;", payload(&fx.app));
+}
+
+test "the popup copies a row as the [keys] line that would bind it" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // `?` opens on the `move` tab, whose first row is `line_down`. Every
+    // spelling of it, because an entry replaces the defaults rather than adds
+    // to them - a line naming only `j` would silently drop `<Down>`.
+    try fx.press("?");
+    try fx.press("<C-y>");
+    try testing.expectEqual(App.Delivery.copy, fx.app.want_send.?);
+    try testing.expectEqualStrings("line_down = [\"j\", \"<Down>\"]", payload(&fx.app));
+
+    // Four rows down is `gg G`: one row, two commands, a line each.
+    try fx.press("JJJ");
+    try fx.press("<C-y>");
+    try testing.expectEqualStrings(
+        \\top = ["gg"]
+        \\bottom = ["G"]
+    , payload(&fx.app));
+
+    // And what comes out has to go back in: a spelling the parser complains
+    // about is not worth copying.
+    var l = config.Loader.init(testing.allocator);
+    defer l.deinit();
+    var doc: [256]u8 = undefined;
+    l.merge("test.toml", try std.fmt.bufPrint(&doc, "[keys]\n{s}\n", .{payload(&fx.app)}));
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
 }
 
 test "Y yanks whole lines even from a charwise selection" {

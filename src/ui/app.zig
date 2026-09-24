@@ -352,6 +352,10 @@ pub const App = struct {
     /// `:tired`. The loop owns the screen the glyphs fall off, so this is a
     /// request like `want_editor`.
     want_tired: bool = false,
+    /// `:config edit` and `:config reload`. Requests like `want_editor`, for
+    /// the same reason twice over: the loop owns the terminal an editor wants,
+    /// and the loader whose arena the bindings point into.
+    want_config: ?ConfigAction = null,
 
     pub fn init(gpa: Allocator, io: std.Io, queue: *event.Queue) App {
         return .{
@@ -1129,6 +1133,7 @@ pub const App = struct {
             .copy_text_lines => try outgoing.yank(self, .lines),
             .copy_ref => try outgoing.buildPayload(self, .copy, .ref),
             .copy_ref_lines => try outgoing.buildPayload(self, .copy, .ref_lines),
+            .copy_binding => try outgoing.copyBinding(self),
             // Both relay out every row under the cursor, so it is placed
             // rather than walked: zen changes the body's height and wrap
             // changes what every line is worth in screen rows. Travelling
@@ -1746,6 +1751,14 @@ pub const App = struct {
         /// 0 means "no line": open at the top rather than at a line number
         /// that does not exist in the file on disk.
         line: u32,
+    };
+
+    /// What `:config` was asked to do. The scope rides along rather than the
+    /// path, because resolving one needs the environment - which the loop has
+    /// and `App` deliberately does not.
+    pub const ConfigAction = union(enum) {
+        edit: config.Scope,
+        reload,
     };
 
     /// What `e` should open. References resolve against the *new* file

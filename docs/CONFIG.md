@@ -371,6 +371,23 @@ These names are also what `:` takes: `:next_file` runs the command whether or
 not a key is bound to it, and `<Tab>` completes them. Typing one is the quickest
 way to check a spelling before committing it to a config file.
 
+**You do not have to type the line yourself.** In the `?` popup, `<C-y>` puts
+the selected row on the clipboard as the `[keys]` line that would bind it:
+
+```toml
+line_down = ["j", "<Down>"]
+```
+
+Every spelling of the command, because an entry replaces the defaults rather
+than adding to them - a line naming only `j` would quietly drop `<Down>`. A row
+covering two commands gives a line each, so `gg G` copies as both `top` and
+`bottom`. `:config edit` opens the file to paste it into, and re-reads it when
+you come back, so the new binding is live without a restart.
+
+`lgtm` does not write this file for you, and that is deliberate: it is a file
+you hand-wrote, comments and all, and a tool that rewrites it is a tool that
+eventually loses something you meant to keep.
+
 ### Every command
 
 The default key is there so you can find a command by the key you already

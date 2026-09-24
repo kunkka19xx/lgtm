@@ -73,4 +73,12 @@ pub const entries: []const Entry = &.{
     .{ "no theme called {s} - try {s}", "テーマ {s} はありません - 候補: {s}" },
     .{ "theme {s} - to keep it: [theme] name = \"{s}\"", "テーマ {s} - 保持するには [theme] name = \"{s}\"" },
     .{ "no word under the cursor", "カーソル位置に単語がありません" },
+    .{ "config reloaded", "設定を再読み込みしました" },
+    .{ "config reloaded - scroll_lines needs a restart", "設定を再読み込みしました - scroll_lines は再起動が必要です" },
+    .{ "not a :config verb: {s} - edit, edit repo, or reload", "`:config` の指定が不正です: {s} - edit、edit repo、reload のいずれか" },
+    .{ "no config path - set $XDG_CONFIG_HOME or $HOME", "設定ファイルの場所が不明です - $XDG_CONFIG_HOME か $HOME を設定してください" },
+    .{ "cannot write {s}: {t}", "{s} を書き込めません: {t}" },
+    .{ "nothing selected", "選択されていません" },
+    .{ "copied {s} - paste it under [keys]", "{s} をコピーしました - [keys] に貼り付けてください" },
+    .{ "copied {d} lines - paste them under [keys]", "{d} 行をコピーしました - [keys] に貼り付けてください" },
 };

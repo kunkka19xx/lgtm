@@ -47,6 +47,10 @@ const settings = [_]Setting{
     // vim's spelling, for the reader who arrives already knowing it.
     .{ .verb = "colorscheme", .names = theme_mod.bundled_names },
     .{ .verb = "colo", .names = theme_mod.bundled_names },
+    // `edit repo` and `edit global` are not offered: `<Tab>` completes the
+    // word a reader is in the middle of, and both of those are a second word
+    // past the one this list is for.
+    .{ .verb = "config", .names = &.{ "edit", "reload" } },
 };
 
 pub fn openPrompt(app: *App, kind: prompt_mod.Kind) void {
@@ -180,6 +184,7 @@ pub fn submitCommand(app: *App, line: []const u8, body: u16) !void {
         if (std.mem.eql(u8, s.setting.verb, "post")) return pr_mod.postReview(app, .comment, s.arg);
         if (std.mem.eql(u8, s.setting.verb, "approve")) return pr_mod.postReview(app, .approve, s.arg);
         if (std.mem.eql(u8, s.setting.verb, "request-changes")) return pr_mod.postReview(app, .request_changes, s.arg);
+        if (std.mem.eql(u8, s.setting.verb, "config")) return setConfig(app, s.arg);
         return setTheme(app, s.arg);
     }
 
@@ -271,6 +276,27 @@ pub fn setTheme(app: *App, arg: []const u8) void {
     app.theme = found.theme;
     app.theme_name = found.name;
     app.notice.set("theme {s} - to keep it: [theme] name = \"{s}\"", .{ found.name, found.name });
+}
+
+/// `:config edit [global|repo]` and `:config reload`. Armed rather than run
+/// here, for the reason `e` is: the loop owns the terminal an editor wants,
+/// and the loader whose arena the bindings point into.
+pub fn setConfig(app: *App, arg: []const u8) void {
+    // Bare `:config` is `:config edit`; nothing else it could mean.
+    const table = [_]struct { []const u8, App.ConfigAction }{
+        .{ "", .{ .edit = .global } },
+        .{ "edit", .{ .edit = .global } },
+        .{ "edit global", .{ .edit = .global } },
+        .{ "edit repo", .{ .edit = .repo } },
+        .{ "reload", .reload },
+    };
+    for (table) |e| {
+        if (std.mem.eql(u8, arg, e[0])) {
+            app.want_config = e[1];
+            return;
+        }
+    }
+    app.notice.set("not a :config verb: {s} - edit, edit repo, or reload", .{arg});
 }
 
 /// Where a command that `:` refuses does live, for the message that says so.
@@ -864,6 +890,39 @@ test "Tab past the verb completes the value, and Enter applies it" {
     try fx.typeIn("theme nope");
     try fx.press("<CR>");
     try testing.expectEqualStrings("kanagawa", fx.app.theme_name);
+}
+
+test ":config arms the loop rather than doing the work here" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    // Bare `:config` is `:config edit`, and edit means the global file: the
+    // shared one is asked for by name.
+    try fx.press(":");
+    try fx.typeIn("config");
+    try fx.press("<CR>");
+    try testing.expectEqual(config.Scope.global, fx.app.want_config.?.edit);
+
+    fx.app.want_config = null;
+    try fx.press(":");
+    try fx.typeIn("config edit repo");
+    try fx.press("<CR>");
+    try testing.expectEqual(config.Scope.repo, fx.app.want_config.?.edit);
+
+    fx.app.want_config = null;
+    try fx.press(":");
+    try fx.typeIn("config reload");
+    try fx.press("<CR>");
+    try testing.expect(fx.app.want_config.? == .reload);
+
+    // A verb that is not one arms nothing: opening an editor on a guess is the
+    // outcome that costs the reader their place.
+    fx.app.want_config = null;
+    try fx.press(":");
+    try fx.typeIn("config nope");
+    try fx.press("<CR>");
+    try testing.expect(fx.app.want_config == null);
+    try testing.expect(fx.app.notice.len > 0);
 }
 
 test "closing the prompt forgets the candidates" {

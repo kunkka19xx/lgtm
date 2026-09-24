@@ -826,6 +826,19 @@ terminal  catppuccin  tokyo-night  gruvbox  dracula  rose-pine  kanagawa
 same line under vim's names. It lasts for the session - the status line shows
 you the `[theme] name` to write if you want to keep it.
 
+`:config edit` opens your config file in `$EDITOR`, and re-reads it when you
+come back - so a setting you changed is live without restarting. `:config edit
+repo` opens `.lgtm/config.toml` instead of the global one, and `:config reload`
+re-reads without opening anything, for when you edited the file elsewhere. If
+the file is not there yet, you get the same starter `--init` writes rather than
+an empty buffer.
+
+A reload is a re-run of what startup does, not an undo: a `[keys]` entry that
+now conflicts falls back to that command's default, and any complaint about the
+file lands on the status line exactly as it would have at startup. One setting
+cannot be reloaded - `scroll_lines` is negotiated with the terminal once - and
+`:config reload` tells you so rather than pretending it took.
+
 The short spellings are vim's and mean the same as the long ones. A name that
 does not exist suggests the nearest one that does, and a command that only lives
 inside the compose box or a list says so rather than running somewhere it has no

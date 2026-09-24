@@ -441,6 +441,7 @@ pub fn main(init: std.process.Init) !void {
         .once = want_once,
         .cfg = cfg.cfg,
         .problems = cfg.summary(&problem_buf),
+        .config_path = config_path,
         .pane = pane,
         .base = base,
         .target = target,
