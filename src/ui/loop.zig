@@ -60,6 +60,10 @@ pub const Options = struct {
     /// or null when it had none. Shown as a notice on the first frame: a
     /// config error belongs in the status line, never in a refusal to start.
     problems: ?[]const u8 = null,
+    /// `--config <path>`, verbatim. Kept so `:config reload` can re-run the
+    /// same load the startup did: a reload that quietly went back to the
+    /// global file would be reading a file the user said not to read.
+    config_path: ?[]const u8 = null,
     /// `--pane <id>`: the multiplexer pane the agent is running in. Beats both
     /// the saved target and the inference, and replaces the saved one, because
     /// it was typed just now and the inference was a guess.
@@ -114,40 +118,15 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
     var app = App.init(gpa, io, &queue);
     defer app.deinit();
-    app.nav = opts.cfg.nav;
-    i18n.lang = opts.cfg.ui.language;
-    app.wrap = opts.cfg.ui.wrap;
-    app.list_preview = opts.cfg.ui.preview;
-    app.layout = opts.cfg.diff.layout;
-    app.split_min_width = opts.cfg.diff.split_min_width;
-    app.expand_lines = opts.cfg.diff.expand_lines;
-    app.highlight = switch (opts.cfg.diff.highlight) {
-        .gutter => .gutter,
-        .line => .line,
-    };
-    app.vp.metrics.tab = opts.cfg.ui.tab_width;
-    app.vp.scroll_anim.budget_ms = opts.cfg.ui.scroll_ms;
-    app.vp.cursor_anim.budget_ms = opts.cfg.ui.cursor_ms;
-    app.km.bindings = opts.cfg.keys;
-    app.presets_cfg = opts.cfg.presets;
-    app.comments_inline = opts.cfg.ui.comments == .inline_;
-    app.compose_at = switch (opts.cfg.ui.compose) {
-        .bottom => .bottom,
-        .top => .top,
-        .centre => .centre,
-    };
-    app.templates = opts.cfg.templates;
-    app.review.ignore = opts.cfg.ignore;
+    // What `:config reload` loaded last, or null while the app is still on
+    // the one `main` opened. Its arena owns the keys, presets, templates and
+    // ignore list the app points at, so it outlives every frame drawn from it.
+    var live_cfg: ?config.Loader = null;
+    defer if (live_cfg) |*l| l.deinit();
+    applyConfig(&app, opts.cfg);
     if (opts.base) |b| app.review.base = b;
     app.review.target = opts.target;
     app.review.setLabel(opts.label);
-    app.theme = opts.cfg.theme;
-    app.theme_name = opts.cfg.theme_name;
-    app.glyphs = switch (opts.cfg.ui.icons) {
-        .unicode => theme_mod.Glyphs.unicode,
-        .ascii => theme_mod.Glyphs.ascii,
-        .nerd => theme_mod.Glyphs.nerd,
-    };
     // Said once, on the first frame, and cleared by the first keystroke like
     // any other notice - long enough to read, and not a modal the user has to
     // dismiss before reviewing anything.
@@ -402,12 +381,65 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
 
         if (app.want_editor) {
             app.want_editor = false;
-            try openEditor(&app, &vx, &term, w, environ, &reader, opts);
+            _ = try openEditor(&app, &vx, &term, w, environ, &reader, opts, app.editTarget());
             // The screen belongs to the editor until it exits; nothing vaxis
             // drew is still on it, so the damage baseline is a lie.
             vx.queueRefresh();
         }
+
+        if (app.want_config) |what| {
+            app.want_config = null;
+            switch (what) {
+                .reload => reloadConfig(&app, gpa, io, environ, opts, &live_cfg),
+                .edit => |scope| {
+                    var scratch: std.heap.ArenaAllocator = .init(gpa);
+                    defer scratch.deinit();
+                    if (configTarget(&app, scratch.allocator(), environ, io, opts, scope)) |path| {
+                        const ran = try openEditor(&app, &vx, &term, w, environ, &reader, opts, .{
+                            .path = path,
+                            .line = 0,
+                        });
+                        vx.queueRefresh();
+                        // The point of the command: save, quit, keys are live.
+                        // Only where one ran, or the reload's notice would sit
+                        // on top of the one saying why none did.
+                        if (ran) reloadConfig(&app, gpa, io, environ, opts, &live_cfg);
+                    }
+                },
+            }
+        }
     }
+}
+
+/// The file `:config edit` opens, written out as the starter first if it is
+/// not there - so the reader is uncommenting rather than remembering section
+/// names. Null when there is nowhere to write or the write failed, both said
+/// on the status line rather than by opening an editor on nothing.
+fn configTarget(
+    app: *App,
+    arena: Allocator,
+    environ: *const std.process.Environ.Map,
+    io: std.Io,
+    opts: Options,
+    scope: config.Scope,
+) ?[]const u8 {
+    const path = config.pathFor(arena, environ, opts.config_path, scope) orelse {
+        app.notice.set("no config path - set $XDG_CONFIG_HOME or $HOME", .{});
+        return null;
+    };
+    if (fs.fileExists(io, path)) return path;
+
+    // The state-dir writer is what puts the `.lgtm/.gitignore` beside it, and
+    // that ignore is what keeps the config shared. Both create parents.
+    const wrote = if (std.mem.eql(u8, path, config.repo_path))
+        fs.writeStateFile(io, path, config.starter)
+    else
+        fs.writeFile(io, path, config.starter);
+    wrote catch |err| {
+        app.notice.set("cannot write {s}: {t}", .{ path, err });
+        return null;
+    };
+    return path;
 }
 
 /// The pane id currently on disk. A target that changes mid-session - the
@@ -635,6 +667,86 @@ fn applyEvents(
     }
 }
 
+/// Everything the config file decides, poured into the app.
+///
+/// A function rather than a run of assignments in `run` because `:config
+/// reload` calls it again, and a setting that lands in only one of the two
+/// places is a setting that silently needs a restart.
+///
+/// Not here: mouse reporting and `wheel_lines`, negotiated with the terminal
+/// once at startup. `reloadConfig` names `scroll_lines` as skipped instead.
+fn applyConfig(app: *App, cfg: config.Config) void {
+    // A process global, set here anyway: it is read at render time.
+    i18n.lang = cfg.ui.language;
+    app.nav = cfg.nav;
+    app.wrap = cfg.ui.wrap;
+    app.list_preview = cfg.ui.preview;
+    app.layout = cfg.diff.layout;
+    app.split_min_width = cfg.diff.split_min_width;
+    app.expand_lines = cfg.diff.expand_lines;
+    app.highlight = switch (cfg.diff.highlight) {
+        .gutter => .gutter,
+        .line => .line,
+    };
+    app.vp.metrics.tab = cfg.ui.tab_width;
+    app.vp.scroll_anim.budget_ms = cfg.ui.scroll_ms;
+    app.vp.cursor_anim.budget_ms = cfg.ui.cursor_ms;
+    app.km.bindings = cfg.keys;
+    app.presets_cfg = cfg.presets;
+    app.comments_inline = cfg.ui.comments == .inline_;
+    app.compose_at = switch (cfg.ui.compose) {
+        .bottom => .bottom,
+        .top => .top,
+        .centre => .centre,
+    };
+    app.templates = cfg.templates;
+    app.review.ignore = cfg.ignore;
+    app.theme = cfg.theme;
+    app.theme_name = cfg.theme_name;
+    app.glyphs = switch (cfg.ui.icons) {
+        .unicode => theme_mod.Glyphs.unicode,
+        .ascii => theme_mod.Glyphs.ascii,
+        .nerd => theme_mod.Glyphs.nerd,
+    };
+}
+
+/// `:config reload`, and what `:config edit` runs on the way back.
+///
+/// A re-run of what startup does, which is the design: merge order, override
+/// rules and problem reporting stay one code path, so a reload and a restart
+/// cannot drift. It is a restart, not an undo - a `[keys]` entry that now
+/// conflicts falls back to that command's default, not to what the session had.
+///
+/// `live` holds the loader whose arena the app's slices point into. The new
+/// one is applied before the old is freed: until `applyConfig` returns, the
+/// app is still reading the old arena.
+fn reloadConfig(
+    app: *App,
+    gpa: Allocator,
+    io: std.Io,
+    environ: *const std.process.Environ.Map,
+    opts: Options,
+    live: *?config.Loader,
+) void {
+    const next = config.load(gpa, io, environ, opts.config_path);
+    applyConfig(app, next.cfg);
+    if (live.*) |*old| old.deinit();
+    live.* = next;
+    const now = &live.*.?;
+
+    // The rows were built from the old bindings, tab width and wrap.
+    app.rediff() catch {};
+
+    var buf: [192]u8 = undefined;
+    if (now.summary(&buf)) |p| return app.notice.set("config: {s}", .{p});
+    // Named: a reader who just changed it and saw "config reloaded" would
+    // conclude the setting does nothing.
+    if (now.cfg.ui.scroll_lines != opts.cfg.ui.scroll_lines) {
+        return app.notice.set("config reloaded - scroll_lines needs a restart", .{});
+    }
+    app.notice.set("config reloaded", .{});
+}
+
 /// Hands the terminal to `$EDITOR` and takes it back.
 ///
 /// Order matters in both directions and every step has a failure that looks
@@ -644,6 +756,11 @@ fn applyEvents(
 /// Coming back is the same list reversed, and it runs even when the spawn
 /// failed - a `lgtm` that returns to a raw terminal is one the user has to
 /// `reset`.
+///
+/// The target is handed in rather than taken from the cursor, because
+/// `:config edit` opens a file that has nothing to do with the diff. Returns
+/// whether an editor actually ran, which is what tells that caller apart from
+/// one that has an error notice to leave on screen.
 fn openEditor(
     app: *App,
     vx: *vaxis.Vaxis,
@@ -652,10 +769,11 @@ fn openEditor(
     environ: *std.process.Environ.Map,
     reader: *input.Reader,
     opts: Options,
-) !void {
-    const target = app.editTarget() orelse {
+    want: ?App.EditTarget,
+) !bool {
+    const target = want orelse {
         app.notice.set("nothing here to open", .{});
-        return;
+        return false;
     };
 
     var scratch: std.heap.ArenaAllocator = .init(app.gpa);
@@ -663,7 +781,7 @@ fn openEditor(
     const spec = editor.specFrom(environ);
     const argv = try editor.argv(scratch.allocator(), spec, target.path, target.line) orelse {
         app.notice.set("$EDITOR is empty", .{});
-        return;
+        return false;
     };
 
     // Where the read cannot be interrupted, the reader would keep the tty and
@@ -671,7 +789,7 @@ fn openEditor(
     // an editor that ignores half the keystrokes is not.
     if (!opts.once and !reader.pollable) {
         app.notice.set("cannot suspend input on this terminal", .{});
-        return;
+        return false;
     }
 
     if (!opts.once) reader.stop();
@@ -682,8 +800,12 @@ fn openEditor(
     w.flush() catch {};
     term.suspendRaw();
 
+    // A failed spawn still walks the restore below, or the reader is left on
+    // a raw terminal - so it is recorded rather than returned from here.
+    var ran = true;
     const code = proc.runInherit(app.io, argv) catch |err| blk: {
         app.notice.set("{s}: {t}", .{ spec, err });
+        ran = false;
         break :blk @as(u8, 0);
     };
 
@@ -701,6 +823,7 @@ fn openEditor(
     // The user very likely changed the file, and the watcher may or may not
     // have seen it while we were not draining events.
     try app.rediff();
+    return ran;
 }
 
 /// `:tired`. The last drawn screen falls to the floor and stays down until an

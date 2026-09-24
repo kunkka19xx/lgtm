@@ -238,6 +238,11 @@ fn firstWith(before: []const Binding, mode: event.Mode, label: []const u8) bool 
 pub const HelpEntry = struct {
     keys: []const u8,
     desc: []const u8,
+    /// What the row would bind, for the key that copies it as a `[keys]` line.
+    /// More than one where `mergeByDesc` joined rows saying the same thing.
+    /// Defaulted because `helpCount` builds rows only to ask `joins` about
+    /// them, and that question is the description and the width.
+    cmds: []const keymap.Command = &.{},
 };
 
 /// Whether `b` belongs in the popup for `mode` under `filter`, and how well it
@@ -336,6 +341,7 @@ fn composeShown(bindings: []const Binding, mode: event.Mode, group: ?keymap.Grou
             try list.append(a2, .{
                 .keys = try a2.dupe(u8, keys),
                 .desc = try std.fmt.allocPrint(a2, "{s}{s}", .{ i18n.t(compose_prefix), i18n.word(d) }),
+                .cmds = try a2.dupe(keymap.Command, &.{b.command}),
             });
         }
     }
@@ -391,7 +397,11 @@ pub fn helpEntries(
     var kbuf: [max_row_keys_bytes]u8 = undefined;
     for (bindings) |b| {
         const r = ranked(bindings, b, mode, group, filter, &kbuf) orelse continue;
-        const entry: HelpEntry = .{ .keys = try arena.dupe(u8, r.keys), .desc = r.desc };
+        const entry: HelpEntry = .{
+            .keys = try arena.dupe(u8, r.keys),
+            .desc = r.desc,
+            .cmds = try arena.dupe(keymap.Command, &.{b.command}),
+        };
         // Two tiers rather than a score: a run of the query as typed comes
         // first, scattered letters after. Without this, "file" pulls up
         // "gg first line" alongside "next file" and the list reads as noise.
@@ -439,11 +449,17 @@ fn mergeByDesc(arena: Allocator, rows: []const HelpEntry) Allocator.Error![]cons
             try out.append(arena, rows[i]);
         } else {
             var keys: std.ArrayList(u8) = .empty;
+            var cmds: std.ArrayList(keymap.Command) = .empty;
             for (rows[i .. last + 1], 0..) |r, n| {
                 if (n > 0) try keys.append(arena, ' ');
                 try keys.appendSlice(arena, r.keys);
+                try cmds.appendSlice(arena, r.cmds);
             }
-            try out.append(arena, .{ .keys = try keys.toOwnedSlice(arena), .desc = rows[i].desc });
+            try out.append(arena, .{
+                .keys = try keys.toOwnedSlice(arena),
+                .desc = rows[i].desc,
+                .cmds = try cmds.toOwnedSlice(arena),
+            });
         }
         i = last + 1;
     }
@@ -643,13 +659,16 @@ test "the popup's own keys collapse to one label in its footer" {
     defer a.deinit();
 
     const own = try helpEntries(default_bindings, .help, null, "", a.allocator());
-    try testing.expectEqual(@as(usize, 4), own.len);
+    try testing.expectEqual(@as(usize, 5), own.len);
     try testing.expectEqualStrings("move", own[0].desc);
     try testing.expectEqualStrings("move", own[1].desc);
     // Sideways says something different now: it changes tab in the `?`
     // overlay rather than moving within one list.
     try testing.expectEqualStrings("tab", own[2].desc);
     try testing.expectEqualStrings("tab", own[3].desc);
+    // Alone at the end, because nothing shares its description - which is
+    // what keeps the footer at `J K move  H L tab  <C-y> copy as [keys]`.
+    try testing.expectEqualStrings("copy as [keys]", own[4].desc);
     // Each row carries every spelling of its action; the footer prints only
     // the first, which is what keeps the label short.
     try testing.expectEqualStrings("J / <Down> / <C-n> / <Tab>", own[0].keys);

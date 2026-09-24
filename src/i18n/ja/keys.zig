@@ -79,6 +79,7 @@ pub const entries: []const Entry = &.{
     .{ "help", "ヘルプ" },
     .{ "move", "移動" },
     .{ "tab", "タブ" },
+    .{ "copy as [keys]", "[keys] 行としてコピー" },
     .{ "page", "ページ" },
     .{ "file", "ファイル" },
     .{ "edit", "編集" },

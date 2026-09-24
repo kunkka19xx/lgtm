@@ -164,6 +164,10 @@ pub const Command = enum {
     copy_text_lines,
     copy_ref,
     copy_ref_lines,
+    /// In the `?` overlay: the selected row as the `[keys]` line that would
+    /// bind it, on the clipboard. lgtm does not write the config file, so
+    /// handing over the line to paste is the next best thing.
+    copy_binding,
     /// Ask presets: one keystroke, a whole question. Each
     /// is the reference plus a template, which is why they cost four enum
     /// values and no dispatch of their own.
@@ -621,6 +625,10 @@ pub const default_bindings: []const Binding = &.{
     .{ .chords = &.{c('K')}, .command = .list_up, .modes = Modes.lists, .desc = "move" },
     .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.help_only, .desc = "tab" },
     .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.help_only, .desc = "tab" },
+    // A chord for the reason the comment list's keys below are: here `y` is a
+    // filter character. `<C-y>` is free of the multiplexer prefixes that rule
+    // out `<C-a>` and `<C-b>`.
+    .{ .chords = &.{ctrl('y')}, .command = .copy_binding, .modes = Modes.help_only, .desc = "copy as [keys]" },
     .{ .chords = &.{c('H')}, .command = .list_left, .modes = Modes.finder_only, .desc = "page" },
     .{ .chords = &.{c('L')}, .command = .list_right, .modes = Modes.finder_only, .desc = "page" },
     // The comment list's own actions. Chords, because every printable key in

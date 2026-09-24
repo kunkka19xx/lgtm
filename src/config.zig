@@ -807,6 +807,29 @@ pub fn globalPath(arena: Allocator, environ: *const std.process.Environ.Map) ?[]
     return std.fs.path.join(arena, &.{ home, ".config", "lgtm", "config.toml" }) catch null;
 }
 
+/// Which of the two files `:config edit` means. Global is the default: the
+/// repo file is the one meant to be committed, and a reader fiddling with
+/// their own keys is not editing the file their colleagues will get.
+pub const Scope = enum { global, repo };
+
+/// The file a scope names, or null when there is nowhere to put it - neither
+/// `HOME` nor `$XDG_CONFIG_HOME`, which is the case a container hits.
+///
+/// `explicit` is `--config <path>`, which replaces both files - so when one
+/// was given it is the only answer and the scope does not apply.
+pub fn pathFor(
+    arena: Allocator,
+    environ: *const std.process.Environ.Map,
+    explicit: ?[]const u8,
+    scope: Scope,
+) ?[]const u8 {
+    if (explicit) |p| return p;
+    return switch (scope) {
+        .global => globalPath(arena, environ),
+        .repo => repo_path,
+    };
+}
+
 /// What `--init` writes.
 ///
 /// Every line is commented out and shows the value it already has. Two reasons
@@ -925,6 +948,38 @@ const testing = std.testing;
 // The parser this file reads its documents with; see the note in `ui/app.zig`.
 test {
     _ = toml;
+}
+
+test "which file :config edit opens" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var env: std.process.Environ.Map = .init(testing.allocator);
+    defer env.deinit();
+
+    // `$XDG_CONFIG_HOME` first, as the loader itself reads it.
+    try env.put("HOME", "/home/x");
+    try testing.expectEqualStrings("/home/x/.config/lgtm/config.toml", pathFor(a, &env, null, .global).?);
+    try env.put("XDG_CONFIG_HOME", "/cfg");
+    try testing.expectEqualStrings("/cfg/lgtm/config.toml", pathFor(a, &env, null, .global).?);
+
+    // The repo file is a fixed path and owes nothing to the environment.
+    try testing.expectEqualStrings(repo_path, pathFor(a, &env, null, .repo).?);
+
+    // `--config <path>` replaces both files for the loader, so it replaces
+    // both here: editing the global file while running against another one
+    // would edit a file this session is not reading.
+    try testing.expectEqualStrings("/tmp/other.toml", pathFor(a, &env, "/tmp/other.toml", .global).?);
+    try testing.expectEqualStrings("/tmp/other.toml", pathFor(a, &env, "/tmp/other.toml", .repo).?);
+
+    // Neither variable set. Null rather than a guess: an editor opened on an
+    // invented path writes a file the reader never finds again.
+    var bare: std.process.Environ.Map = .init(testing.allocator);
+    defer bare.deinit();
+    try testing.expect(pathFor(a, &bare, null, .global) == null);
+    // The repo file still works there, because it is relative to the repo.
+    try testing.expectEqualStrings(repo_path, pathFor(a, &bare, null, .repo).?);
 }
 
 /// Parses one document into a loader the caller deinits. Every test below is
