@@ -32,6 +32,8 @@ const metrics = @import("../io/metrics.zig");
 const template = @import("../bridge/template.zig");
 
 const config = @import("../config.zig");
+const forge_mod = @import("../core/forge.zig");
+const gh = @import("../core/gh.zig");
 const devicon = @import("devicon.zig");
 const files_mod = @import("files.zig");
 const help_mod = @import("help.zig");
@@ -356,6 +358,10 @@ pub const App = struct {
     /// the same reason twice over: the loop owns the terminal an editor wants,
     /// and the loader whose arena the bindings point into.
     want_config: ?ConfigAction = null,
+    /// Which forge the review is against. A field rather than an import
+    /// everywhere, so the choice is made once and `ui/pr.zig` never names an
+    /// implementation - GitHub is the only one so far.
+    forge: forge_mod.Forge = gh.github,
 
     pub fn init(gpa: Allocator, io: std.Io, queue: *event.Queue) App {
         return .{

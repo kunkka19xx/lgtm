@@ -20,6 +20,7 @@ const comments = @import("comments.zig");
 const diff = @import("diff.zig");
 const hunk = @import("hunk.zig");
 const git = @import("git.zig");
+const forge = @import("forge.zig");
 const proc = @import("../io/proc.zig");
 
 /// Bounds a `gh` that has gone wrong, not a title that is long.
@@ -31,26 +32,40 @@ const list_output_max = 256 << 10;
 /// types the number; a picker is for choosing, not for browsing a year.
 pub const list_limit = 50;
 
-pub const Error = error{
-    /// Missing, unauthenticated, offline, or not a pull request. One error:
-    /// the caller can do nothing different about any of them, and `gh` says
-    /// which on stderr.
-    GhFailed,
-    /// `gh` was still thinking when the deadline passed, and has been killed.
-    /// Its own error because the reader's next move differs: nothing is wrong
-    /// with the request or the login, and the key is worth pressing again.
-    GhTimedOut,
-} || Allocator.Error;
+/// The types and errors are the forge-neutral ones: everything below produces
+/// them from `gh`'s output, and nothing above `core/` knows which forge it got
+/// them from. See `core/forge.zig`.
+pub const Error = forge.Error;
+pub const ResolveError = forge.ResolveError;
+pub const Pr = forge.Pr;
+pub const Refs = forge.Refs;
+pub const Remark = forge.Remark;
+pub const Event = forge.Event;
+
+/// GitHub, as the interface. The one place this file names itself.
+pub const github: forge.Forge = .{
+    .name = "github",
+    .resolve = resolve,
+    .refsOf = refsOf,
+    .list = list,
+    .remarks = remarks,
+    .viewer = viewer,
+    .post = post,
+    .amend = amend,
+    .reply = reply,
+    .drop = drop,
+    .reviewBody = reviewBody,
+};
 
 /// Runs `gh` and folds every way it can go wrong into the two errors above,
 /// in one place: a deadline that fired and a missing `gh` are different facts.
 fn call(gpa: Allocator, io: std.Io, argv: []const []const u8, max_output: usize) Error!proc.Output {
     const out = proc.runWithin(gpa, io, argv, max_output, proc.network_timeout) catch |err| return switch (err) {
-        error.Timeout => error.GhTimedOut,
-        else => error.GhFailed,
+        error.Timeout => error.TimedOut,
+        else => error.Failed,
     };
     errdefer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
+    if (out.exit_code != 0) return error.Failed;
     return out;
 }
 
@@ -63,51 +78,13 @@ fn callWithInput(
     max_output: usize,
 ) Error!proc.Output {
     const out = proc.runWithInputWithin(gpa, io, argv, payload, max_output, proc.network_timeout) catch |err| return switch (err) {
-        error.Timeout => error.GhTimedOut,
-        else => error.GhFailed,
+        error.Timeout => error.TimedOut,
+        else => error.Failed,
     };
     errdefer out.deinit(gpa);
-    if (out.exit_code != 0) return error.GhFailed;
+    if (out.exit_code != 0) return error.Failed;
     return out;
 }
-
-pub const Pr = struct {
-    number: u32,
-    /// `OPEN`, `MERGED` or `CLOSED`.
-    state: []const u8,
-    /// The branch the request targets. For fetching only.
-    base_ref: []const u8,
-    /// The base branch *as it was* when the request last synced. A commit,
-    /// because once merged the head is an ancestor of the branch and
-    /// `merge-base <branch> <head>` is then the head itself, which diffs to
-    /// nothing.
-    base_oid: []const u8,
-    /// The head commit. A sha, so a fork's branch and a push landing
-    /// mid-review both name the tree that was read.
-    head_oid: []const u8,
-    /// Where the owning repository is read from.
-    url: []const u8,
-    /// Open but not finished. Its own field because `state` stays `OPEN` for
-    /// a draft, and a draft is the row a reader most often skips.
-    draft: bool = false,
-    author: []const u8 = "",
-    /// How big the read is, which is the one thing a list cannot say in
-    /// words and the reader most wants before choosing.
-    added: u32 = 0,
-    removed: u32 = 0,
-    /// Last, so a title containing a tab stays the person's sentence.
-    title: []const u8,
-
-    /// The state as a reader thinks of it: a draft is one of them, though to
-    /// the forge it is a flag on an open request.
-    pub fn status(self: Pr) []const u8 {
-        if (self.draft) return "draft";
-        if (std.mem.eql(u8, self.state, "OPEN")) return "open";
-        if (std.mem.eql(u8, self.state, "MERGED")) return "merged";
-        if (std.mem.eql(u8, self.state, "CLOSED")) return "closed";
-        return self.state;
-    }
-};
 
 const fields = "number,state,baseRefName,baseRefOid,headRefOid,url,isDraft,author,additions,deletions,title";
 const row_template = "{{.number}}\t{{.state}}\t{{.baseRefName}}\t{{.baseRefOid}}\t{{.headRefOid}}\t{{.url}}\t{{.isDraft}}\t{{.author.login}}\t{{.additions}}\t{{.deletions}}\t{{.title}}";
@@ -192,21 +169,8 @@ pub fn view(gpa: Allocator, arena: Allocator, io: std.Io, number: ?u32) Error!Pr
     const argv = try viewArgv(arena, number);
     const out = try call(gpa, io, argv, view_output_max);
     defer out.deinit(gpa);
-    return parseView(try arena.dupe(u8, out.stdout)) orelse error.GhFailed;
+    return parseView(try arena.dupe(u8, out.stdout)) orelse error.Failed;
 }
-
-/// A pull request as two refs. The whole of what GitHub is asked for.
-pub const Refs = struct {
-    number: u32,
-    /// `owner/repo`, kept so posting a review needs no second question.
-    repo: []const u8,
-    /// The merge base, which is what a three-dot diff is taken against.
-    base: []const u8,
-    /// The head commit.
-    target: []const u8,
-    /// For the status row, where two shas would say nothing usable.
-    label: []const u8,
-};
 
 /// The two path segments before `/pull/`. Extracts rather than validates: a
 /// malformed address matches no remote and the caller falls back to `origin`,
@@ -235,8 +199,6 @@ pub fn ownerRepo(url: []const u8) ?[]const u8 {
 fn pullRef(arena: Allocator, number: u32) Allocator.Error![]const u8 {
     return std.fmt.allocPrint(arena, "pull/{d}/head", .{number});
 }
-
-pub const ResolveError = Error || git.Error;
 
 pub fn list(gpa: Allocator, arena: Allocator, io: std.Io, all: bool) Error![]Pr {
     const argv = try listArgv(arena, all);
@@ -293,32 +255,6 @@ pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError
 ///
 /// The half of a review lgtm could not see. Reading a request without them
 /// means writing a remark somebody made yesterday and never knowing.
-pub const Remark = struct {
-    /// What a later edit names.
-    id: u64 = 0,
-    path: []const u8,
-    /// Where it sits in the request's head. Zero when the forge knows of no
-    /// line at all, which is a comment on a file rather than on code.
-    line: u32,
-    /// Lines it covers, one being just `line`.
-    span: u32 = 1,
-    author: []const u8,
-    body: []const u8,
-    /// The line it was written against has gone from the diff. GitHub answers
-    /// `null` for the line and keeps the original, which is the same fact
-    /// `comments.State.stale` records.
-    outdated: bool,
-    /// The remark this one answers, or zero when it starts a thread. Without
-    /// it, a reply is an unrelated row that happens to share a line.
-    reply_to: u64 = 0,
-    /// Seconds since the epoch, from `created_at`. What orders a thread: ids
-    /// rising with time is not a guarantee worth resting on.
-    created: i64 = 0,
-    /// The code the remark was written against, as the forge kept it: for a
-    /// stale remark our own diff no longer holds the line.
-    hunk: []const u8 = "",
-};
-
 /// The fields, in the order `parseRemarks` reads them, with the body last so
 /// its own tabs stay its own.
 ///
@@ -516,21 +452,6 @@ pub fn reply(
     // "cannot show it here" - rather than an error.
     return std.fmt.parseInt(u64, text, 10) catch 0;
 }
-
-/// What a review says when it is submitted.
-pub const Event = enum {
-    comment,
-    approve,
-    request_changes,
-
-    pub fn wire(self: Event) []const u8 {
-        return switch (self) {
-            .comment => "COMMENT",
-            .approve => "APPROVE",
-            .request_changes => "REQUEST_CHANGES",
-        };
-    }
-};
 
 /// Whether a comment can be attached to a line of the diff.
 ///

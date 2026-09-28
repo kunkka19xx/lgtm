@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // Pull-request mode: pointing the review at somebody else's tree, and handing
-// a batch of remarks back to the forge. `core/gh.zig` does the talking.
+// a batch of remarks back to the forge. `core/forge.zig` says what one is;
+// `core/gh.zig` is the implementation that does the talking.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -11,7 +12,8 @@ const App = @import("app.zig").App;
 const notes = @import("notes.zig");
 const finder_mod = @import("finder.zig");
 const comments_mod = @import("../core/comments.zig");
-const gh = @import("../core/gh.zig");
+const diff_mod = @import("../core/diff.zig");
+const forge = @import("../core/forge.zig");
 const compose_mod = @import("compose.zig");
 const event_mod = @import("../core/event.zig");
 const thread_mod = @import("thread.zig");
@@ -19,7 +21,7 @@ const wrap_mod = @import("wrap.zig");
 
 /// A review the loop is to hand to the forge.
 pub const Post = struct {
-    event: gh.Event,
+    event: forge.Event,
     /// One comment by id, or null for every unposted one.
     one: ?u32 = null,
 };
@@ -59,7 +61,7 @@ pub const State = struct {
     dropping: ?Amend = null,
     /// Whole rows, not numbers: a row already carries the two refs, so picking
     /// one asks GitHub nothing more.
-    rows: std.ArrayList(gh.Pr) = .empty,
+    rows: std.ArrayList(forge.Pr) = .empty,
 
     pub fn deinit(self: *State, gpa: Allocator) void {
         self.rows.deinit(gpa);
@@ -166,7 +168,7 @@ pub const Sending = struct {
     payload: []const u8,
     ids: []const u32,
     one: ?u32,
-    event: gh.Event,
+    event: forge.Event,
 };
 
 /// One remark's new text on its way to the forge.
@@ -198,7 +200,7 @@ pub const Dropping = struct {
     remote: u64,
 };
 
-/// A copy of `gh.Pr` owning its own bytes, so a row survives the arena its
+/// A copy of `forge.Pr` owning its own bytes, so a row survives the arena its
 /// label was built in.
 pub const Pr = struct {
     number: u32,
@@ -215,7 +217,7 @@ pub const Pr = struct {
     title: [256]u8 = undefined,
     title_len: u16 = 0,
 
-    pub fn of(pr: gh.Pr) Pr {
+    pub fn of(pr: forge.Pr) Pr {
         var out: Pr = .{ .number = pr.number };
         inline for (.{ "state", "base_ref", "base_oid", "head_oid", "url", "title" }) |f| {
             const src = @field(pr, f);
@@ -227,7 +229,7 @@ pub const Pr = struct {
         return out;
     }
 
-    pub fn back(self: *const Pr) gh.Pr {
+    pub fn back(self: *const Pr) forge.Pr {
         return .{
             .number = self.number,
             .state = self.state[0..self.state_len],
@@ -244,8 +246,8 @@ pub const Pr = struct {
 /// remarks and the login on the main thread froze the pane with the spinner
 /// already gone.
 pub const Opened = struct {
-    refs: gh.Refs,
-    remarks: []const gh.Remark = &.{},
+    refs: forge.Refs,
+    remarks: []const forge.Remark = &.{},
     /// Who the reader is on the forge, or empty when it was not asked or
     /// could not be answered. Nothing is claimed without it.
     login: []const u8 = "",
@@ -261,12 +263,12 @@ pub const Fail = enum { failed, timed_out };
 /// What came back, in the job's arena.
 pub const Got = union(enum) {
     opened: Opened,
-    rows: []gh.Pr,
+    rows: []forge.Pr,
     /// The request's remarks, read again once the post landed: its answer
     /// carries no comment ids, and a remark this checkout posted can only be
     /// edited later through the forge's copy of it. Empty when that read
     /// failed, which costs the copy here nothing but its id.
-    posted: []const gh.Remark,
+    posted: []const forge.Remark,
     amended: void,
     /// The id the forge minted for the reply, or zero when its answer did not
     /// carry one. Posted either way.
@@ -275,9 +277,9 @@ pub const Got = union(enum) {
     failed: Fail,
 };
 
-/// How an error from `core/gh.zig` reaches the notice.
+/// How an error from the forge reaches the notice.
 fn failure(err: anyerror) Got {
-    return .{ .failed = if (err == error.GhTimedOut) .timed_out else .failed };
+    return .{ .failed = if (err == error.TimedOut) .timed_out else .failed };
 }
 
 /// Arms a call and says so. The loop draws this frame before anything blocks.
@@ -288,24 +290,28 @@ pub fn ask(app: *App, want: Want) void {
 }
 
 /// The blocking half. Arguments in, an arena and a `Got` out.
-pub fn fetch(gpa: Allocator, arena: Allocator, io: std.Io, want: Want) Got {
+///
+/// The only place in the tool that talks to a forge, which is what makes the
+/// forge a parameter rather than an import: a test can hand this a fake and
+/// exercise the whole answer path without a network or a CLI.
+pub fn fetch(f: forge.Forge, gpa: Allocator, arena: Allocator, io: std.Io, want: Want) Got {
     return switch (want) {
-        .open => |o| open(gpa, arena, io, gh.resolve(gpa, arena, io, o.number) catch |e| return failure(e), o.login),
-        .pick => |p| open(gpa, arena, io, gh.refsOf(gpa, arena, io, p.pr.back()) catch |e| return failure(e), p.login),
-        .list => |all| .{ .rows = gh.list(gpa, arena, io, all) catch |e| return failure(e) },
+        .open => |o| open(f, gpa, arena, io, f.resolve(gpa, arena, io, o.number) catch |e| return failure(e), o.login),
+        .pick => |p| open(f, gpa, arena, io, f.refsOf(gpa, arena, io, p.pr.back()) catch |e| return failure(e), p.login),
+        .list => |all| .{ .rows = f.list(gpa, arena, io, all) catch |e| return failure(e) },
         .post => |p| {
-            gh.post(gpa, arena, io, p.repo, p.number, p.payload) catch |e| return failure(e);
-            return .{ .posted = gh.remarks(gpa, arena, io, p.repo, p.number) catch &.{} };
+            f.post(gpa, arena, io, p.repo, p.number, p.payload) catch |e| return failure(e);
+            return .{ .posted = f.remarks(gpa, arena, io, p.repo, p.number) catch &.{} };
         },
         .amend => |a| {
-            gh.amend(gpa, arena, io, a.repo, a.remote, a.payload) catch |e| return failure(e);
+            f.amend(gpa, arena, io, a.repo, a.remote, a.payload) catch |e| return failure(e);
             return .amended;
         },
         .reply => |r| .{
-            .replied = gh.reply(gpa, arena, io, r.repo, r.number, r.root, r.payload) catch |e| return failure(e),
+            .replied = f.reply(gpa, arena, io, r.repo, r.number, r.root, r.payload) catch |e| return failure(e),
         },
         .drop => |d| {
-            gh.drop(gpa, arena, io, d.repo, d.remote) catch |e| return failure(e);
+            f.drop(gpa, arena, io, d.repo, d.remote) catch |e| return failure(e);
             return .dropped;
         },
     };
@@ -314,11 +320,11 @@ pub fn fetch(gpa: Allocator, arena: Allocator, io: std.Io, want: Want) Got {
 /// The rest of what opening a request needs, on the same worker as the refs.
 /// Neither is worth failing the open for: a request without them still
 /// reviews.
-fn open(gpa: Allocator, arena: Allocator, io: std.Io, refs: gh.Refs, want_login: bool) Got {
+fn open(f: forge.Forge, gpa: Allocator, arena: Allocator, io: std.Io, refs: forge.Refs, want_login: bool) Got {
     var out: Opened = .{ .refs = refs };
-    if (want_login) out.login = gh.viewer(gpa, arena, io) catch "";
+    if (want_login) out.login = f.viewer(gpa, arena, io) catch "";
     if (refs.repo.len > 0) {
-        out.remarks = gh.remarks(gpa, arena, io, refs.repo, refs.number) catch blk: {
+        out.remarks = f.remarks(gpa, arena, io, refs.repo, refs.number) catch blk: {
             out.remarks_failed = true;
             break :blk &.{};
         };
@@ -411,7 +417,7 @@ pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
             app.pr.rows.clearRetainingCapacity();
             _ = app.pick_arena.reset(.retain_capacity);
             const into = app.pick_arena.allocator();
-            const kept = try into.alloc(gh.Pr, rows.len);
+            const kept = try into.alloc(forge.Pr, rows.len);
             for (rows, kept) |src, *dst| dst.* = .{
                 .number = src.number,
                 .state = try into.dupe(u8, src.state),
@@ -488,7 +494,7 @@ pub fn prepare(app: *App, arena: Allocator, req: Pending) ?Want {
 /// The argument, if any, is the covering note the review opens with. An
 /// approval needs nothing to say; the other two do, or there is no reason
 /// to have notified anybody.
-pub fn postReview(app: *App, want: gh.Event, note: []const u8) void {
+pub fn postReview(app: *App, want: forge.Event, note: []const u8) void {
     _ = needRepo(app) orelse return;
     if (unposted(app) == 0 and want != .approve and note.len == 0) {
         if (app.comments.len() == 0) {
@@ -682,7 +688,7 @@ pub fn preparePost(app: *App, arena: Allocator, req: Post) ?Want {
     var out: std.ArrayList(u8) = .empty;
     var ids: std.ArrayList(u32) = .empty;
     const note = app.pr.body_buf[0..app.pr.body_len];
-    gh.reviewBody(&out, arena, store, app.review.files(), req.event, note, &ids) catch {
+    app.forge.reviewBody(&out, arena, store, app.review.files(), req.event, note, &ids) catch {
         app.notice.set("could not build the review", .{});
         return null;
     };
@@ -793,7 +799,7 @@ pub fn importRemarks(app: *App, got: Opened) usize {
 }
 
 /// The forge's remarks into the store, in reading order.
-fn adoptRemarks(app: *App, remarks: []const gh.Remark) usize {
+fn adoptRemarks(app: *App, remarks: []const forge.Remark) usize {
     const was_dirty = app.comments.dirty;
     // Reading the request again replaces what it said last time. Without
     // this, opening the same request twice showed every remark twice.
@@ -830,7 +836,7 @@ fn adoptRemarks(app: *App, remarks: []const gh.Remark) usize {
 /// One remark and where it sorts: which thread, where that thread first
 /// appeared, and when this message was written.
 const Placed = struct {
-    remark: gh.Remark,
+    remark: forge.Remark,
     at: usize,
     when: i64,
     id: u64,
@@ -840,7 +846,7 @@ const Placed = struct {
 ///
 /// `in_reply_to_id` is resolved to the thread's root rather than taken at face
 /// value: a reply to a reply would otherwise split a thread of three.
-fn threadOrder(arena: Allocator, remarks: []const gh.Remark) Allocator.Error![]const gh.Remark {
+fn threadOrder(arena: Allocator, remarks: []const forge.Remark) Allocator.Error![]const forge.Remark {
     if (remarks.len < 2) return remarks;
     const placed = try arena.alloc(Placed, remarks.len);
     for (remarks, placed) |r, *p| {
@@ -863,7 +869,7 @@ fn threadOrder(arena: Allocator, remarks: []const gh.Remark) Allocator.Error![]c
     }
     std.sort.insertion(Placed, placed, {}, beforeInThread);
 
-    const out = try arena.alloc(gh.Remark, remarks.len);
+    const out = try arena.alloc(forge.Remark, remarks.len);
     for (placed, out) |p, *o| o.* = p.remark;
     return out;
 }
@@ -876,7 +882,7 @@ fn beforeInThread(_: void, a: Placed, b: Placed) bool {
 
 /// The thread a remark belongs to, following `in_reply_to_id` up. Bounded by
 /// the set size, so a cycle costs one pass rather than the pane.
-fn rootOf(remarks: []const gh.Remark, of: gh.Remark) u64 {
+fn rootOf(remarks: []const forge.Remark, of: forge.Remark) u64 {
     var id = of.id;
     var up = of.reply_to;
     var steps: usize = 0;
@@ -903,7 +909,7 @@ pub fn openPrList(app: *App, all: bool) Allocator.Error!void {
 
 /// The rows as a list to choose from. Separate from fetching them so the
 /// columns can be tested without a network.
-pub fn showPrs(app: *App, arena: Allocator, rows: []const gh.Pr, all: bool) Allocator.Error!void {
+pub fn showPrs(app: *App, arena: Allocator, rows: []const forge.Pr, all: bool) Allocator.Error!void {
     app.files_purpose = .prs;
 
     // A column earns its width or it is not drawn. Every row open, or
@@ -1120,7 +1126,7 @@ test "a ref longer than the buffer is truncated rather than overrunning it" {
     try testing.expect(std.mem.startsWith(u8, long, kept));
 }
 
-fn prRow(number: u32, state: []const u8, author: []const u8, title: []const u8) gh.Pr {
+fn prRow(number: u32, state: []const u8, author: []const u8, title: []const u8) forge.Pr {
     return .{
         .number = number,
         .state = state,
@@ -1133,7 +1139,7 @@ fn prRow(number: u32, state: []const u8, author: []const u8, title: []const u8) 
     };
 }
 
-fn showPrRows(fx: *app_mod.Fixture, rows: []const gh.Pr, all: bool) !void {
+fn showPrRows(fx: *app_mod.Fixture, rows: []const forge.Pr, all: bool) !void {
     fx.app.pick_list.clearRetainingCapacity();
     fx.app.pr.rows.clearRetainingCapacity();
     _ = fx.app.pick_arena.reset(.retain_capacity);
@@ -1146,7 +1152,7 @@ test "a column of one repeated word is not drawn" {
 
     // One person's open requests: saying `open` and their name on every
     // row spends the width the titles need at eighty columns.
-    const same = [_]gh.Pr{
+    const same = [_]forge.Pr{
         prRow(19, "OPEN", "kunkka19xx", "feat: posting comments to a PR"),
         prRow(7, "OPEN", "kunkka19xx", "fix: the anchor table"),
     };
@@ -1162,7 +1168,7 @@ test "a column of one repeated word is not drawn" {
     try testing.expectEqual(@as(?u32, 19), fx.app.pick_list.items[0].key);
 
     // Mixed, and both columns are worth their width.
-    var mixed = [_]gh.Pr{
+    var mixed = [_]forge.Pr{
         prRow(19, "OPEN", "kunkka19xx", "feat: posting"),
         prRow(16, "MERGED", "someone", "chore: config"),
     };
@@ -1181,7 +1187,7 @@ test "a column of one repeated word is not drawn" {
 test "picking a request that is not there closes the list and does nothing" {
     var fx = try app_mod.Fixture.init(testing.allocator);
     defer fx.deinit();
-    const rows = [_]gh.Pr{prRow(19, "OPEN", "me", "feat: posting")};
+    const rows = [_]forge.Pr{prRow(19, "OPEN", "me", "feat: posting")};
     try showPrRows(fx, &rows, false);
 
     // No network in a test, so only the refusing half is exercised here:
@@ -1212,7 +1218,7 @@ test "posting is armed, not done, so the frame saying so is drawn first" {
     _ = try fx.app.comments.add("a.zig", 1, "a remark");
     postReview(&fx.app, .request_changes, "have a look");
     const req = fx.app.pr.pending.?.post;
-    try testing.expectEqual(gh.Event.request_changes, req.event);
+    try testing.expectEqual(forge.Event.request_changes, req.event);
     try testing.expect(req.one == null);
     try testing.expect(std.mem.indexOf(u8, fx.app.busy.?.label(), "posting") != null);
     // The note outlives the prompt buffer it was typed into.
@@ -1553,4 +1559,164 @@ test "a thread that went away under the box takes nothing with it" {
     // Refused rather than posted at a root this checkout can no longer name.
     try testing.expect(prepareReply(&fx.app, a.allocator(), fx.app.pr.pending.?.reply) == null);
     try fx.expectNotice("no longer here");
+}
+
+/// A forge that answers from memory.
+///
+/// The point of the interface, and the thing that could not be written before
+/// it: `fetch` is the one function in the tool that talks to a forge, and
+/// until now exercising it meant a network, a `gh` on PATH and a real request.
+const Fake = struct {
+    /// What the next call does. Set per test; every operation reads it, so one
+    /// switch covers the answer path and both failure paths.
+    var answers: enum { ok, no_remarks, failed, timed_out } = .ok;
+
+    fn err() forge.Error {
+        return switch (answers) {
+            .timed_out => error.TimedOut,
+            else => error.Failed,
+        };
+    }
+
+    fn resolve(_: Allocator, _: Allocator, _: std.Io, number: ?u32) forge.ResolveError!forge.Refs {
+        if (answers == .failed or answers == .timed_out) return err();
+        return .{
+            .number = number orelse 16,
+            .repo = "o/r",
+            .base = "base-sha",
+            .target = "head-sha",
+            .label = "#16",
+        };
+    }
+
+    fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: forge.Pr) forge.ResolveError!forge.Refs {
+        return resolve(gpa, arena, io, pr.number);
+    }
+
+    fn list(_: Allocator, arena: Allocator, _: std.Io, _: bool) forge.Error![]forge.Pr {
+        if (answers != .ok) return err();
+        const rows = try arena.alloc(forge.Pr, 1);
+        rows[0] = .{
+            .number = 16,
+            .state = "OPEN",
+            .base_ref = "main",
+            .base_oid = "base-sha",
+            .head_oid = "head-sha",
+            .url = "https://example.test/o/r/pull/16",
+            .title = "a fake one",
+        };
+        return rows;
+    }
+
+    fn remarks(_: Allocator, arena: Allocator, _: std.Io, _: []const u8, _: u32) forge.Error![]forge.Remark {
+        if (answers != .ok) return err();
+        const out = try arena.alloc(forge.Remark, 1);
+        out[0] = .{
+            .id = 900,
+            .path = "src/alpha.zig",
+            .line = 2,
+            .author = "someone",
+            .body = "from the forge",
+            .outdated = false,
+        };
+        return out;
+    }
+
+    fn viewer(_: Allocator, _: Allocator, _: std.Io) forge.Error![]const u8 {
+        if (answers != .ok) return err();
+        return "me";
+    }
+
+    fn post(_: Allocator, _: Allocator, _: std.Io, _: []const u8, _: u32, _: []const u8) forge.Error!void {
+        if (answers == .failed or answers == .timed_out) return err();
+    }
+
+    fn amendOne(_: Allocator, _: Allocator, _: std.Io, _: []const u8, _: u64, _: []const u8) forge.Error!void {
+        if (answers != .ok) return err();
+    }
+
+    fn replyOne(_: Allocator, _: Allocator, _: std.Io, _: []const u8, _: u32, _: u64, _: []const u8) forge.Error!u64 {
+        if (answers != .ok) return err();
+        return 901;
+    }
+
+    fn drop(_: Allocator, _: Allocator, _: std.Io, _: []const u8, _: u64) forge.Error!void {
+        if (answers != .ok) return err();
+    }
+
+    fn reviewBody(
+        _: *std.ArrayList(u8),
+        _: Allocator,
+        _: *const comments_mod.Store,
+        _: []const diff_mod.FileDiff,
+        _: forge.Event,
+        _: []const u8,
+        _: *std.ArrayList(u32),
+    ) Allocator.Error!void {}
+
+    const it: forge.Forge = .{
+        .name = "fake",
+        .resolve = resolve,
+        .refsOf = refsOf,
+        .list = list,
+        .remarks = remarks,
+        .viewer = viewer,
+        .post = post,
+        .amend = amendOne,
+        .reply = replyOne,
+        .drop = drop,
+        .reviewBody = reviewBody,
+    };
+};
+
+test "fetch answers from whichever forge it was handed" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    Fake.answers = .ok;
+    const opened = fetch(Fake.it, testing.allocator, arena, undefined, .{ .open = .{ .number = 16 } });
+    try testing.expectEqualStrings("o/r", opened.opened.refs.repo);
+    try testing.expectEqualStrings("me", opened.opened.login);
+    try testing.expectEqual(@as(usize, 1), opened.opened.remarks.len);
+    try testing.expect(!opened.opened.remarks_failed);
+
+    // A reply comes back with the id the forge minted, which is what keeps it
+    // visible without reopening the request.
+    const answered = fetch(Fake.it, testing.allocator, arena, undefined, .{ .reply = .{
+        .repo = "o/r",
+        .number = 16,
+        .root = 900,
+        .payload = "{}",
+        .body = "sure",
+    } });
+    try testing.expectEqual(@as(u64, 901), answered.replied);
+}
+
+test "a request opens even when its remarks do not" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    // The refs resolved and the remarks did not. Said rather than shown as a
+    // request that simply has none on it - and not a failure, because a
+    // request without them still reviews.
+    Fake.answers = .no_remarks;
+    const got = fetch(Fake.it, testing.allocator, a.allocator(), undefined, .{ .open = .{ .number = 16 } });
+    try testing.expectEqualStrings("o/r", got.opened.refs.repo);
+    try testing.expect(got.opened.remarks_failed);
+    try testing.expectEqual(@as(usize, 0), got.opened.remarks.len);
+}
+
+test "a deadline that fired is not a call that failed" {
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+
+    Fake.answers = .timed_out;
+    const late = fetch(Fake.it, testing.allocator, a.allocator(), undefined, .{ .open = .{ .number = 16 } });
+    try testing.expectEqual(Fail.timed_out, late.failed);
+
+    Fake.answers = .failed;
+    const bad = fetch(Fake.it, testing.allocator, a.allocator(), undefined, .{ .open = .{ .number = 16 } });
+    try testing.expectEqual(Fail.failed, bad.failed);
+    Fake.answers = .ok;
 }

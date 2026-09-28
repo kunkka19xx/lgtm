@@ -545,8 +545,10 @@ rule is easier to hold than fourteen more rows.
 The box's keys are bindings like any others, but with two rules of their own.
 They must be **single chords**: a text box cannot hold a prefix while waiting
 to see whether a sequence completes, because the next key is usually a letter
-you are typing. And a **pending operator wins**: with `d` waiting for a motion,
-`<Esc>` cancels the operator rather than the box.
+you are typing. A sequence here is refused and reported the way a conflict is,
+so the command keeps its default rather than getting a binding that never
+fires. And a **pending operator wins**: with `d` waiting for a motion, `<Esc>`
+cancels the operator rather than the box.
 
 The box's *motions* are not remappable, and that is deliberate rather than
 unfinished. In a text box every printable key is data, so a keymap able to bind

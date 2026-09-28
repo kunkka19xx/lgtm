@@ -601,6 +601,17 @@ pub const Loader = struct {
                 self.note(src, line, "keys.{s}: \"\" is not a key; use [] to unbind", .{key});
                 return;
             }
+            // The box cannot hold a prefix while it waits to see whether a
+            // sequence completes, because the next key is usually a letter
+            // being typed - so a multi-chord binding there would never fire.
+            // Refused rather than accepted silently, which is what it was.
+            if (proto.modes.compose and chords.len > 1) {
+                var cbuf: [keytext.max_keys_bytes]u8 = undefined;
+                self.note(src, line, "keys.{s}: {s} is more than one key, and the compose box takes single keys", .{
+                    key, keytext.bufWriteChords(chords, &cbuf),
+                });
+                return;
+            }
             built.append(a, .{
                 .chords = a.dupe(keymap.Chord, chords) catch return,
                 .command = cmd,
@@ -1214,6 +1225,37 @@ test "a remap that would shadow another binding is refused, not accepted" {
     try testing.expectEqual(@as(usize, 1), l3.problems.items.len);
     try testing.expect(std.mem.indexOf(u8, l3.problems.items[0].text, "already bound to word_end") != null);
     try testing.expectEqual(keymap.default_bindings.ptr, l3.cfg.keys.ptr);
+}
+
+test "a compose binding must be a single key" {
+    // The box takes the next key as the letter it is, so a two-chord binding
+    // there can never fire. Documented from the start and, until now, not
+    // actually enforced: this went in as a silently dead binding.
+    var l = loadText(
+        \\[keys]
+        \\compose_submit = "gs"
+    );
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 1), l.problems.items.len);
+    try testing.expect(std.mem.indexOf(u8, l.problems.items[0].text, "single keys") != null);
+    try testing.expectEqual(keymap.default_bindings.ptr, l.cfg.keys.ptr);
+
+    // One chord is fine, modifiers included - `<C-x>` is a single key.
+    var ok = loadText(
+        \\[keys]
+        \\compose_submit = "<C-x>"
+    );
+    defer ok.deinit();
+    try testing.expectEqual(@as(usize, 0), ok.problems.items.len);
+    try testing.expect(keymap.default_bindings.ptr != ok.cfg.keys.ptr);
+
+    // And the rule is the box's alone: a sequence outside it is ordinary.
+    var seq = loadText(
+        \\[keys]
+        \\turn_list = "gt"
+    );
+    defer seq.deinit();
+    try testing.expectEqual(@as(usize, 0), seq.problems.items.len);
 }
 
 test "a command nobody has heard of names itself" {

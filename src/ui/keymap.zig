@@ -971,6 +971,16 @@ test "every binding is live in at least one mode" {
     }
 }
 
+test "the box's own keys are single chords" {
+    // A prefix cannot be held in a text box: the key after it is a letter
+    // being typed, so the sequence would never complete. `config.applyKeys`
+    // refuses an override that breaks this; nothing was checking the defaults.
+    for (default_bindings) |b| {
+        if (!b.modes.compose) continue;
+        try testing.expectEqual(@as(usize, 1), b.chords.len);
+    }
+}
+
 test "motions work in visual mode, so selecting is moving with an anchor" {
     var km: Keymap = .{};
     try testing.expectEqual(Command.line_down, km.feed(tap('j'), .visual).command);
