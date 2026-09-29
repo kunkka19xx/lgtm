@@ -27,6 +27,7 @@ const git = @import("../core/git.zig");
 const bridge = @import("../bridge/bridge.zig");
 
 const config = @import("../config.zig");
+const forge_mod = @import("../core/forge.zig");
 const app_mod = @import("app.zig");
 const thread_mod = @import("thread.zig");
 const turns_mod = @import("turns.zig");
@@ -159,14 +160,14 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
     reader.winsize = &winsize;
     // One forge call at a time, with one arena for what it is handed and what
     // it brings back.
-    var forge: ?*Forge = null;
+    var job: ?*Job = null;
     var prep: std.heap.ArenaAllocator = .init(gpa);
     // Quitting joins the worker, so a call still running holds the exit until
     // it ends. Bounded rather than unbounded now that every subprocess has a
     // deadline; cancelling outright would mean detaching the thread rather
     // than joining it, and detaching means the arena below cannot be freed.
     defer {
-        if (forge) |job| job.finish();
+        if (job) |running| running.finish();
         prep.deinit();
     }
 
@@ -292,7 +293,7 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
         // notice saying it is happening is already on screen.
         // Started after the frame that says it is happening, on a worker so
         // the spinner keeps turning, and collected on a later pass.
-        if (forge == null) {
+        if (job == null) {
             // A read and a post go the same way: the same second, the same
             // answer owed.
             const want: ?pr_mod.Want = if (app.pr.want) |armed| blk: {
@@ -303,8 +304,8 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
                 break :blk pr_mod.prepare(&app, prep.allocator(), req);
             } else null;
 
-            if (want) |job| {
-                forge = Forge.start(gpa, io, prep.allocator(), job) catch blk: {
+            if (want) |asking| {
+                job = Job.start(app.forge, gpa, io, prep.allocator(), asking) catch blk: {
                     app.busy = null;
                     app.notice.set("could not start that", .{});
                     break :blk null;
@@ -314,11 +315,11 @@ pub fn run(gpa: Allocator, io: std.Io, environ: *std.process.Environ.Map, opts: 
                 app.busy = null;
             }
         }
-        if (forge) |job| {
-            if (job.done.load(.acquire)) {
-                try pr_mod.apply(&app, job.want, job.got);
-                job.finish();
-                forge = null;
+        if (job) |running| {
+            if (running.done.load(.acquire)) {
+                try pr_mod.apply(&app, running.want, running.got);
+                running.finish();
+                job = null;
                 _ = prep.reset(.retain_capacity);
                 continue;
             }
@@ -577,9 +578,12 @@ fn deliver(
 /// The worker touches nothing the main thread can see: arguments by value, and
 /// the answer published with a release store the loop acquires. The same shape
 /// `io/watch.zig` has used to run `git status` off this thread since v0.2.
-const Forge = struct {
+const Job = struct {
     thread: std.Thread,
     done: std.atomic.Value(bool),
+    /// Which forge to ask. Copied by value like every other argument: the
+    /// worker must touch nothing the main thread can still change.
+    forge: forge_mod.Forge,
     want: pr_mod.Want,
     got: pr_mod.Got,
     gpa: Allocator,
@@ -588,11 +592,12 @@ const Forge = struct {
     arena: Allocator,
     io: std.Io,
 
-    fn start(gpa: Allocator, io: std.Io, arena: Allocator, want: pr_mod.Want) !*Forge {
-        const self = try gpa.create(Forge);
+    fn start(f: forge_mod.Forge, gpa: Allocator, io: std.Io, arena: Allocator, want: pr_mod.Want) !*Job {
+        const self = try gpa.create(Job);
         self.* = .{
             .thread = undefined,
             .done = .init(false),
+            .forge = f,
             .want = want,
             .got = .{ .failed = .failed },
             .gpa = gpa,
@@ -606,12 +611,12 @@ const Forge = struct {
         return self;
     }
 
-    fn work(self: *Forge) void {
-        self.got = pr_mod.fetch(self.gpa, self.arena, self.io, self.want);
+    fn work(self: *Job) void {
+        self.got = pr_mod.fetch(self.forge, self.gpa, self.arena, self.io, self.want);
         self.done.store(true, .release);
     }
 
-    fn finish(self: *Forge) void {
+    fn finish(self: *Job) void {
         self.thread.join();
         self.gpa.destroy(self);
     }
