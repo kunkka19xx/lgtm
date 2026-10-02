@@ -1501,6 +1501,7 @@ const yaml_lang = @import("lang/yaml.zig");
 const toml_lang = @import("lang/toml.zig");
 const dockerfile_lang = @import("lang/dockerfile.zig");
 const shell_lang = @import("lang/shell.zig");
+const env_lang = @import("lang/env.zig");
 const sql_lang = @import("lang/sql.zig");
 const markdown_lang = @import("lang/markdown.zig");
 
@@ -3523,6 +3524,34 @@ test "a shell script: both function forms, and a # that is not a comment" {
     defer st.deinit(gpa);
     try testing.expectEqualStrings("deploy-app", st.enclosingFn(5).?.name);
     try testing.expectEqualStrings("rollback", st.enclosingFn(10).?.name);
+}
+
+test "an env key is anywhere on the line, and a # glued to a value is not a comment" {
+    const src =
+        \\# database
+        \\export DATABASE_URL="postgres://user:pass@host/db"
+        \\PORT=5432
+        \\SECRET='it\'s literal'
+        \\TAG=release#1
+        \\
+    ;
+    const gpa = testing.allocator;
+    var lx: Lexer = .init(&env_lang.def);
+    const runs = try lx.lexAll(gpa, src);
+    defer gpa.free(runs);
+
+    try expectTiles(runs, src, 0, @intCast(src.len));
+    try testing.expectEqual(Kind.comment, kindOf(runs, src, "# database").?);
+    try testing.expectEqual(Kind.keyword, kindOf(runs, src, "export").?);
+    // `export` heads the line, not `DATABASE_URL` - found anyway, the way an
+    // unquoted '=' in TOML is a key wherever it falls.
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "DATABASE_URL").?);
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "\"postgres://user:pass@host/db\"").?);
+    try testing.expectEqual(Kind.type_name, kindOf(runs, src, "PORT").?);
+    // No escape in single quotes: the literal ends at the backslashed one.
+    try testing.expectEqual(Kind.string, kindOf(runs, src, "'it\\'").?);
+    // Glued to the word before it, so it is part of the value, not a comment.
+    try testing.expectEqual(Kind.text, kindOf(runs, src, "release#1").?);
 }
 
 test "a toml table names the lines under it" {
