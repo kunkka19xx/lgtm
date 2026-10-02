@@ -43,6 +43,7 @@ const dockerfile_lang = @import("lang/dockerfile.zig");
 const sql_lang = @import("lang/sql.zig");
 const markdown_lang = @import("lang/markdown.zig");
 const shell_lang = @import("lang/shell.zig");
+const env_lang = @import("lang/env.zig");
 
 pub const languages = [_]*const LangDef{
     &zig_lang.def,
@@ -66,6 +67,7 @@ pub const languages = [_]*const LangDef{
     &sql_lang.def,
     &markdown_lang.def,
     &shell_lang.def,
+    &env_lang.def,
 };
 
 /// The language a path is in, by extension or by name, lower-cased.
@@ -429,6 +431,13 @@ test "a file known by name rather than by extension" {
     try testing.expectEqualStrings("shell", forPath(".zshrc").?.name);
     try testing.expectEqualStrings("shell", forPath("aur/PKGBUILD").?.name);
     try testing.expect(forPath(".zshrc/notes.txt") == null);
+
+    // Every dotted variant names the same stem, the way `Dockerfile.dev` does.
+    try testing.expectEqualStrings("env", forPath(".env").?.name);
+    try testing.expectEqualStrings("env", forPath(".env.local").?.name);
+    try testing.expectEqualStrings("env", forPath(".env.production").?.name);
+    // And a name that merely starts with it is a plain extension match.
+    try testing.expectEqualStrings("env", forPath("backend.env").?.name);
 }
 
 test "guard rails fall back to plain rather than failing" {
