@@ -51,6 +51,9 @@ pub const Files = struct {
     gutter: bool = true,
     /// The most of the pane this list's box may take, as a percentage.
     max_share: u8 = 100,
+    /// `[ui] fixed_list`. Set by the config, not by an opener, so `open`
+    /// leaves it alone.
+    fixed: bool = false,
     /// The whole change, for the top border. Set by the caller that knows
     /// which list this is: a project browse or a comment list has no total
     /// worth drawing, and `null` is how they say so.
@@ -156,6 +159,7 @@ pub const Files = struct {
             .extra_keys = self.extra_keys,
             .gutter = self.gutter,
             .max_share = self.max_share,
+            .fixed = self.fixed,
             .query = filter,
             .index = self.index,
             .keys = try navKeys(bindings, arena),

@@ -106,6 +106,13 @@ pub const Ui = struct {
     /// the same idea, and a reader who does not want a list explaining itself
     /// does not want it three times.
     preview: bool = true,
+    /// Keep the list's box one size while the selection moves. On, it is
+    /// sized for the largest panel any row could ask for, and a row with
+    /// nothing to show leaves the panel empty. Off, the box fits the selected
+    /// row: a long diff makes it taller, and a file with nothing to preview
+    /// drops the panel and narrows it - less of the pane covered, at the cost
+    /// of a box that moves under the reader's eye.
+    fixed_list: bool = true,
     /// The longest a scroll may take to arrive, in milliseconds. A short jump
     /// finishes sooner: it travels at one screen row per frame, which is the
     /// finest a cell grid can draw, and runs out of rows. Zero is the old
@@ -382,6 +389,8 @@ pub const Loader = struct {
             .ui => {
                 if (std.mem.eql(u8, key, "preview")) {
                     self.cfg.ui.preview = self.wantBool(src, line, key, value) orelse return;
+                } else if (std.mem.eql(u8, key, "fixed_list")) {
+                    self.cfg.ui.fixed_list = self.wantBool(src, line, key, value) orelse return;
                 } else if (std.mem.eql(u8, key, "wrap")) {
                     self.cfg.ui.wrap = self.wantBool(src, line, key, value) orelse return;
                 } else if (std.mem.eql(u8, key, "scroll_ms")) {
@@ -486,7 +495,7 @@ pub const Loader = struct {
     /// One `[templates]` override, matched against `template.Table`'s fields by
     /// name.
     ///
-    /// Reflection rather than a switch, because the alternative is a list of
+    /// Reflection rather than a switch, because the alternative is  a list of
     /// thirteen cases that has to be edited every time a sentence is added -
     /// and the failure mode of forgetting is a key the config silently ignores.
     /// The field names *are* the config keys, which is what the table was
@@ -880,6 +889,7 @@ pub const starter =
     \\# compose = "bottom"        # "bottom", "top", or "centre"
     \\# wrap = true               # soft wrap; zw toggles it for the session
     \\# preview = true            # the panel beside a list: pane screens, comments, diffs
+    \\# fixed_list = true         # false lets a list's box fit the selected row
     \\# tab_width = 4             # columns a tab is drawn as
     \\# scroll_lines = 3          # rows one notch of the wheel moves; 0 leaves the mouse alone
     \\# scroll_ms = 250           # how long a jump travels; 0 is instant
@@ -1415,15 +1425,29 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
 test "previews are on unless the file says otherwise" {
     var l = loadText(
         \\[ui]
-        \\preview = false
+        \\preview = true
     );
     defer l.deinit();
-    try testing.expect(!l.cfg.ui.preview);
+    try testing.expect(l.cfg.ui.preview);
     try testing.expectEqual(@as(usize, 0), l.problems.items.len);
 
     var on = loadText("");
     defer on.deinit();
     try testing.expect(on.cfg.ui.preview);
+}
+
+test "a list holds its size unless the file lets it fit" {
+    var l = loadText(
+        \\[ui]
+        \\fixed_list = false
+    );
+    defer l.deinit();
+    try testing.expect(!l.cfg.ui.fixed_list);
+    try testing.expectEqual(@as(usize, 0), l.problems.items.len);
+
+    var on = loadText("");
+    defer on.deinit();
+    try testing.expect(on.cfg.ui.fixed_list);
 }
 
 test "a template override replaces one string and leaves the rest" {

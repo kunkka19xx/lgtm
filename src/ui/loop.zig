@@ -686,6 +686,7 @@ fn applyConfig(app: *App, cfg: config.Config) void {
     app.nav = cfg.nav;
     app.wrap = cfg.ui.wrap;
     app.list_preview = cfg.ui.preview;
+    app.file_list.fixed = cfg.ui.fixed_list;
     app.layout = cfg.diff.layout;
     app.split_min_width = cfg.diff.split_min_width;
     app.expand_lines = cfg.diff.expand_lines;
