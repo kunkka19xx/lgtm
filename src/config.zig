@@ -495,7 +495,7 @@ pub const Loader = struct {
     /// One `[templates]` override, matched against `template.Table`'s fields by
     /// name.
     ///
-    /// Reflection rather than a switch, because the alternative is  a list of
+    /// Reflection rather than a switch, because the alternative is a list of
     /// thirteen cases that has to be edited every time a sentence is added -
     /// and the failure mode of forgetting is a key the config silently ignores.
     /// The field names *are* the config keys, which is what the table was
@@ -1425,10 +1425,10 @@ test "a slot or a colour that cannot be read keeps the rest of the theme" {
 test "previews are on unless the file says otherwise" {
     var l = loadText(
         \\[ui]
-        \\preview = true
+        \\preview = false
     );
     defer l.deinit();
-    try testing.expect(l.cfg.ui.preview);
+    try testing.expect(!l.cfg.ui.preview);
     try testing.expectEqual(@as(usize, 0), l.problems.items.len);
 
     var on = loadText("");
