@@ -910,6 +910,15 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     const detail: ?frame_mod.FileEntry = if (entries.len > 0) entries[shown_sel] else null;
     m.preview = if (detail) |d| d.preview.len > 0 or d.detail.len > 0 else false;
     if (detail) |d| m.preview_lines = previewLines(d);
+    // Pinned: a panel if any row has one, as tall as a panel may grow. The
+    // filter can still empty the list; the box does not follow the cursor.
+    if (v.fixed) {
+        m.preview = false;
+        for (entries) |e| {
+            if (e.preview.len > 0 or e.detail.len > 0) m.preview = true;
+        }
+        if (m.preview) m.preview_lines = preview_rows_beside;
+    }
     m.max_share = v.max_share;
     // Every list this widget draws: three that settled on different widths
     // would read as three widgets.

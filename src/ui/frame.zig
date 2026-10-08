@@ -469,6 +469,9 @@ pub const FilesView = struct {
     gutter: bool = true,
     /// The most of the pane this list's box may take, as a percentage.
     max_share: u8 = 100,
+    /// Size the box for every row rather than the selected one, so it holds
+    /// still while the selection moves. `[ui] fixed_list`.
+    fixed: bool = false,
     /// What the box is listing, drawn in its title. The same widget shows the
     /// changed files, every file in the project, and every comment; saying
     /// which spares the reader working it out from the rows.
