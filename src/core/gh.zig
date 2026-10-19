@@ -235,9 +235,16 @@ pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError
     if (want_head or want_base) {
         const remote = try git.defaultRemote(gpa, arena, io, ownerRepo(pr.url));
         if (want_head) try git.fetchRef(gpa, io, remote, try pullRef(arena, pr.number));
-        // The branch, not the commit: not every server serves a bare sha,
-        // and the branch contains it.
-        if (want_base) try git.fetchRef(gpa, io, remote, pr.base_ref);
+        // The branch first: not every server serves a bare sha. The sha when
+        // that fails or misses, which is a stacked request whose base branch
+        // was merged and deleted, or force-pushed past the old tip.
+        if (want_base) {
+            git.fetchRef(gpa, io, remote, pr.base_ref) catch |err| switch (err) {
+                error.OutOfMemory, error.Timeout => return err,
+                else => {},
+            };
+            if (!git.hasCommit(gpa, io, pr.base_oid)) try git.fetchRef(gpa, io, remote, pr.base_oid);
+        }
     }
 
     const base = try git.mergeBase(gpa, arena, io, pr.base_oid, pr.head_oid);
