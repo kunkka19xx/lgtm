@@ -217,6 +217,19 @@ pub fn resolve(
     return refsOf(gpa, arena, io, try view(gpa, arena, io, number));
 }
 
+/// `git fetch`, with a deadline that fired told apart from a ref that is not
+/// there.
+///
+/// The forge's own `TimedOut` rather than git's `Timeout`, because that is the
+/// name the notice is picked by (`ui/pr.zig`): nothing is wrong with the
+/// request or the login, and the key is worth pressing again.
+fn fetch(gpa: Allocator, io: std.Io, remote: []const u8, ref: []const u8) ResolveError!void {
+    git.fetchRef(gpa, io, remote, ref) catch |err| return switch (err) {
+        error.Timeout => error.TimedOut,
+        else => err,
+    };
+}
+
 /// A request to the two refs a review reads: make sure the objects are here,
 /// then work out the base with git.
 ///
@@ -234,16 +247,20 @@ pub fn refsOf(gpa: Allocator, arena: Allocator, io: std.Io, pr: Pr) ResolveError
     const want_base = !git.hasCommit(gpa, io, pr.base_oid);
     if (want_head or want_base) {
         const remote = try git.defaultRemote(gpa, arena, io, ownerRepo(pr.url));
-        if (want_head) try git.fetchRef(gpa, io, remote, try pullRef(arena, pr.number));
+        if (want_head) try fetch(gpa, io, remote, try pullRef(arena, pr.number));
         // The branch first: not every server serves a bare sha. The sha when
         // that fails or misses, which is a stacked request whose base branch
         // was merged and deleted, or force-pushed past the old tip.
+        //
+        // A deadline is not a missing ref: the second fetch carries a deadline
+        // of its own, and a host that is not answering would spend the
+        // reader's thirty seconds twice over to reach the same failure.
         if (want_base) {
-            git.fetchRef(gpa, io, remote, pr.base_ref) catch |err| switch (err) {
-                error.OutOfMemory, error.Timeout => return err,
+            fetch(gpa, io, remote, pr.base_ref) catch |err| switch (err) {
+                error.OutOfMemory, error.TimedOut => return err,
                 else => {},
             };
-            if (!git.hasCommit(gpa, io, pr.base_oid)) try git.fetchRef(gpa, io, remote, pr.base_oid);
+            if (!git.hasCommit(gpa, io, pr.base_oid)) try fetch(gpa, io, remote, pr.base_oid);
         }
     }
 
