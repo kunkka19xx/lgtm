@@ -18,6 +18,7 @@ const compose_mod = @import("compose.zig");
 const event_mod = @import("../core/event.zig");
 const thread_mod = @import("thread.zig");
 const wrap_mod = @import("wrap.zig");
+const path_mod = @import("path.zig");
 
 /// A review the loop is to hand to the forge.
 pub const Post = struct {
@@ -439,6 +440,24 @@ pub fn apply(app: *App, want: Want, got: Got) Allocator.Error!void {
 /// The author column's ceiling. A login is short; a bot's is not, and one of
 /// them should not push every title off an eighty-column pane.
 const author_max: usize = 14;
+
+/// The base marker's ceiling, for the same reason.
+const base_max: u16 = 20;
+
+/// The branch the most rows target. Ties go to the earlier row.
+fn commonBase(rows: []const forge.Pr) []const u8 {
+    var best: []const u8 = "";
+    var best_n: usize = 0;
+    for (rows, 0..) |r, i| {
+        var n: usize = 0;
+        for (rows[i..]) |o| n += @intFromBool(std.mem.eql(u8, o.base_ref, r.base_ref));
+        if (n > best_n) {
+            best = r.base_ref;
+            best_n = n;
+        }
+    }
+    return best;
+}
 
 /// What the line numbers in a review file belong to. Empty for the working
 /// tree, where they belong to the files on disk.
@@ -929,6 +948,9 @@ pub fn showPrs(app: *App, arena: Allocator, rows: []const forge.Pr, all: bool) A
         w_state = @max(w_state, wrap_mod.columns(i18n.word(r.status()), .{ .method = .unicode }));
         w_author = @max(w_author, wrap_mod.columns(who.*, .{ .method = .unicode }));
     }
+    // Only a stacked request names its base: the branch most rows target is
+    // the trunk, and saying it on every row says nothing.
+    const base = commonBase(rows);
 
     for (rows, whos) |r, who| {
         var label: std.ArrayList(u8) = .empty;
@@ -941,6 +963,10 @@ pub fn showPrs(app: *App, arena: Allocator, rows: []const forge.Pr, all: bool) A
         if (mixed_author) {
             const w = wrap_mod.columns(who, .{ .method = .unicode });
             try label.print(arena, "  {s}{s}", .{ who, finder_mod.pad(arena, w_author -| w) });
+        }
+        if (!std.mem.eql(u8, r.base_ref, base)) {
+            const shown = try path_mod.elide(arena, r.base_ref, base_max, app.glyphs.ellipsis, .{ .method = .unicode });
+            try label.print(arena, "  {s} {s}", .{ app.glyphs.target_mark, shown });
         }
         try label.print(arena, "  {s}", .{r.title});
 
@@ -1182,6 +1208,32 @@ test "a column of one repeated word is not drawn" {
     try showPrRows(fx, &mixed, true);
     try testing.expectEqualStrings("#19  下書き      kunkka19xx  feat: posting", fx.app.pick_list.items[0].path);
     try testing.expectEqualStrings("#16  マージ済み  someone     chore: config", fx.app.pick_list.items[1].path);
+}
+
+test "a stacked request names its base, and a trunk one does not" {
+    var fx = try app_mod.Fixture.init(testing.allocator);
+    defer fx.deinit();
+
+    var rows = [_]forge.Pr{
+        prRow(12, "OPEN", "me", "feat: the second half"),
+        prRow(11, "OPEN", "me", "feat: the first half"),
+        prRow(9, "OPEN", "me", "fix: the anchor table"),
+        prRow(8, "OPEN", "me", "chore: very long base"),
+    };
+    rows[0].base_ref = "feat-first-half";
+    rows[3].base_ref = "someone/a-branch-name-far-too-long-for-a-row";
+    try showPrRows(fx, &rows, false);
+    const e = fx.app.glyphs.ellipsis;
+    try testing.expectEqualStrings("#12  \u{25b8} feat-first-half  feat: the second half", fx.app.pick_list.items[0].path);
+    try testing.expectEqualStrings("#11  feat: the first half", fx.app.pick_list.items[1].path);
+    const long = fx.app.pick_list.items[3].path;
+    try testing.expect(std.mem.indexOf(u8, long, e) != null);
+    try testing.expect(std.mem.endsWith(u8, long, "  chore: very long base"));
+
+    // Every row on one branch, trunk or not: nothing to tell apart.
+    for (&rows) |*r| r.base_ref = "develop";
+    try showPrRows(fx, &rows, false);
+    try testing.expectEqualStrings("#12  feat: the second half", fx.app.pick_list.items[0].path);
 }
 
 test "picking a request that is not there closes the list and does nothing" {

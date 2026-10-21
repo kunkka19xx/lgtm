@@ -687,7 +687,22 @@ fn gitRun(gpa: Allocator, io: std.Io, args: []const []const u8, max: usize) Erro
     try proc.gitArgv(gpa, &argv, null);
     try argv.appendSlice(gpa, args);
 
-    const out = proc.run(gpa, io, argv.items, max) catch return error.GitFailed;
+    // Two of these are kept whole and the rest are one failure.
+    //
+    // A deadline that fired is not a command that answered badly: a caller
+    // deciding whether to try something else has to tell them apart. A ref
+    // that is not there fails in milliseconds and the next attempt is worth
+    // making, while a host that is not answering has already spent the
+    // reader's thirty seconds and would spend thirty more.
+    //
+    // And an allocation that failed is nobody's fallback. `std.process`
+    // spawns through the allocator, so `RunError` carries `OutOfMemory`;
+    // folded into `GitFailed` it reaches a caller that shrugs a failure off
+    // and tries the next thing (`core/gh.zig`) with no memory to do it in.
+    const out = proc.run(gpa, io, argv.items, max) catch |err| return switch (err) {
+        error.Timeout, error.OutOfMemory => err,
+        else => error.GitFailed,
+    };
     if (out.exit_code != 0) {
         out.deinit(gpa);
         return error.GitFailed;
