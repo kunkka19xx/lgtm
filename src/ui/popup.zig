@@ -910,14 +910,13 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     const detail: ?frame_mod.FileEntry = if (entries.len > 0) entries[shown_sel] else null;
     m.preview = if (detail) |d| d.preview.len > 0 or d.detail.len > 0 else false;
     if (detail) |d| m.preview_lines = previewLines(d);
-    // Pinned: a panel if any row has one, as tall as a panel may grow. The
-    // filter can still empty the list; the box does not follow the cursor.
+    // Pinned: measured across every row rather than from the selected one, so
+    // the box holds its size while the selection moves. The filter can still
+    // empty the list; the box does not follow the cursor.
     if (v.fixed) {
-        m.preview = false;
-        for (entries) |e| {
-            if (e.preview.len > 0 or e.detail.len > 0) m.preview = true;
-        }
-        if (m.preview) m.preview_lines = preview_rows_beside;
+        const pinned = fixedPanel(entries);
+        m.preview = pinned.show;
+        m.preview_lines = pinned.lines;
     }
     m.max_share = v.max_share;
     // Every list this widget draws: three that settled on different widths
@@ -1074,6 +1073,24 @@ pub fn drawFiles(f: Frame, v: frame_mod.FilesView, top: u16, height: u16) Alloca
     }
 }
 
+/// Whether a list draws a panel at all, and the rows it reserves for one.
+const Panel = struct { show: bool = false, lines: u16 = 0 };
+
+/// What a pinned list reserves: a panel when any row has one, as tall as the
+/// tallest row asks for. Sized by the rows rather than by `preview_rows_beside`
+/// because the bound is what a panel *may* grow to, not what one costs: a list
+/// whose rows each show a line or two would otherwise reserve twenty rows of
+/// the pane to draw two.
+fn fixedPanel(entries: []const frame_mod.FileEntry) Panel {
+    var out: Panel = .{};
+    for (entries) |e| {
+        if (e.preview.len == 0 and e.detail.len == 0) continue;
+        out.show = true;
+        out.lines = @max(out.lines, previewLines(e));
+    }
+    return out;
+}
+
 /// Rows the panel would use if it were given them: the detail line, a blank
 /// under it, and one per line of what the row is showing. Counted rather than
 /// assumed so a pane with a bare prompt on it does not reserve eight rows to
@@ -1197,6 +1214,38 @@ test "a file list is one column, however wide the pane" {
     var keys = m;
     keys.max_cols = 2;
     try testing.expectEqual(@as(u16, 2), fit(keys, 0, .{ .width = 200, .top = 0, .height = 30 }).?.cols);
+}
+
+test "a pinned list reserves the tallest panel its rows ask for, and no more" {
+    // A detail line and nothing else is one row, not the twenty a panel may
+    // grow to: the reserved height is what the rows cost.
+    const brief = fixedPanel(&.{
+        .{ .path = "a", .added = 1, .removed = 0, .detail = "one line" },
+        .{ .path = "b", .added = 0, .removed = 0 },
+    });
+    try testing.expect(brief.show);
+    try testing.expectEqual(@as(u16, 1), brief.lines);
+
+    // A row with nothing to show does not take the panel from the rows that
+    // have one, and the tallest of them sets the height for all of them.
+    const tall = fixedPanel(&.{
+        .{ .path = "a", .added = 0, .removed = 0 },
+        .{ .path = "b", .added = 0, .removed = 0, .preview = "1\n2\n3\n" },
+        .{ .path = "c", .added = 0, .removed = 0, .detail = "d" },
+    });
+    try testing.expect(tall.show);
+    try testing.expectEqual(@as(u16, 3), tall.lines);
+
+    // Still bounded: a pane's whole screen does not make a box taller than a
+    // panel beside the list is allowed to be.
+    const long = fixedPanel(&.{
+        .{ .path = "a", .added = 0, .removed = 0, .preview = "x\n" ** 60 },
+    });
+    try testing.expectEqual(preview_rows_beside, long.lines);
+
+    // Nothing to show anywhere, and nothing at all: no panel either way.
+    try testing.expect(!fixedPanel(&.{.{ .path = "a", .added = 0, .removed = 0 }}).show);
+    try testing.expect(!fixedPanel(&[_]frame_mod.FileEntry{}).show);
 }
 
 // -- the compose box ---------------------------------------------------------

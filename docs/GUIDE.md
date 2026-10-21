@@ -474,7 +474,9 @@ described; anything else stays silent rather than guessing.
 Every list draws a panel beside what you are on - the file list shows the head
 of that file's diff, the comment list the remark as you wrote it, the pane
 picker the pane's own screen. It moves to the side in a wide pane and under the
-list in a narrow one, and `[ui] preview = false` turns it off.
+list in a narrow one, and `[ui] preview = false` turns it off. The box keeps
+one size as you move through a list, rather than growing and shrinking under
+your eye; `[ui] fixed_list = false` fits it to the row you are on instead.
 
 ### 6. Get your work back
 
