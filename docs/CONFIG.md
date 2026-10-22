@@ -114,7 +114,7 @@ being reviewed.
 
 | Key | Default | |
 |---|---|---|
-| `language` | `"en"` | `"en"` or `"ja"`, the language of everything the TUI draws: notices, help, lists, badges. `lgtm --help`, config errors and what is sent to your agent stay as they are; the last is `[templates]`. The locale is not consulted |
+| `language` | `"en"` | `"en"`, `"ja"` or `"zh"`, the language of everything the TUI draws: notices, help, lists, badges. `lgtm --help`, config errors and what is sent to your agent stay as they are; the last is `[templates]`. The locale is not consulted |
 | `preview` | `true` | The panel beside a list: the pane picker shows the pane's own screen, the comment list the remark as it was written, the file lists the head of that file's diff. One key for all three - they are the same idea, and a reader who does not want a list explaining itself does not want it three times |
 | `fixed_list` | `true` | Hold the list's box at one size while the selection moves: it is sized for the tallest panel any row asks for, and a row with nothing to show leaves the panel empty. `false` fits the box to the row you are on - a long diff makes it taller, a file with nothing to preview drops the panel and narrows it - which covers less of the pane, at the cost of a box that moves under your eye |
 | `wrap` | `true` | Soft wrap long lines. `zw` toggles it for the session. A wrapped code line's continuation rows start under the line's own indentation, so a run-on reads as one statement rather than as the start of a new one |

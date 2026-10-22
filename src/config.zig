@@ -443,7 +443,7 @@ pub const Loader = struct {
                 } else if (std.mem.eql(u8, key, "language")) {
                     const s = self.wantString(src, line, key, value) orelse return;
                     self.cfg.ui.language = std.meta.stringToEnum(i18n.Lang, s) orelse {
-                        self.note(src, line, "ui.language must be \"en\" or \"ja\", not \"{s}\"", .{s});
+                        self.note(src, line, "ui.language must be \"en\", \"ja\" or \"zh\", not \"{s}\"", .{s});
                         return;
                     };
                 } else if (std.mem.eql(u8, key, "icons")) {
@@ -883,7 +883,7 @@ pub const starter =
     \\# expand_lines = 10         # lines K and J pull in around a hunk
     \\
     \\# [ui]
-    \\# language = "en"           # "en" or "ja", the language the TUI speaks
+    \\# language = "en"           # "en", "ja" or "zh", the language the TUI speaks
     \\# icons = "unicode"         # "unicode", "ascii", or "nerd" (patched font)
     \\# comments = "marker"       # "marker" is the gutter dot, "inline" the text
     \\# compose = "bottom"        # "bottom", "top", or "centre"

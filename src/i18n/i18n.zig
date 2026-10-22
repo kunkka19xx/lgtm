@@ -5,7 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-pub const Lang = enum { en, ja };
+pub const Lang = enum { en, ja, zh };
 
 pub var lang: Lang = .en;
 
@@ -17,11 +17,15 @@ pub fn catalog(comptime l: Lang) ?Map {
     return switch (l) {
         .en => null,
         .ja => ja_map,
+        .zh => zh_map,
     };
 }
 
 pub const ja_entries = @import("ja.zig").entries;
 const ja_map = Map.initComptime(ja_entries);
+
+pub const zh_entries = @import("zh.zig").entries;
+const zh_map = Map.initComptime(zh_entries);
 
 const max_args = 32;
 
@@ -221,8 +225,10 @@ test "a translation may reorder and drop what it marks" {
 
 test "every catalog entry formats against its english" {
     @setEvalBranchQuota(1 << 24);
-    inline for (comptime ja_entries) |e| {
-        _ = comptime rewrite(e[0], e[1], countArgs(e[0]));
+    inline for (.{ ja_entries, zh_entries }) |entries| {
+        inline for (comptime entries) |e| {
+            _ = comptime rewrite(e[0], e[1], countArgs(e[0]));
+        }
     }
 }
 

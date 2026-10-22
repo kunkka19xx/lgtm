@@ -36,7 +36,7 @@ pub fn main(init: std.process.Init) !u8 {
     var failed: usize = 0;
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer seen.deinit(gpa);
-    inline for (.{.{ "ja", i18n.ja_entries }}) |cat| {
+    inline for (.{ .{ "ja", i18n.ja_entries }, .{ "zh", i18n.zh_entries } }) |cat| {
         for (cat[1]) |e| {
             if (!literals.contains(e[0])) {
                 std.debug.print("check_i18n: {s}: no source string \"{s}\"\n", .{ cat[0], e[0] });
