@@ -110,6 +110,7 @@ lgtm risk      # did the agent quietly delete a test, or skip one? exits 1 if so
 exit code and all. `tmux` is optional: without it, references go to
 the clipboard over OSC 52, which works over SSH.
 
+<!-- hidden until the lgte app is public
 ## From your phone
 
 Walk away and keep talking to your agents. With `lgte` version (inprogress), and Tailscale on both ends:
@@ -123,6 +124,7 @@ Scan the code it prints. The phone lists every agent on the machine, the one
 waiting for you first, shows each one's screen and takes your replies, and
 reviews the diff the same way this pane does, comments included.
 Nothing goes through a cloud service. [Guide](docs/GUIDE.md#from-your-phone).
+-->
 
 ## Configure
 

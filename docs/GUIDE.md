@@ -334,11 +334,13 @@ comment rather than a line, and it stays behind when the overlay closes, so
 the request opens there too, which is what makes `r` reachable on it: `<CR>` is
 the edit, one key rather than none.
 
+<!-- hidden until the lgte app is public
 A remark that is on no request - one a phone left - still opens in the box
 directly, titled `@author path:line - VIEW`. Somebody else's you cannot edit or
 delete, because a changed copy here would say something its author never wrote.
 Nothing there is typed, so the letters are keys: the vim motions read it, and
 `<Esc>` or `q` closes.
+-->
 
 **`r` replies.** A review is a conversation, so the overlay is not only a
 reading view: `r` on any message opens an empty box aimed at the thread, titled
@@ -560,6 +562,7 @@ large: `PNG image | 1200x630 | 8.5 KB`.
 
 ---
 
+<!-- hidden until the lgte app is public
 ## From your phone
 
 Leave the desk and keep talking to the agent: read what it says, reply, and
@@ -684,6 +687,7 @@ the time, the device and the pane.
 | `lgtm agent` | yes | yes | from its screen |
 
 ---
+-->
 
 ## Every key
 
@@ -892,6 +896,8 @@ review with its own `.gitignore`:
 | `.lgtm/review-N.md` | what `<C-s>` wrote |
 | `.lgtm/state.json` | the session, the turn count, where you read to |
 | `.lgtm/config.toml` | this repository's settings, if you commit one |
+
+<!-- hidden until the lgte app is public
 | `.lgtm/phone.jsonl` | the phone's comments |
 | `.lgtm/phone-review-N.md` | what the phone's Send wrote |
 | `.lgtm/phone` | the phone attached right now, if one is |
@@ -899,6 +905,7 @@ review with its own `.gitignore`:
 The phone's pairing token and its audit log are the only things kept outside a
 repository, in `~/.local/state/lgtm/` as `serve-token` and `serve.log`,
 because they belong to the machine.
+-->
 
 Kill `lgtm` and restart it; you lose scroll position and nothing else.
 
